@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from camera.camera_manager import CameraManager
-from camera.base_camera import BaseCamera
+from camera.cameras.base_camera import BaseCamera
 from logger import info, error, warning, debug
 from forgeConfig import ForgeSettingsManager, ForgeSettings
 

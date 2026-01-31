@@ -11,6 +11,7 @@ from enum import Enum
 from typing import List, Optional, Dict, Any
 from logger import error, exception, debug
 
+from camera.cameras.amscope_camera import AmscopeCamera
 
 class CameraType(Enum):
     """Supported camera types"""
@@ -98,7 +99,6 @@ class AmscopeEnumerator(CameraEnumerator):
             return self._sdk is not None
             
         try:
-            from camera.amscope_camera import AmscopeCamera
             
             # Ensure SDK is loaded
             debug("Loading Amscope SDK...")
@@ -147,8 +147,6 @@ class AmscopeEnumerator(CameraEnumerator):
         cameras = []
         
         try:
-            # Get SDK (should be loaded now)
-            from camera.amscope_camera import AmscopeCamera
             sdk = AmscopeCamera._get_sdk()
             
             if sdk is None:

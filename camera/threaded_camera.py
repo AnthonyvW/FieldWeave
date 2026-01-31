@@ -10,7 +10,7 @@ from functools import wraps
 
 from PySide6.QtCore import QObject, Signal
 
-from camera.base_camera import BaseCamera
+from camera.cameras.base_camera import BaseCamera
 from logger import info, error, warning, debug, exception
 
 T = TypeVar('T', bound=BaseCamera)

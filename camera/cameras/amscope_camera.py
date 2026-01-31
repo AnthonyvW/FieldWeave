@@ -9,7 +9,7 @@ import ctypes
 import numpy as np
 import threading
 import gc
-from camera.base_camera import BaseCamera, CameraResolution, CameraInfo
+from camera.cameras.base_camera import BaseCamera, CameraResolution, CameraInfo
 from logger import get_logger
 
 # Module-level reference to the loaded SDK
@@ -959,25 +959,6 @@ class AmscopeCamera(BaseCamera):
             return self._hcam.get_FrameRate()
         except self._get_sdk().HRESULTException:
             return 0, 0, 0
-    
-    @classmethod
-    def enumerate_cameras(cls) -> list[CameraInfo]:
-        """Enumerate available Amscope cameras"""
-        # Ensure SDK is loaded
-        if not cls._sdk_loaded:
-            cls.ensure_sdk_loaded()
-        
-        amcam = cls._get_sdk_static()
-        cameras = []
-        arr = amcam.Amcam.EnumV2()
-        for cam in arr:
-            info = CameraInfo(
-                id=cam.id,
-                displayname=cam.displayname,
-                model=cam.model
-            )
-            cameras.append(info)
-        return cameras
     
     @staticmethod
     def _get_sdk_static():

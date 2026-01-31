@@ -8,8 +8,8 @@ from __future__ import annotations
 from typing import Optional, List, Callable
 from PySide6.QtCore import QObject, Signal
 
-from camera.base_camera import BaseCamera
-from camera.amscope_camera import AmscopeCamera
+from camera.cameras.base_camera import BaseCamera
+from camera.cameras.amscope_camera import AmscopeCamera
 from camera.threaded_camera import ThreadedCamera
 from camera.camera_enumerator import (
     CameraEnumerator,
@@ -166,7 +166,7 @@ class CameraManager(QObject):
         # Set camera info if the camera supports it
         if hasattr(camera, 'set_camera_info'):
             # Create the old-style CameraInfo from our new CameraInfo
-            from camera.base_camera import CameraInfo as OldCameraInfo
+            from camera.cameras.base_camera import CameraInfo as OldCameraInfo
             old_camera_info = OldCameraInfo(
                 id=camera_info.device_id,
                 displayname=camera_info.display_name,

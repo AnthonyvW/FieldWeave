@@ -129,7 +129,7 @@ class BaseCamera(ABC):
         pass
     
     @abstractmethod
-    def pull_image(self, buffer: bytes, bits_per_pixel: int = 24) -> bool:
+    def pull_image(self, buffer: bytes, bits_per_pixel: int = 24, timeout_ms: int = 1000) -> bool:
         """
         Pull the latest image into provided buffer
         
@@ -341,17 +341,6 @@ class BaseCamera(ABC):
         """
         pass
     
-    @staticmethod
-    @abstractmethod
-    def enumerate_cameras() -> list[CameraInfo]:
-        """
-        Enumerate available cameras
-        
-        Returns:
-            List of available camera information
-        """
-        pass
-    
     @abstractmethod
     def get_camera_metadata(self) -> Dict[str, Any]:
         """
@@ -439,6 +428,14 @@ class BaseCamera(ABC):
         """
         pass
     
+    @abstractmethod
+    def calculate_buffer_size(width: int, height: int, bits_per_pixel: int) -> int:
+        pass
+
+    @abstractmethod
+    def calculate_stride(width: int, bits_per_pixel: int) -> int:
+        pass
+
     def save_image(
         self,
         image_data: np.ndarray,
