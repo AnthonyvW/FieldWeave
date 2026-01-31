@@ -65,112 +65,112 @@ class CameraPreview(QFrame):
         """Try to initialize and connect to camera"""
         self._init_timer.stop()
         
-        # Get camera from app context
+        # Get camera manager from app context
         ctx = get_app_context()
-        self._camera: BaseCamera | None = ctx.camera
+        camera_manager = ctx.camera_manager
         
-        if self._camera is None:
-            self._video_label.setText("No camera available - SDK not loaded")
-            error("No camera available - SDK not loaded")
-            return
-        
-        # Get the underlying camera to access class methods
-        base_camera_class = type(self._camera.underlying_camera)
-        
-        # Try to enumerate and connect to first camera
-        try:
-            cameras = base_camera_class.enumerate_cameras()
+        # Check if camera is already active
+        if camera_manager.has_active_camera:
+            info("Preview: Using active camera")
+            self._camera = ctx.camera
             
-            if len(cameras) == 0:
-                self._video_label.setText("No camera detected")
-                if not self._no_camera_logged:
-                    warning("No camera connected")
-                    self._no_camera_logged = True
-                # Retry in a few seconds
-                self._init_timer.start(3000)
-                return
-            
-            # Camera found, reset flag
-            self._no_camera_logged = False
-            
-            # Use first camera
-            self._camera_info = cameras[0]
-            info(f"Found camera: {self._camera_info.displayname}")
-            self._open_camera()
-            
-        except Exception as e:
-            self._video_label.setText(f"Camera error: {str(e)}")
-            error(f"Camera initialization error: {e}")
-            import traceback
-            error(traceback.format_exc())
-    
-    def _open_camera(self):
-        """Open and start streaming from camera"""
-        if not self._camera or not self._camera_info:
-            return
-        
-        try:
-            # Set camera info on underlying camera
-            if hasattr(self._camera.underlying_camera, 'set_camera_info'):
-                self._camera.underlying_camera.set_camera_info(self._camera_info)
-            
-            # Open camera (async with callback)
-            def on_open_complete(success: bool, result):
-                if not success:
-                    self._video_label.setText("Failed to open camera")
-                    error("Failed to open camera")
-                    return
-                
-                # Camera opened successfully
+            if self._camera:
+                # Get camera info from manager
+                self._camera_info = camera_manager.active_camera_info
                 self._start_streaming()
-            
-            # Use async open
-            self._camera.open(self._camera_info.id, on_complete=on_open_complete)
-            
-        except Exception as e:
-            self._video_label.setText(f"Error: {str(e)}")
-            error(f"Camera open error: {e}")
-            import traceback
-            error(traceback.format_exc())
+            else:
+                error("Preview: Camera manager says camera is active but ctx.camera is None")
+                self._init_timer.start(3000)
+            return
+        
+        # No active camera, enumerate and open
+        info("Preview: No active camera, enumerating...")
+        cameras = camera_manager.enumerate_cameras()
+        
+        if not cameras:
+            self._video_label.setText("No camera detected")
+            if not self._no_camera_logged:
+                warning("Preview: No cameras found")
+                self._no_camera_logged = True
+            # Retry in a few seconds
+            self._init_timer.start(3000)
+            return
+        
+        # Camera found, reset flag
+        self._no_camera_logged = False
+        
+        # Open first camera
+        if camera_manager.switch_camera(cameras[0]):
+            info(f"Preview: Opened camera: {cameras[0]}")
+            self._camera = ctx.camera
+            self._camera_info = cameras[0]
+            self._start_streaming()
+        else:
+            self._video_label.setText("Failed to open camera")
+            error("Preview: Failed to open camera")
+            # Retry
+            self._init_timer.start(3000)
     
     def _start_streaming(self):
         """Start camera streaming after camera is opened"""
         if not self._camera:
+            error("Preview: Cannot start streaming - no camera")
             return
         
         try:
+            # Get underlying camera
+            base_camera = self._camera.underlying_camera
+            
             # Get current resolution from underlying camera
-            res_index, width, height = self._camera.underlying_camera.get_current_resolution()
+            res_index, width, height = base_camera.get_current_resolution()
+            
+            # If no resolution set (0x0), set to first resolution
+            if width == 0 or height == 0:
+                info("Preview: Setting default resolution...")
+                
+                # Get available resolutions
+                resolutions = base_camera.get_resolutions()
+                if not resolutions:
+                    error("Preview: No resolutions available")
+                    self._video_label.setText("Camera has no resolutions available")
+                    return
+                
+                # Use first resolution (typically highest quality)
+                if not base_camera.set_resolution(0):
+                    error("Preview: Failed to set resolution")
+                    self._video_label.setText("Failed to set camera resolution")
+                    return
+                
+                # Get resolution again after setting
+                res_index, width, height = base_camera.get_current_resolution()
             
             self._img_width = width
             self._img_height = height
             
             # Calculate buffer size using base camera class method
-            base_camera_class = type(self._camera.underlying_camera)
+            base_camera_class = type(base_camera)
             buffer_size = base_camera_class.calculate_buffer_size(width, height, 24)
             self._img_buffer = bytes(buffer_size)
             
-            info("Starting camera stream...")
             # Start capture - use underlying camera directly
-            success = self._camera.underlying_camera.start_capture(
+            success = base_camera.start_capture(
                 self._camera_callback,
                 self
             )
             
             if not success:
-                error("start_capture returned False")
-                self._camera.underlying_camera.close()
+                error("Preview: start_capture returned False")
                 self._video_label.setText("Failed to start camera stream")
                 return
             
             self._is_streaming = True
             # Clear text when streaming starts
             self._video_label.setText("")
-            info(f"Streaming started: {self._camera_info.displayname} ({width}x{height})")
+            info(f"Preview: Streaming started ({width}x{height})")
             
         except Exception as e:
             self._video_label.setText(f"Error: {str(e)}")
-            error(f"Camera start streaming error: {e}")
+            error(f"Preview: Camera start streaming error: {e}")
             import traceback
             error(traceback.format_exc())
     
@@ -240,12 +240,12 @@ class CameraPreview(QFrame):
                     )
                     self._video_label.setPixmap(QPixmap.fromImage(scaled_image))
         except Exception as e:
-            error(f"Error handling image: {e}")
+            error(f"Preview: Error handling image: {e}")
     
     def _handle_error(self):
         """Handle camera error"""
         self._video_label.setText("Camera error occurred")
-        error("Camera error occurred")
+        error("Preview: Camera error occurred")
         self._close_camera()
         # Try to reconnect
         self._init_timer.start(3000)
@@ -253,7 +253,7 @@ class CameraPreview(QFrame):
     def _handle_disconnected(self):
         """Handle camera disconnection"""
         self._video_label.setText("Camera disconnected")
-        warning("Camera disconnected")
+        warning("Preview: Camera disconnected")
         self._close_camera()
         # Try to reconnect
         self._init_timer.start(3000)
@@ -265,18 +265,17 @@ class CameraPreview(QFrame):
         if self._camera:
             try:
                 # Stop capture first (use underlying camera for immediate effect)
-                info("Stopping camera capture...")
+                info("Preview: Stopping camera capture...")
                 if self._camera.underlying_camera.is_open:
                     self._camera.underlying_camera.stop_capture()
                 
-                # Close camera (async is fine, we're shutting down)
-                info("Closing camera...")
-                self._camera.close()
+                info("Preview: Stopped using camera")
                 
             except Exception as e:
-                error(f"Error closing camera: {e}")
+                error(f"Preview: Error stopping camera: {e}")
         
         self._img_buffer = None
+        self._camera = None
     
     def closeEvent(self, event):
         """Handle widget close event"""
@@ -285,12 +284,12 @@ class CameraPreview(QFrame):
     
     def cleanup(self):
         """Cleanup resources when widget is being destroyed"""
-        info("Preview cleanup starting...")
+        info("Preview: cleanup starting...")
         
         # Stop the initialization timer first
         self._init_timer.stop()
         
-        # Close camera
+        # Stop using camera
         self._close_camera()
         
         info("Preview cleanup complete")

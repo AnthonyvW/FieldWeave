@@ -6,14 +6,15 @@ Provides a singleton pattern for accessing camera and other shared resources.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from camera.amscope_camera import AmscopeCamera
-from camera.threaded_camera import ThreadedCamera
-from logger import info, error, warning
+from camera.camera_manager import CameraManager
+from camera.base_camera import BaseCamera
+from logger import info, error, warning, debug
 from forgeConfig import ForgeSettingsManager, ForgeSettings
 
 if TYPE_CHECKING:
     from UI.settings.settings_main import SettingsDialog
     from UI.widgets.toast_widget import ToastManager
+
 
 class AppContext:
     """
@@ -31,8 +32,7 @@ class AppContext:
         if self._initialized:
             return
             
-        self._camera: AmscopeCamera | None = None
-        self._camera_initialized = False
+        self._camera_manager: CameraManager | None = None
         self._settings_dialog: SettingsDialog | None = None
         self._settings_manager: ForgeSettingsManager | None = None
         self._settings: ForgeSettings | None = None
@@ -42,13 +42,36 @@ class AppContext:
         
         # Load settings
         self._load_settings()
+        
+        # Initialize camera manager
+        self._initialize_camera_manager()
     
     @property
-    def camera(self) -> AmscopeCamera | None:
-        """Get the camera instance, initializing if needed"""
-        if not self._camera_initialized:
-            self._initialize_camera()
-        return self._camera
+    def camera_manager(self) -> CameraManager:
+        """
+        Get the camera manager instance.
+        Use this to enumerate cameras, switch cameras, etc.
+        """
+        if self._camera_manager is None:
+            self._initialize_camera_manager()
+        return self._camera_manager
+    
+    @property
+    def camera(self) -> BaseCamera | None:
+        """
+        Get the currently active camera instance.
+        Returns None if no camera is active.
+        
+        This is a convenience property that delegates to camera_manager.
+        """
+        if self._camera_manager is None:
+            return None
+        return self._camera_manager.active_camera
+    
+    @property
+    def has_camera(self) -> bool:
+        """Check if there is an active camera"""
+        return self.camera is not None
     
     @property
     def settings(self) -> ForgeSettings | None:
@@ -102,50 +125,40 @@ class AppContext:
             self._settings = ForgeSettings()
             warning("Using default Forge settings")
     
-    def _initialize_camera(self):
-        """Initialize the camera subsystem"""
-        if self._camera_initialized:
+    def _initialize_camera_manager(self):
+        """Initialize the camera manager and open first available camera"""
+        if self._camera_manager is not None:
             return
-            
+        
         try:
-            # Load SDK
-            AmscopeCamera.ensure_sdk_loaded()
+            info("Initializing camera manager...")
+            self._camera_manager = CameraManager()
             
-            # Create camera instance wrapped in threaded wrapper
-            base_camera = AmscopeCamera()
-            self._camera: AmscopeCamera = ThreadedCamera(base_camera)
+            # Enumerate cameras
+            info("Enumerating cameras...")
+            cameras = self._camera_manager.enumerate_cameras()
             
-            # Start the camera thread
-            self._camera.start_thread()
-            
-            self._camera_initialized = True
-            
+            if cameras:
+                # Auto-open the first camera
+                info("Auto-opening first available camera...")
+                if self._camera_manager.open_first_available():
+                    debug("Camera opened successfully during initialization")
+                else:
+                    warning("Failed to auto-open first camera")
+            else:
+                warning("No cameras found during enumeration")
+                
         except Exception as e:
-            error(f"Failed to initialize camera subsystem: {e}")
-            self._camera = None
-            self._camera_initialized = True
+            error(f"Failed to initialize camera manager: {e}")
+            self._camera_manager = None
     
     def cleanup(self):
         """Cleanup resources"""
-        if self._camera:
-            info("Closing camera")
-            result = self._camera.close(wait=True)
-            
-            if result is not None:
-                success, _ = result
-                if success:
-                    info("Camera closed successfully")
-                else:
-                    warning("Camera close returned failure")
-            else:
-                # None means close was called directly (not through thread)
-                # This is fine if camera was already closed
-                info("Camera close completed")
-
-            self._camera.stop_thread(wait=True)
+        if self._camera_manager:
+            info("Cleaning up camera manager")
+            self._camera_manager.cleanup()
         
-        self._camera = None
-        self._camera_initialized = False
+        self._camera_manager = None
         self._settings_dialog = None
         self._settings_manager = None
         self._settings = None
