@@ -48,6 +48,9 @@ class AppLogger:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         log_file = self._log_dir / f"Forge_{timestamp}.log"
         
+        # Store current log file path
+        self._current_log_file = log_file
+        
         # Rotating file handler - 10MB max, keep 5 backups
         file_handler = RotatingFileHandler(
             log_file,
@@ -66,6 +69,51 @@ class AppLogger:
         
         self._logger.addHandler(file_handler)
         self._file_handler = file_handler
+        
+        # Clean up old log files before creating new one
+        self._cleanup_old_logs()
+    
+    def _cleanup_old_logs(self):
+        """
+        Keep only the last 10 log file sets.
+        Each set includes the main log and its rotated backups (.1, .2, etc).
+        """
+        try:
+            # Get all base log files (without .1, .2, etc extensions)
+            log_files = sorted(
+                [f for f in self._log_dir.glob("Forge_*.log") 
+                 if not f.stem.split('.')[-1].isdigit()],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
+            )
+            
+            # Keep only the 10 most recent sets
+            max_log_sets = 10
+            if len(log_files) >= max_log_sets:
+                deleted_files = []
+                
+                # Delete older log sets (beyond the 10 most recent)
+                for old_log in log_files[max_log_sets:]:
+                    # Delete the main log file
+                    if old_log.exists():
+                        old_log.unlink(missing_ok=True)
+                        deleted_files.append(old_log.name)
+                    
+                    # Delete all rotated versions (.1, .2, .3, etc)
+                    for rotated in self._log_dir.glob(f"{old_log.name}.*"):
+                        if rotated.suffix[1:].isdigit():  # Check if extension is a number
+                            rotated.unlink(missing_ok=True)
+                            deleted_files.append(rotated.name)
+                
+                # Log the cleanup action
+                if deleted_files:
+                    files_list = ", ".join(deleted_files)
+                    self._logger.info(f"Log cleanup: Deleted old log files: {files_list}")
+        
+        except Exception as e:
+            # Don't let cleanup errors break logging
+            print(f"Error cleaning up old logs: {e}")
+            self._logger.error(f"Error cleaning up old logs: {e}")
     
     def _setup_console_handler(self):
         """Setup console handler for stdout"""
@@ -100,6 +148,10 @@ class AppLogger:
     def get_log_directory(self) -> Path:
         """Get current log directory"""
         return self._log_dir
+    
+    def get_current_log_file(self) -> Optional[Path]:
+        """Get current log file path"""
+        return getattr(self, '_current_log_file', None)
     
     def register_callback(self, callback: Callable[[str, str], None]):
         """
