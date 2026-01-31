@@ -3,6 +3,8 @@ Centralized logging system for the application.
 Provides logging to both file and UI components.
 """
 
+from __future__ import annotations
+
 import logging
 import sys
 from pathlib import Path
@@ -15,7 +17,7 @@ class AppLogger:
     """
     Singleton application logger with file and UI output.
     """
-    _instance: 'AppLogger' | None = None
+    _instance: AppLogger | None = None
     _initialized = False
     
     def __new__(cls):

@@ -3,6 +3,8 @@ Application context for managing shared resources and state.
 Provides a singleton pattern for accessing camera and other shared resources.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 from camera.amscope_camera import AmscopeCamera
 from camera.threaded_camera import ThreadedCamera
@@ -13,12 +15,11 @@ if TYPE_CHECKING:
     from UI.settings.settings_main import SettingsDialog
     from UI.widgets.toast_widget import ToastManager
 
-
 class AppContext:
     """
     Singleton application context managing shared resources.
     """
-    _instance: 'AppContext' | None = None
+    _instance: AppContext | None = None
     
     def __new__(cls):
         if cls._instance is None:
@@ -32,10 +33,10 @@ class AppContext:
             
         self._camera: AmscopeCamera | None = None
         self._camera_initialized = False
-        self._settings_dialog: 'SettingsDialog' | None = None
+        self._settings_dialog: SettingsDialog | None = None
         self._settings_manager: ForgeSettingsManager | None = None
         self._settings: ForgeSettings | None = None
-        self._toast_manager: 'ToastManager' | None = None
+        self._toast_manager: ToastManager | None = None
         self._main_window = None
         self._initialized = True
         
@@ -55,12 +56,12 @@ class AppContext:
         return self._settings
     
     @property
-    def settings_dialog(self) -> 'SettingsDialog' | None:
+    def settings_dialog(self) -> SettingsDialog | None:
         """Get the settings dialog instance"""
         return self._settings_dialog
     
     @property
-    def toast(self) -> 'ToastManager' | None:
+    def toast(self) -> ToastManager | None:
         """Get the toast manager instance"""
         return self._toast_manager
     
@@ -72,7 +73,7 @@ class AppContext:
             from UI.widgets.toast_widget import ToastManager
             self._toast_manager = ToastManager(window)
     
-    def register_settings_dialog(self, dialog: 'SettingsDialog'):
+    def register_settings_dialog(self, dialog: SettingsDialog):
         """Register the settings dialog instance"""
         self._settings_dialog = dialog
     
