@@ -6,15 +6,18 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QPushButton, QLineEdit, QLabel, QFileDialog, QMessageBox, QComboBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Slot, Signal
 from logger import info, error, warning
 from app_context import get_app_context
 
 
 class CameraControlsWidget(QWidget):
     """
-    Widget for camera controls including photo capture and file management.
+    Camera-agnostic widget for camera controls including photo capture and file management.
     """
+    
+    # Signal emitted when photo capture completes
+    photo_captured = Signal(bool, str)  # success, filepath
     
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -35,6 +38,9 @@ class CameraControlsWidget(QWidget):
         
         # Setup UI
         self._setup_ui()
+        
+        # Connect signal to handler
+        self.photo_captured.connect(self._on_photo_captured)
         
     def _setup_ui(self):
         """Setup the user interface"""
@@ -168,12 +174,10 @@ class CameraControlsWidget(QWidget):
                 subprocess.run(['xdg-open', folder_path])
             
             info(f"Opened folder: {folder_path}")
-            if toast:
-                toast.info("Opening in file explorer...", title="Opening Folder", duration=10000)
+            toast.info("Opening in file explorer...", title="Opening Folder", duration=10000)
         except Exception as e:
             error(f"Failed to open folder: {e}")
-            if toast:
-                toast.error(f"{str(e)}", title="Failed to Open Folder")
+            toast.error(f"{str(e)}", title="Failed to Open Folder")
             QMessageBox.warning(
                 self,
                 "Error",
@@ -207,25 +211,26 @@ class CameraControlsWidget(QWidget):
         
         return self._current_folder / filename
     
+    @Slot()
     def _take_photo(self):
-        """Capture a still photo from the camera"""
+        """
+        Capture a still photo from the camera.
+        Works with any camera implementation that supports capture_and_save_still.
+        """
         ctx = get_app_context()
         toast = ctx.toast
         
         try:
-            # Get camera from app context
             camera = ctx.camera
             
             if camera is None:
                 warning("Attempted to capture photo but camera is not available")
-                if toast:
-                    toast.warning("Camera not available", title="Camera Error")
+                toast.warning("Camera not available", title="Camera Error")
                 return
             
-            if not camera.is_open:
+            if not camera.underlying_camera.is_open:
                 warning("Attempted to capture photo but camera is not open")
-                if toast:
-                    toast.warning("Please open the camera first", title="Camera Not Open")
+                toast.warning("Please open the camera first", title="Camera Not Open")
                 return
             
             # Get filepath
@@ -234,32 +239,58 @@ class CameraControlsWidget(QWidget):
             # Ensure folder exists
             self._ensure_output_folder()
             
-            info(f"Capturing photo to: {filepath}")
-            if toast:
-                toast.info("Please wait while the image is captured...", title="Capturing Image")
+            info(f"Capturing still image to: {filepath}")
+            toast.info("Capturing high-resolution image...", title="Capturing Image")
             
-            # Capture still image (highest resolution)
-            success = camera.capture_and_save_still(
+            # Disable button while capturing
+            self._capture_button.setEnabled(False)
+            
+            # Define completion callback - runs on camera thread!
+            def on_capture_complete(success: bool, result):
+                """Called when capture completes (on camera thread)"""
+                # Emit signal to handle UI updates on main thread
+                self.photo_captured.emit(success, str(filepath))
+            
+            # Capture and save still image asynchronously at highest resolution
+            # This returns immediately - UI stays responsive!
+            camera.capture_and_save_still(
                 filepath=filepath,
                 resolution_index=0,  # Highest resolution
-                additional_metadata={"timestamp": datetime.now().isoformat()},
-                timeout_ms=5000
+                additional_metadata={
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "still_capture"
+                },
+                timeout_ms=5000,
+                on_complete=on_capture_complete
             )
-            
-            if success:
-                info(f"Photo saved successfully: {filepath}")
-                if toast:
-                    toast.success(f"Saved to: {filepath.name}", title="Image Captured", duration=10000)
-                # Clear custom filename after successful capture
-                self._filename_edit.clear()
-            else:
-                error(f"Failed to capture photo to: {filepath}")
-                if toast:
-                    toast.error("Unable to capture image from camera", title="Capture Failed")
                 
         except Exception as e:
             error(f"Error capturing photo: {e}")
-            if toast:
-                toast.error(f"{str(e)}", title="Capture Error")
+            toast.error(f"{str(e)}", title="Capture Error")
             import traceback
             error(traceback.format_exc())
+            # Re-enable button on error
+            self._capture_button.setEnabled(True)
+    
+    @Slot(bool, str)
+    def _on_photo_captured(self, success: bool, filepath: str):
+        """
+        Handle photo capture completion on UI thread.
+        This slot is called via signal from the camera thread.
+        """
+        ctx = get_app_context()
+        toast = ctx.toast
+        
+        # Re-enable button
+        self._capture_button.setEnabled(True)
+        
+        if success:
+            info(f"Photo captured and saved successfully: {filepath}")
+            toast.success(f"Saved to: {Path(filepath).name}", 
+                        title="Image Captured", 
+                        duration=10000)
+            # Clear custom filename after successful capture
+            self._filename_edit.clear()
+        else:
+            error(f"Failed to capture photo to: {filepath}")
+            toast.error("Unable to capture image from camera", title="Capture Failed")

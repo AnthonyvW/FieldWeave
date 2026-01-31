@@ -1,41 +1,44 @@
 from __future__ import annotations
 
 from typing import Optional, Any
-from PySide6.QtCore import Qt, Signal, QTimer
+import numpy as np
+from PySide6.QtCore import Qt, Signal, QTimer, Slot
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy
 
 from app_context import get_app_context
-from camera.amscope_camera import AmscopeCamera
-from camera.base_camera import BaseCamera, CameraInfo
-from logger import get_logger
-
+from camera.base_camera import BaseCamera
+from logger import info, error, warning
 
 class CameraPreview(QFrame):
-    """Camera Preview Area with live streaming"""
+    """
+    Camera-agnostic Preview Area with live streaming.
+    """
     
     # Signal for camera events (thread-safe)
     camera_event = Signal(int)
+    
+    # Signal when new frame is available for capture
+    frame_ready = Signal(np.ndarray)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         
         # Camera state
-        self._camera: Optional[BaseCamera] = None
-        self._camera_info: Optional[CameraInfo] = None
+        self._camera: BaseCamera | None = None
+        self._camera_info = None
         self._img_width = 0
         self._img_height = 0
         self._img_buffer: Optional[bytes] = None
         self._is_streaming = False
-        self._no_camera_logged = False  # Track if we've already logged no camera message
+        self._no_camera_logged = False
         
         # UI elements
         self._video_label = QLabel()
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._video_label.setScaledContents(False)
-        self._video_label.setMinimumSize(1, 1)  # Allow shrinking
-        from PySide6.QtWidgets import QSizePolicy
+        self._video_label.setMinimumSize(1, 1)
         self._video_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self._video_label.setStyleSheet("color: #888; font-size: 16px;")
         self._video_label.setText("Initializing camera...")
@@ -57,29 +60,31 @@ class CameraPreview(QFrame):
         # Start initialization
         self._init_timer.start(500)
     
+    @Slot()
     def _try_initialize_camera(self):
         """Try to initialize and connect to camera"""
         self._init_timer.stop()
         
-        logger = get_logger()
-        
         # Get camera from app context
         ctx = get_app_context()
-        self._camera = ctx.camera
+        self._camera: BaseCamera | None = ctx.camera
         
         if self._camera is None:
             self._video_label.setText("No camera available - SDK not loaded")
-            logger.error("No camera available - SDK not loaded")
+            error("No camera available - SDK not loaded")
             return
+        
+        # Get the underlying camera to access class methods
+        base_camera_class = type(self._camera.underlying_camera)
         
         # Try to enumerate and connect to first camera
         try:
-            cameras = AmscopeCamera.enumerate_cameras()
+            cameras = base_camera_class.enumerate_cameras()
             
             if len(cameras) == 0:
                 self._video_label.setText("No camera detected")
                 if not self._no_camera_logged:
-                    logger.warning("No camera connected")
+                    warning("No camera connected")
                     self._no_camera_logged = True
                 # Retry in a few seconds
                 self._init_timer.start(3000)
@@ -90,62 +95,84 @@ class CameraPreview(QFrame):
             
             # Use first camera
             self._camera_info = cameras[0]
+            info(f"Found camera: {self._camera_info.displayname}")
             self._open_camera()
             
         except Exception as e:
             self._video_label.setText(f"Camera error: {str(e)}")
-            logger.error(f"Camera initialization error: {e}")
+            error(f"Camera initialization error: {e}")
+            import traceback
+            error(traceback.format_exc())
     
     def _open_camera(self):
         """Open and start streaming from camera"""
         if not self._camera or not self._camera_info:
             return
         
-        # Don't re-open if already streaming
-        if self._is_streaming and self._camera.is_open:
-            return
-        
-        logger = get_logger()
-        
         try:
-            # Set camera info for Amscope camera
-            if isinstance(self._camera, AmscopeCamera):
-                self._camera.set_camera_info(self._camera_info)
+            # Set camera info on underlying camera
+            if hasattr(self._camera.underlying_camera, 'set_camera_info'):
+                self._camera.underlying_camera.set_camera_info(self._camera_info)
             
-            # Open camera
-            if not self._camera.open(self._camera_info.id):
-                self._video_label.setText("Failed to open camera")
-                logger.error("Failed to open camera")
-                return
+            # Open camera (async with callback)
+            def on_open_complete(success: bool, result):
+                if not success:
+                    self._video_label.setText("Failed to open camera")
+                    error("Failed to open camera")
+                    return
+                
+                # Camera opened successfully
+                self._start_streaming()
             
-            # Get current resolution
-            res_index, width, height = self._camera.get_current_resolution()
-            self._img_width = width
-            self._img_height = height
-            
-            # Allocate image buffer
-            if isinstance(self._camera, AmscopeCamera):
-                buffer_size = AmscopeCamera.calculate_buffer_size(width, height, 24)
-                self._img_buffer = bytes(buffer_size)
-            
-            # Enable auto exposure by default
-            self._camera.set_auto_exposure(True)
-            
-            # Start capture
-            if not self._camera.start_capture(self._camera_callback, self):
-                self._camera.close()
-                self._video_label.setText("Failed to start camera stream")
-                logger.error("Failed to start camera stream")
-                return
-            
-            self._is_streaming = True
-            # Clear text when streaming starts - video will show instead
-            self._video_label.setText("")
-            logger.info(f"Streaming: {self._camera_info.displayname} ({width}x{height})")
+            # Use async open
+            self._camera.open(self._camera_info.id, on_complete=on_open_complete)
             
         except Exception as e:
             self._video_label.setText(f"Error: {str(e)}")
-            logger.error(f"Camera open error: {e}")
+            error(f"Camera open error: {e}")
+            import traceback
+            error(traceback.format_exc())
+    
+    def _start_streaming(self):
+        """Start camera streaming after camera is opened"""
+        if not self._camera:
+            return
+        
+        try:
+            # Get current resolution from underlying camera
+            res_index, width, height = self._camera.underlying_camera.get_current_resolution()
+            
+            self._img_width = width
+            self._img_height = height
+            
+            # Calculate buffer size using base camera class method
+            base_camera_class = type(self._camera.underlying_camera)
+            buffer_size = base_camera_class.calculate_buffer_size(width, height, 24)
+            self._img_buffer = bytes(buffer_size)
+            
+            info("Starting camera stream...")
+            # Start capture - use underlying camera directly
+            success = self._camera.underlying_camera.start_capture(
+                self._camera_callback,
+                self
+            )
+            
+            if not success:
+                error("start_capture returned False")
+                self._camera.underlying_camera.close()
+                self._video_label.setText("Failed to start camera stream")
+                return
+            
+            self._is_streaming = True
+            # Clear text when streaming starts
+            self._video_label.setText("")
+            info(f"Streaming started: {self._camera_info.displayname} ({width}x{height})")
+            
+        except Exception as e:
+            self._video_label.setText(f"Error: {str(e)}")
+            error(f"Camera start streaming error: {e}")
+            import traceback
+            error(traceback.format_exc())
     
     @staticmethod
     def _camera_callback(event: int, context: Any):
@@ -156,21 +183,28 @@ class CameraPreview(QFrame):
         if isinstance(context, CameraPreview):
             context.camera_event.emit(event)
     
+    @Slot(int)
     def _on_camera_event(self, event: int):
         """Handle camera events in UI thread"""
-        if not self._camera or not self._camera.is_open:
+        if not self._camera:
             return
         
-        # Get event constants
-        if isinstance(self._camera, AmscopeCamera):
-            events = AmscopeCamera.get_event_constants()
-            
-            if event == events.IMAGE:
-                self._handle_image_event()
-            elif event == events.ERROR:
-                self._handle_error()
-            elif event == events.DISCONNECTED:
-                self._handle_disconnected()
+        # Get underlying camera
+        base_camera = self._camera.underlying_camera
+        
+        # Check if camera is open
+        if not base_camera.is_open:
+            return
+        
+        # Get event constants from camera
+        events = base_camera.get_event_constants()
+        
+        if event == events.IMAGE:
+            self._handle_image_event()
+        elif event == events.ERROR:
+            self._handle_error()
+        elif event == events.DISCONNECTED:
+            self._handle_disconnected()
     
     def _handle_image_event(self):
         """Handle new image from camera"""
@@ -178,38 +212,40 @@ class CameraPreview(QFrame):
             return
         
         try:
-            # Pull image into buffer
-            if self._camera.pull_image(self._img_buffer, 24):
+            # Pull image into buffer from underlying camera
+            if self._camera.underlying_camera.pull_image(self._img_buffer, 24):
+                # Calculate stride using base camera class method
+                base_camera_class = type(self._camera.underlying_camera)
+                stride = base_camera_class.calculate_stride(self._img_width, 24)
+                
                 # Create QImage from buffer
-                if isinstance(self._camera, AmscopeCamera):
-                    stride = AmscopeCamera.calculate_stride(self._img_width, 24)
-                    image = QImage(
-                        self._img_buffer,
-                        self._img_width,
-                        self._img_height,
-                        stride,
-                        QImage.Format.Format_RGB888
+                image = QImage(
+                    self._img_buffer,
+                    self._img_width,
+                    self._img_height,
+                    stride,
+                    QImage.Format.Format_RGB888
+                )
+                
+                # Make a deep copy for display
+                image = image.copy()
+                
+                # Scale to fit label while maintaining aspect ratio
+                if self._video_label.width() > 0 and self._video_label.height() > 0:
+                    scaled_image = image.scaled(
+                        self._video_label.width(),
+                        self._video_label.height(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.FastTransformation
                     )
-                    
-                    # Make a deep copy to avoid keeping reference to buffer
-                    image = image.copy()
-                    
-                    # Scale to fit label while maintaining aspect ratio
-                    if self._video_label.width() > 0 and self._video_label.height() > 0:
-                        scaled_image = image.scaled(
-                            self._video_label.width(),
-                            self._video_label.height(),
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.FastTransformation  # Use fast transformation to reduce memory
-                        )
-                        self._video_label.setPixmap(QPixmap.fromImage(scaled_image))
+                    self._video_label.setPixmap(QPixmap.fromImage(scaled_image))
         except Exception as e:
-            get_logger().error(f"Error handling image: {e}")
+            error(f"Error handling image: {e}")
     
     def _handle_error(self):
         """Handle camera error"""
         self._video_label.setText("Camera error occurred")
-        get_logger().error("Camera error occurred")
+        error("Camera error occurred")
         self._close_camera()
         # Try to reconnect
         self._init_timer.start(3000)
@@ -217,7 +253,7 @@ class CameraPreview(QFrame):
     def _handle_disconnected(self):
         """Handle camera disconnection"""
         self._video_label.setText("Camera disconnected")
-        get_logger().warning("Camera disconnected")
+        warning("Camera disconnected")
         self._close_camera()
         # Try to reconnect
         self._init_timer.start(3000)
@@ -225,10 +261,22 @@ class CameraPreview(QFrame):
     def _close_camera(self):
         """Close camera and cleanup"""
         self._is_streaming = False
+        
         if self._camera:
-            self._camera.close()
+            try:
+                # Stop capture first (use underlying camera for immediate effect)
+                info("Stopping camera capture...")
+                if self._camera.underlying_camera.is_open:
+                    self._camera.underlying_camera.stop_capture()
+                
+                # Close camera (async is fine, we're shutting down)
+                info("Closing camera...")
+                self._camera.close()
+                
+            except Exception as e:
+                error(f"Error closing camera: {e}")
+        
         self._img_buffer = None
-        # Don't clear the label here - let error messages show
     
     def closeEvent(self, event):
         """Handle widget close event"""
@@ -237,5 +285,12 @@ class CameraPreview(QFrame):
     
     def cleanup(self):
         """Cleanup resources when widget is being destroyed"""
+        info("Preview cleanup starting...")
+        
+        # Stop the initialization timer first
         self._init_timer.stop()
+        
+        # Close camera
         self._close_camera()
+        
+        info("Preview cleanup complete")

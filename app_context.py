@@ -3,10 +3,10 @@ Application context for managing shared resources and state.
 Provides a singleton pattern for accessing camera and other shared resources.
 """
 
-from typing import Optional, TYPE_CHECKING
-from camera.base_camera import BaseCamera
+from typing import TYPE_CHECKING
 from camera.amscope_camera import AmscopeCamera
-from logger import get_logger
+from camera.threaded_camera import ThreadedCamera
+from logger import info, error, warning
 from forgeConfig import ForgeSettingsManager, ForgeSettings
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ class AppContext:
     """
     Singleton application context managing shared resources.
     """
-    _instance: Optional['AppContext'] = None
+    _instance: 'AppContext' | None = None
     
     def __new__(cls):
         if cls._instance is None:
@@ -30,12 +30,12 @@ class AppContext:
         if self._initialized:
             return
             
-        self._camera: Optional[BaseCamera] = None
+        self._camera: AmscopeCamera | None = None
         self._camera_initialized = False
-        self._settings_dialog: Optional['SettingsDialog'] = None
-        self._settings_manager: Optional[ForgeSettingsManager] = None
-        self._settings: Optional[ForgeSettings] = None
-        self._toast_manager: Optional['ToastManager'] = None
+        self._settings_dialog: 'SettingsDialog' | None = None
+        self._settings_manager: ForgeSettingsManager | None = None
+        self._settings: ForgeSettings | None = None
+        self._toast_manager: 'ToastManager' | None = None
         self._main_window = None
         self._initialized = True
         
@@ -43,24 +43,24 @@ class AppContext:
         self._load_settings()
     
     @property
-    def camera(self) -> Optional[BaseCamera]:
+    def camera(self) -> AmscopeCamera | None:
         """Get the camera instance, initializing if needed"""
         if not self._camera_initialized:
             self._initialize_camera()
         return self._camera
     
     @property
-    def settings(self) -> Optional[ForgeSettings]:
+    def settings(self) -> ForgeSettings | None:
         """Get the Forge settings"""
         return self._settings
     
     @property
-    def settings_dialog(self) -> Optional['SettingsDialog']:
+    def settings_dialog(self) -> 'SettingsDialog' | None:
         """Get the settings dialog instance"""
         return self._settings_dialog
     
     @property
-    def toast(self) -> Optional['ToastManager']:
+    def toast(self) -> 'ToastManager' | None:
         """Get the toast manager instance"""
         return self._toast_manager
     
@@ -91,44 +91,58 @@ class AppContext:
     
     def _load_settings(self):
         """Load Forge application settings"""
-        logger = get_logger()
         try:
             self._settings_manager = ForgeSettingsManager()
             self._settings = self._settings_manager.load()
-            logger.info(f"Forge settings loaded - version: {self._settings.version}")
+            info(f"Forge settings loaded - version: {self._settings.version}")
         except Exception as e:
-            logger.error(f"Failed to load Forge settings: {e}")
+            error(f"Failed to load Forge settings: {e}")
             # Create default settings if loading fails
             self._settings = ForgeSettings()
-            logger.warning("Using default Forge settings")
+            warning("Using default Forge settings")
     
     def _initialize_camera(self):
         """Initialize the camera subsystem"""
         if self._camera_initialized:
             return
             
-        logger = get_logger()
         try:
             # Load SDK
             AmscopeCamera.ensure_sdk_loaded()
             
-            # Enable GigE support
-            AmscopeCamera.enable_gige(None, None)
+            # Create camera instance wrapped in threaded wrapper
+            base_camera = AmscopeCamera()
+            self._camera: AmscopeCamera = ThreadedCamera(base_camera)
             
-            # Create camera instance
-            self._camera = AmscopeCamera()
+            # Start the camera thread
+            self._camera.start_thread()
+            
             self._camera_initialized = True
             
-            logger.info("Camera subsystem initialized")
         except Exception as e:
-            logger.error(f"Failed to initialize camera subsystem: {e}")
+            error(f"Failed to initialize camera subsystem: {e}")
             self._camera = None
             self._camera_initialized = True
     
     def cleanup(self):
         """Cleanup resources"""
-        if self._camera and self._camera.is_open:
-            self._camera.close()
+        if self._camera:
+            info("Closing camera")
+            result = self._camera.close(wait=True)
+            
+            if result is not None:
+                success, _ = result
+                if success:
+                    info("Camera closed successfully")
+                else:
+                    warning("Camera close returned failure")
+            else:
+                # None means close was called directly (not through thread)
+                # This is fine if camera was already closed
+                info("Camera close completed")
+
+            self._camera.stop_thread(wait=True)
+        
         self._camera = None
         self._camera_initialized = False
         self._settings_dialog = None

@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Callable
+from typing import Callable
 from logging.handlers import RotatingFileHandler
 
 
@@ -15,7 +15,7 @@ class AppLogger:
     """
     Singleton application logger with file and UI output.
     """
-    _instance: Optional['AppLogger'] = None
+    _instance: 'AppLogger' | None = None
     _initialized = False
     
     def __new__(cls):
@@ -149,7 +149,7 @@ class AppLogger:
         """Get current log directory"""
         return self._log_dir
     
-    def get_current_log_file(self) -> Optional[Path]:
+    def get_current_log_file(self) -> Path | None:
         """Get current log file path"""
         return getattr(self, '_current_log_file', None)
     
@@ -216,7 +216,7 @@ class AppLogger:
 
 
 # Global logger instance
-_app_logger: Optional[AppLogger] = None
+_app_logger: AppLogger | None = None
 
 
 def get_logger() -> AppLogger:
