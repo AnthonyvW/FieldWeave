@@ -7,7 +7,7 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy
 
 from app_context import get_app_context
-from camera.base_camera import BaseCamera
+from camera.cameras.base_camera import BaseCamera
 from logger import info, error, warning
 
 class CameraPreview(QFrame):
