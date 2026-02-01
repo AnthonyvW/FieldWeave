@@ -293,7 +293,7 @@ class CameraManager(QObject):
         try:
             if camera_info.camera_type == CameraType.AMSCOPE:
                 # Create camera instance (does not open it yet)
-                camera = AmscopeCamera()
+                camera = AmscopeCamera(camera_info.model)
                 return camera
             
             elif camera_info.camera_type == CameraType.GENERIC_USB:

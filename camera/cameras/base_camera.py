@@ -4,15 +4,18 @@ All specific camera implementations should inherit from this class.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Callable, Any, Dict
-from dataclasses import dataclass
+from typing import Callable, Any, TYPE_CHECKING
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from datetime import datetime
 import numpy as np
 from PIL import Image, ExifTags
 from PIL.Image import Exif
-from PIL.TiffImagePlugin import ImageFileDirectory_v2
+from PIL import PngImagePlugin
 import json
+
+from logger import info, debug, error, exception
+from camera.settings.camera_settings import CameraSettings, CameraSettingsManager
 
 
 @dataclass
@@ -37,20 +40,27 @@ class BaseCamera(ABC):
     """
     Abstract base class for camera operations.
     Defines the interface that all camera implementations must follow.
-    
-    Each camera implementation should handle its own SDK loading in the
-    ensure_sdk_loaded() method. This is typically called once before any
-    camera operations.
     """
     
     # Class-level flag to track if SDK has been loaded
     _sdk_loaded = False
     
-    def __init__(self):
+    def __init__(self, model: str):
+        """
+        Initialize camera base class.
+        
+        Args:
+            model: Camera model identifier (e.g., "MU500", "MU3000")
+        """
+        self.model = model
         self._is_open = False
         self._callback = None
         self._callback_context = None
         
+        # Settings management (initialized after camera is opened)
+        self._settings_manager: CameraSettingsManager | None = None
+        self._settings: CameraSettings | None = None
+
     @property
     def is_open(self) -> bool:
         """Check if camera is currently open"""
@@ -58,7 +68,7 @@ class BaseCamera(ABC):
     
     @classmethod
     @abstractmethod
-    def ensure_sdk_loaded(cls, sdk_path: Optional[Path] = None) -> bool:
+    def ensure_sdk_loaded(cls, sdk_path: Path | None = None) -> bool:
         """
         Ensure the camera SDK is loaded and ready to use.
         
@@ -90,6 +100,195 @@ class BaseCamera(ABC):
             True if SDK is loaded, False otherwise
         """
         return cls._sdk_loaded
+    
+    def initialize_settings(self) -> None:
+        """
+        Initialize the settings system for this camera.
+        
+        This should be called after the camera is opened.
+        It creates a settings manager specific to this camera model,
+        loads the saved settings (or defaults if none exist), and
+        applies them to the camera hardware.
+        
+        Note:
+            The settings manager expects a CameraSettings subclass specific
+            to this camera model. The subclass must implement all abstract
+            methods from CameraSettings and provide metadata via get_metadata().
+        
+        Example:
+            >>> camera = MU500Camera()
+            >>> camera.open("camera_id")
+            >>> camera.initialize_settings()
+            >>> # Now camera.settings is available
+        """
+        
+        info(f"Initializing settings for {self.model}")
+        
+        # Create model-specific settings manager
+        self._settings_manager = CameraSettingsManager(model=self.model)
+        
+        # Load saved settings or create defaults
+        self._settings = self._settings_manager.load()
+        
+        # First refresh from camera to sync with current hardware state
+        self._settings.refresh_from_camera(self)
+        
+        # Then apply settings to camera hardware
+        self._settings.apply_to_camera(self)
+        
+        info("Settings initialized and applied to camera")
+    
+    @property
+    def settings(self) -> CameraSettings:
+        """
+        Get the current settings object.
+        
+        The GUI can use this to read and modify settings.
+        
+        Returns:
+            CameraSettings object for this camera
+            
+        Raises:
+            RuntimeError: If settings haven't been initialized yet
+            
+        Example:
+            >>> # GUI code
+            >>> settings = camera.settings
+            >>> settings.set_exposure(150)
+            >>> settings.set_contrast(10)
+            >>> # Changes are immediately applied to camera hardware
+        """
+        if self._settings is None:
+            raise RuntimeError(
+                "Settings not initialized. Call initialize_settings() first."
+            )
+        return self._settings
+    
+    def save_settings(self) -> None:
+        """
+        Save current settings to config file.
+        
+        This creates a backup of the previous settings before saving.
+        Call this when the user clicks "Save" or "Apply" in the GUI.
+        
+        Example:
+            >>> # User adjusted settings via GUI
+            >>> camera.settings.set_exposure(150)
+            >>> camera.settings.set_contrast(10)
+            >>> # User clicks "Save"
+            >>> camera.save_settings()
+        """
+        if self._settings is None or self._settings_manager is None:
+            raise RuntimeError("Settings not initialized")
+        
+        info(f"Saving settings for {self.model}")
+        self._settings_manager.save(self._settings)
+        info("Settings saved successfully")
+    
+    def load_settings(self, filepath: Path | str | None = None) -> None:
+        """
+        Load settings from file and apply to camera.
+        
+        Args:
+            filepath: Optional path to load from. If None, loads from default location.
+            
+        Example:
+            >>> # Load from default location
+            >>> camera.load_settings()
+            >>> 
+            >>> # Load from specific file
+            >>> camera.load_settings("./saved_configs/night_mode.yaml")
+        """
+        if self._settings_manager is None:
+            raise RuntimeError("Settings not initialized")
+        
+        info(f"Loading settings for {self.model}")
+        
+        if filepath is None:
+            # Load from default location
+            self._settings = self._settings_manager.load()
+        else:
+            # Load from specific file
+            self._settings = self._settings_manager.load_from_file(filepath)
+        
+        # Refresh to ensure we have camera reference
+        self._settings.refresh_from_camera(self)
+        
+        # Apply to camera hardware
+        self._settings.apply_to_camera(self)
+        
+        info("Settings loaded and applied to camera")
+    
+    def reset_settings(self) -> None:
+        """
+        Reset settings to last saved state and apply to camera.
+        
+        Call this when the user clicks "Cancel" or "Reset" in the GUI.
+        
+        Example:
+            >>> # User made changes but wants to discard them
+            >>> camera.reset_settings()
+        """
+        if self._settings_manager is None:
+            raise RuntimeError("Settings not initialized")
+        
+        info(f"Resetting settings for {self.model}")
+        
+        # Reload from disk
+        self._settings = self._settings_manager.load()
+        
+        # Refresh to ensure camera reference
+        self._settings.refresh_from_camera(self)
+        
+        # Re-apply to camera
+        self._settings.apply_to_camera(self)
+        
+        info("Settings reset to saved state")
+    
+    def reset_to_defaults(self) -> None:
+        """
+        Reset settings to factory defaults and apply to camera.
+        
+        This also saves the defaults as the current settings.
+        
+        Example:
+            >>> # User wants factory defaults
+            >>> camera.reset_to_defaults()
+        """
+        if self._settings_manager is None:
+            raise RuntimeError("Settings not initialized")
+        
+        info(f"Resetting to factory defaults for {self.model}")
+        
+        # Restore defaults (this also saves them)
+        self._settings = self._settings_manager.restore_defaults()
+        
+        # Refresh to ensure camera reference
+        self._settings.refresh_from_camera(self)
+        
+        # Apply to camera
+        self._settings.apply_to_camera(self)
+        
+        info("Factory defaults restored and applied")
+    
+    def refresh_settings_from_camera(self) -> None:
+        """
+        Read current camera state and update settings object.
+        
+        Useful if the camera was adjusted outside of the settings system
+        (e.g., via hardware buttons or external software).
+        
+        Example:
+            >>> # Camera was adjusted externally
+            >>> camera.refresh_settings_from_camera()
+            >>> # Now settings object matches camera hardware
+        """
+        if self._settings is None:
+            raise RuntimeError("Settings not initialized")
+        
+        info("Refreshing settings from camera hardware")
+        self._settings.refresh_from_camera(self)
+        info("Settings refreshed")
     
     @abstractmethod
     def open(self, camera_id: str) -> bool:
@@ -136,6 +335,7 @@ class BaseCamera(ABC):
         Args:
             buffer: Pre-allocated buffer to receive image data
             bits_per_pixel: Bits per pixel (typically 24 for RGB)
+            timeout_ms: Timeout in milliseconds
             
         Returns:
             True if successful, False otherwise
@@ -156,200 +356,37 @@ class BaseCamera(ABC):
         pass
     
     @abstractmethod
-    def get_resolutions(self) -> list[CameraResolution]:
+    def get_camera_metadata(self) -> dict[str, Any]:
         """
-        Get available camera resolutions
+        Get camera metadata for image saving.
+        
+        This method retrieves current camera settings and information
+        to be embedded in saved images.
         
         Returns:
-            List of available resolutions
+            Dictionary containing camera metadata including:
+            - model: Camera model name
+            - All other camera settings from the settings object
         """
-        pass
-    
-    @abstractmethod
-    def get_current_resolution(self) -> Tuple[int, int, int]:
-        """
-        Get current resolution
+        metadata = {
+            "model": self.model,
+        }
+
+        # Get all dataclass fields as a dictionary
+        settings_dict = asdict(self._settings)
         
-        Returns:
-            Tuple of (resolution_index, width, height)
-        """
-        pass
-    
-    @abstractmethod
-    def set_resolution(self, resolution_index: int) -> bool:
-        """
-        Set camera resolution
+        # Remove internal fields and complex types that don't serialize well
+        settings_dict.pop("version", None)
         
-        Args:
-            resolution_index: Index of resolution to use
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def get_exposure_range(self) -> Tuple[int, int, int]:
-        """
-        Get exposure time range
+        # Convert NamedTuples to dicts for better serialization
+        for key, value in settings_dict.items():
+            if hasattr(value, "_asdict"):
+                settings_dict[key] = value._asdict()
         
-        Returns:
-            Tuple of (min, max, default) values
-        """
-        pass
-    
-    @abstractmethod
-    def get_exposure_time(self) -> int:
-        """
-        Get current exposure time
+        # Merge with metadata
+        metadata.update(settings_dict)
         
-        Returns:
-            Current exposure time in microseconds
-        """
-        pass
-    
-    @abstractmethod
-    def set_exposure_time(self, time_us: int) -> bool:
-        """
-        Set exposure time
-        
-        Args:
-            time_us: Exposure time in microseconds
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def get_gain_range(self) -> Tuple[int, int, int]:
-        """
-        Get gain range
-        
-        Returns:
-            Tuple of (min, max, default) values in percent
-        """
-        pass
-    
-    @abstractmethod
-    def get_gain(self) -> int:
-        """
-        Get current gain
-        
-        Returns:
-            Current gain in percent
-        """
-        pass
-    
-    @abstractmethod
-    def set_gain(self, gain_percent: int) -> bool:
-        """
-        Set gain
-        
-        Args:
-            gain_percent: Gain in percent
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def get_auto_exposure(self) -> bool:
-        """
-        Get auto exposure state
-        
-        Returns:
-            True if auto exposure is enabled, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def set_auto_exposure(self, enabled: bool) -> bool:
-        """
-        Set auto exposure state
-        
-        Args:
-            enabled: True to enable, False to disable
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def supports_white_balance(self) -> bool:
-        """
-        Check if camera supports white balance
-        
-        Returns:
-            True if white balance is supported, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def get_white_balance_range(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
-        """
-        Get white balance range
-        
-        Returns:
-            Tuple of ((temp_min, temp_max), (tint_min, tint_max))
-        """
-        pass
-    
-    @abstractmethod
-    def get_white_balance(self) -> Tuple[int, int]:
-        """
-        Get current white balance
-        
-        Returns:
-            Tuple of (temperature, tint)
-        """
-        pass
-    
-    @abstractmethod
-    def set_white_balance(self, temperature: int, tint: int) -> bool:
-        """
-        Set white balance
-        
-        Args:
-            temperature: Color temperature value
-            tint: Tint value
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def auto_white_balance(self) -> bool:
-        """
-        Perform one-time auto white balance
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def get_frame_rate(self) -> Tuple[int, int, int]:
-        """
-        Get current frame rate information
-        
-        Returns:
-            Tuple of (frames_in_period, time_period_ms, total_frames)
-        """
-        pass
-    
-    @abstractmethod
-    def get_camera_metadata(self) -> Dict[str, Any]:
-        """
-        Get current camera settings as metadata
-        
-        Returns:
-            Dictionary of camera settings (exposure, gain, white balance, etc.)
-        """
-        pass
+        return metadata
     
     @abstractmethod
     def supports_still_capture(self) -> bool:
@@ -362,43 +399,25 @@ class BaseCamera(ABC):
         pass
     
     @abstractmethod
-    def get_still_resolutions(self) -> list[CameraResolution]:
-        """
-        Get available still image resolutions
-        
-        Returns:
-            List of available still resolutions
-        """
-        pass
-    
-    @abstractmethod
     def capture_and_save_still(
         self,
         filepath: Path,
         resolution_index: int = 0,
-        additional_metadata: Optional[Dict[str, Any]] = None,
+        additional_metadata: dict[str, Any] | None = None,
         timeout_ms: int = 5000
     ) -> bool:
         """
-        Capture a still image and save it to disk with metadata.
-        
-        This is a convenience method that handles the complete workflow:
-        1. Triggers still image capture
-        2. Waits for image to be ready
-        3. Pulls image data
-        4. Saves with metadata
+        Capture a still image and save it with metadata.
         
         Args:
             filepath: Path where image should be saved
-            resolution_index: Resolution index for still capture (0 = highest)
-            additional_metadata: Optional dictionary of additional metadata to save
-            timeout_ms: Timeout in milliseconds to wait for capture
+            resolution_index: Camera resolution to use (0 = highest)
+            additional_metadata: Optional dict of extra metadata to save
+            timeout_ms: Timeout for capture in milliseconds
             
         Returns:
             True if successful, False otherwise
             
-        Note:
-            Only works if supports_still_capture() returns True
         """
         pass
     
@@ -406,25 +425,18 @@ class BaseCamera(ABC):
     def capture_and_save_stream(
         self,
         filepath: Path,
-        additional_metadata: Optional[Dict[str, Any]] = None
+        additional_metadata: dict[str, Any] | None = None
     ) -> bool:
         """
-        Capture current frame from live stream and save it to disk with metadata.
-        
-        This is a convenience method that handles the complete workflow:
-        1. Pulls current frame from live stream
-        2. Converts to numpy array
-        3. Saves with metadata
+        Capture current stream frame and save it with metadata.
         
         Args:
             filepath: Path where image should be saved
-            additional_metadata: Optional dictionary of additional metadata to save
+            additional_metadata: Optional dict of extra metadata to save
             
         Returns:
             True if successful, False otherwise
             
-        Note:
-            Camera must be in capture mode (start_capture() must have been called)
         """
         pass
     
@@ -440,12 +452,10 @@ class BaseCamera(ABC):
         self,
         image_data: np.ndarray,
         filepath: Path,
-        additional_metadata: Optional[Dict[str, Any]] = None
+        additional_metadata: dict[str, Any] | None = None
     ) -> bool:
         """
-        Save image to disk with camera and optional additional metadata.
-        
-        Supports formats: TIFF, TIF, JPG, JPEG, PNG
+        Save image data with embedded metadata.
         
         Args:
             image_data: Image as numpy array (height, width, channels) or (height, width)
@@ -456,15 +466,12 @@ class BaseCamera(ABC):
             True if successful, False otherwise
             
         Note:
-            - TIFF/TIF: Metadata saved in TIFF tags and as JSON in ImageDescription
+            - TIFF/TIF: Metadata saved in TIFF tags and as JSON in UserComment
             - JPG/JPEG: Metadata saved in EXIF UserComment as JSON
             - PNG: Metadata saved in PNG text chunks
         """
         pil_image = None
         try:
-            from logger import get_logger
-            logger = get_logger()
-            
             # Ensure filepath is a Path object
             filepath = Path(filepath)
             
@@ -496,7 +503,7 @@ class BaseCamera(ABC):
             elif image_data.shape[2] == 4:
                 pil_image = Image.fromarray(image_data, mode='RGBA')
             else:
-                logger.error(f"Unsupported image shape: {image_data.shape}")
+                error(f"Unsupported image shape: {image_data.shape}")
                 return False
             
             # Get file extension
@@ -504,25 +511,20 @@ class BaseCamera(ABC):
             
             # Save with format-specific metadata
             if ext in ['.tif', '.tiff']:
-                self._save_tiff_with_metadata(pil_image, filepath, full_metadata, logger)
+                self._save_tiff_with_metadata(pil_image, filepath, full_metadata)
             elif ext in ['.jpg', '.jpeg']:
-                self._save_jpeg_with_metadata(pil_image, filepath, full_metadata, logger)
+                self._save_jpeg_with_metadata(pil_image, filepath, full_metadata)
             elif ext == '.png':
-                self._save_png_with_metadata(pil_image, filepath, full_metadata, logger)
+                self._save_png_with_metadata(pil_image, filepath, full_metadata)
             else:
-                logger.error(f"Unsupported file format: {ext}")
+                error(f"Unsupported file format: {ext}")
                 return False
             
-            logger.info(f"Image saved successfully: {filepath}")
+            debug(f"Image saved successfully: {filepath}")
             return True
             
         except Exception as e:
-            try:
-                from logger import get_logger
-                logger = get_logger()
-                logger.exception(f"Failed to save image to {filepath}")
-            except:
-                print(f"Failed to save image to {filepath}: {e}")
+            exception(f"Failed to save image to {filepath}")
             return False
         finally:
             # Explicitly close and delete PIL image to free memory
@@ -534,18 +536,18 @@ class BaseCamera(ABC):
         self,
         pil_image: Image.Image,
         filepath: Path,
-        metadata: Dict[str, Any],
-        logger
+        metadata: dict[str, Any]
     ):
-        """Save TIFF with metadata in EXIF tags and ImageDescription"""
+        """Save TIFF with metadata in EXIF tags and UserComment"""
         # Get tag mappings from Base enum
         base_tags = {tag.name: tag.value for tag in ExifTags.Base}
         
         # Create Exif object
         exif = Exif()
         
-        # Add software information - placeholder for version
-        exif[base_tags['Software']] = "Forge - v{VERSION_PLACEHOLDER}"
+        # Add software information
+        from app_context import get_app_context
+        exif[base_tags['Software']] = f"Forge - v{get_app_context().settings.version}"
         
         # Add timestamp
         timestamp = metadata.get("timestamp", datetime.now().isoformat())
@@ -554,29 +556,28 @@ class BaseCamera(ABC):
         # Add camera metadata if available
         camera_meta = metadata.get("camera", {})
         
-        # Camera Make and Model
+        # Camera Model
         if "model" in camera_meta:
             exif[base_tags['Model']] = str(camera_meta["model"])
         
         # Get the EXIF IFD to add camera-specific tags
         exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
         
-        # Exposure time (tag ExposureTime)
+        # Exposure time
         if "exposure_time_us" in camera_meta:
             exposure_sec = camera_meta["exposure_time_us"] / 1_000_000
-            # Store as rational (numerator, denominator)
             exif_ifd[base_tags['ExposureTime']] = (int(exposure_sec * 1_000_000), 1_000_000)
         
-        # ISO Speed (tag ISOSpeedRatings)
+        # ISO Speed (using gain as proxy)
         if "gain_percent" in camera_meta:
             iso_value = camera_meta["gain_percent"]
             exif_ifd[base_tags['ISOSpeedRatings']] = iso_value
         
-        # Add timestamp to EXIF IFD as well
+        # Add timestamp to EXIF IFD
         exif_ifd[base_tags['DateTimeOriginal']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
         exif_ifd[base_tags['DateTimeDigitized']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
         
-        # Image description from user-provided metadata only
+        # Image description from user metadata
         additional_meta = metadata.get("additional", {})
         description_parts = []
         
@@ -585,43 +586,41 @@ class BaseCamera(ABC):
         if "sample_id" in additional_meta:
             description_parts.append(f"Sample: {additional_meta['sample_id']}")
         
-        # Only set ImageDescription if user provided a description
         if description_parts:
             exif[base_tags['ImageDescription']] = " | ".join(description_parts)
         
-        # Store complete metadata as JSON in UserComment instead
+        # Store complete metadata as JSON in UserComment
         metadata_json = json.dumps(metadata, indent=2)
         exif_ifd[base_tags['UserComment']] = metadata_json.encode('utf-16')
         
         # Save with EXIF
         pil_image.save(filepath, format='TIFF', exif=exif, compression='tiff_deflate')
-        logger.debug(f"TIFF with EXIF metadata saved to {filepath}")
+        debug(f"TIFF with EXIF metadata saved to {filepath}")
     
     def _save_jpeg_with_metadata(
         self,
         pil_image: Image.Image,
         filepath: Path,
-        metadata: Dict[str, Any],
-        logger
+        metadata: dict[str, Any]
     ):
-        """Save JPEG with metadata in proper EXIF tags"""
+        """Save JPEG with metadata in EXIF tags"""
         # Get tag mappings from Base enum
         base_tags = {tag.name: tag.value for tag in ExifTags.Base}
         
         # Create Exif object
         exif = Exif()
         
-        # Add software information - placeholder for version
-        exif[base_tags['Software']] = "Forge - v{VERSION_PLACEHOLDER}"
+        # Add software information
+        from app_context import get_app_context
+        exif[base_tags['Software']] = f"Forge - v{get_app_context().settings.version}"
         
         # Add timestamp
         timestamp = metadata.get("timestamp", datetime.now().isoformat())
         exif[base_tags['DateTime']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
         
-        # Add camera metadata if available
+        # Add camera metadata
         camera_meta = metadata.get("camera", {})
         
-        # Camera Make and Model
         if "model" in camera_meta:
             exif[base_tags['Model']] = str(camera_meta["model"])
         
@@ -632,18 +631,16 @@ class BaseCamera(ABC):
         elif "sample_id" in additional_meta:
             exif[base_tags['ImageDescription']] = f"Sample: {additional_meta['sample_id']}"
         
-        # Get the EXIF IFD to add camera-specific tags
+        # Get the EXIF IFD
         exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
         
         # Exposure time
         if "exposure_time_us" in camera_meta:
             exposure_sec = camera_meta["exposure_time_us"] / 1_000_000
-            # Store as rational (numerator, denominator)
             exif_ifd[base_tags['ExposureTime']] = (int(exposure_sec * 1_000_000), 1_000_000)
         
         # ISO Speed
         if "gain_percent" in camera_meta:
-            # Map gain percent to ISO-like value
             iso_value = camera_meta["gain_percent"]
             exif_ifd[base_tags['ISOSpeedRatings']] = iso_value
         
@@ -651,36 +648,35 @@ class BaseCamera(ABC):
         exif_ifd[base_tags['DateTimeOriginal']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
         exif_ifd[base_tags['DateTimeDigitized']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
         
-        # Store complete metadata as JSON in UserComment for full data preservation
+        # Store complete metadata as JSON in UserComment
         metadata_json = json.dumps(metadata, indent=2)
         exif_ifd[base_tags['UserComment']] = metadata_json.encode('utf-16')
         
         # Save with EXIF
         pil_image.save(filepath, format='JPEG', exif=exif, quality=95)
-        logger.debug(f"JPEG with EXIF metadata saved to {filepath}")
+        debug(f"JPEG with EXIF metadata saved to {filepath}")
     
     def _save_png_with_metadata(
         self,
         pil_image: Image.Image,
         filepath: Path,
-        metadata: Dict[str, Any],
-        logger
+        metadata: dict[str, Any]
     ):
         """Save PNG with metadata in text chunks"""
-        from PIL import PngImagePlugin
         
         # Create PNG info
         pnginfo = PngImagePlugin.PngInfo()
         
-        # Add metadata as text chunks
-        pnginfo.add_text("Software", "Forge - v{VERSION_PLACEHOLDER}")
+        # Add software info
+        from app_context import get_app_context
+        pnginfo.add_text("Software", f"Forge - v{get_app_context().settings.version}")
         pnginfo.add_text("Metadata", json.dumps(metadata, indent=2))
         
-        # Add individual camera settings as separate chunks for easier access
+        # Add individual camera settings as separate chunks
         camera_meta = metadata.get("camera", {})
         for key, value in camera_meta.items():
             pnginfo.add_text(f"Camera.{key}", str(value))
         
         # Save with metadata
         pil_image.save(filepath, format='PNG', pnginfo=pnginfo)
-        logger.debug(f"PNG metadata saved to {filepath}")
+        debug(f"PNG metadata saved to {filepath}")

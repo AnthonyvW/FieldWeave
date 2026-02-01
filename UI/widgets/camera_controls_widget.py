@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLineEdit, QLabel, QFileDialog, QMessageBox, QComboBox
 )
 from PySide6.QtCore import Slot, Signal
-from logger import info, error, warning
+from logger import info, error, warning, debug
 from app_context import get_app_context
 
 
@@ -124,7 +124,7 @@ class CameraControlsWidget(QWidget):
         """Ensure the output folder exists"""
         try:
             self._current_folder.mkdir(parents=True, exist_ok=True)
-            info(f"Output folder ready: {self._current_folder}")
+            debug(f"Output folder ready: {self._current_folder}")
         except Exception as e:
             error(f"Failed to create output folder: {e}")
             # Show toast for error
@@ -257,7 +257,6 @@ class CameraControlsWidget(QWidget):
                 filepath=filepath,
                 resolution_index=0,  # Highest resolution
                 additional_metadata={
-                    "timestamp": datetime.now().isoformat(),
                     "source": "still_capture"
                 },
                 timeout_ms=5000,
@@ -285,12 +284,10 @@ class CameraControlsWidget(QWidget):
         self._capture_button.setEnabled(True)
         
         if success:
-            info(f"Photo captured and saved successfully: {filepath}")
             toast.success(f"Saved to: {Path(filepath).name}", 
                         title="Image Captured", 
                         duration=10000)
             # Clear custom filename after successful capture
             self._filename_edit.clear()
         else:
-            error(f"Failed to capture photo to: {filepath}")
             toast.error("Unable to capture image from camera", title="Capture Failed")
