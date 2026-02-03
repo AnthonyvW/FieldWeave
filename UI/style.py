@@ -114,14 +114,11 @@ def apply_style(app: QApplication) -> None:
         QFrame#CollapsibleSection {{
             background: rgba(255,255,255,0.85);
             border: 1px solid rgba(0,0,0,0.10);
-            border-radius: 10px;
         }}
 
         /* Full-width header strip: dark grey */
         QFrame#SectionHeader {{
             background: #5f6368;
-            border-top-left-radius: 10px;
-            border-top-right-radius: 10px;
             border-bottom: 1px solid rgba(0,0,0,0.10);
         }}
         QLabel#SectionHeaderTitle, QFrame#SectionHeader QLabel {{
@@ -131,8 +128,6 @@ def apply_style(app: QApplication) -> None:
 
         /* When collapsed: header rounds bottom corners too (prevents “sticking out” corners) */
         QFrame#SectionHeader[collapsed="true"] {{
-            border-bottom-left-radius: 10px;
-            border-bottom-right-radius: 10px;
             border-bottom: none;
         }}
 

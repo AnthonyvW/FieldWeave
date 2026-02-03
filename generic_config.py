@@ -1,14 +1,15 @@
 # config_manager.py
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Generic, Iterator, List, Type, TypeVar, Union
+from typing import Any, Generic, Iterator, TypeVar, Union
 import shutil
 import time
+import yaml
 
-from logger import get_logger
+from logger import info, debug, error, warning
 
 # File/dir names are generic—usable for ANY config
 ACTIVE_FILENAME = "settings.yaml"
@@ -24,10 +25,14 @@ class ConfigValidationError(Exception):
     pass
 
 
-class ConfigManager(Generic[S]):
+class ConfigManager(Generic[S], ABC):
     """
     Generic YAML-backed config manager for ANY dataclass-based settings.
     Manages a single configuration directory with active settings, defaults, and backups.
+    
+    All config files include metadata fields:
+        - config_type: Identifies which config loader to use
+        - config_version: The Forge version that created/last modified this config
     
     Directory structure:
         root_dir/
@@ -37,6 +42,10 @@ class ConfigManager(Generic[S]):
                 settings.20250128-143052.yaml
                 settings.20250128-120301.yaml
     
+    Child classes must implement:
+        - from_dict(data: dict[str, Any]) -> S: Convert dictionary to settings object
+        - to_dict(settings: S) -> dict[str, Any]: Convert settings object to dictionary
+    
     Example:
         >>> @dataclass
         ... class MySettings:
@@ -45,10 +54,20 @@ class ConfigManager(Generic[S]):
         ...         if self.value < 0:
         ...             raise ValueError("value must be non-negative")
         >>> 
-        >>> manager = ConfigManager[MySettings](
-        ...     MySettings, 
-        ...     root_dir="./config/my_component"
-        ... )
+        >>> class MySettingsManager(ConfigManager[MySettings]):
+        ...     def __init__(self):
+        ...         super().__init__(
+        ...             config_type="my_settings",
+        ...             root_dir="./config/my_component"
+        ...         )
+        ...     
+        ...     def from_dict(self, data: dict[str, Any]) -> MySettings:
+        ...         return MySettings(**data)
+        ...     
+        ...     def to_dict(self, settings: MySettings) -> dict[str, Any]:
+        ...         return asdict(settings)
+        >>> 
+        >>> manager = MySettingsManager()
         >>> settings = manager.load()
         >>> settings.value = 20
         >>> manager.save(settings)
@@ -56,193 +75,353 @@ class ConfigManager(Generic[S]):
 
     def __init__(
         self,
-        schema_cls: Type[S],
+        config_type: str,
         *,
         root_dir: Union[str, Path] = "./config",
         default_filename: str = DEFAULT_FILENAME,
         backup_dirname: str = BACKUP_DIRNAME,
         backup_keep: int = BACKUP_KEEP,
+        save_defaults_on_init: bool = True,
     ) -> None:
         """
         Initialize the config manager.
         
         Args:
-            schema_cls: Dataclass type defining the settings schema
+            config_type: Identifier for this config type (e.g., "camera_settings", "forge_settings")
             root_dir: Directory for config files (settings, defaults, backups)
             default_filename: Name for the defaults file
             backup_dirname: Name for the backups subdirectory
             backup_keep: Number of backup files to retain (oldest are deleted)
+            save_defaults_on_init: If True, saves default settings on initialization if none exist
         
         Raises:
-            TypeError: If schema_cls is not a dataclass
+            ValueError: If config_type is empty
         """
-        if not is_dataclass(schema_cls):
-            logger = get_logger()
-            logger.error(f"Attempted to create ConfigManager with non-dataclass type: {schema_cls}")
-            raise TypeError(f"schema_cls must be a dataclass type, got {type(schema_cls).__name__}")
+        if not config_type:
+            raise ValueError("config_type must be a non-empty string")
         
-        self.schema_cls = schema_cls
+        self.config_type = config_type
         self.root_dir = Path(root_dir).resolve()
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self.default_filename = default_filename
         self.backup_dirname = backup_dirname
         self.backup_keep = backup_keep
-        self._logger = get_logger()
         
-        self._logger.debug(f"Initialized ConfigManager for {schema_cls.__name__} at {self.root_dir}")
+        debug(f"Initialized ConfigManager for '{config_type}' at {self.root_dir}")
+        
+        # Save default settings if no settings exist and save_defaults_on_init is True
+        if save_defaults_on_init:
+            dp = self.default_path()
+            ap = self.active_path()
+            if not dp.exists() and not ap.exists():
+                try:
+                    default_settings = self.from_dict({})
+                    self.write_defaults(default_settings)
+                    info(f"Saved initial default settings for '{config_type}'")
+                except Exception as e:
+                    warning(f"Failed to save initial default settings: {e}")
+    
+    @abstractmethod
+    def from_dict(self, data: dict[str, Any]) -> S:
+        """
+        Convert a dictionary (loaded from YAML) into a settings object.
+        
+        The dictionary will NOT include config_type or config_version fields,
+        as those are handled separately by the base class.
+        
+        Args:
+            data: Dictionary containing the settings data
+        
+        Returns:
+            Settings object instance
+        
+        Raises:
+            Any exception appropriate for conversion failures
+        """
+        pass
+    
+    @abstractmethod
+    def to_dict(self, settings: S) -> dict[str, Any]:
+        """
+        Convert a settings object into a dictionary for YAML serialization.
+        
+        Do NOT include config_type or config_version in the returned dictionary,
+        as those are added automatically by the base class.
+        
+        Args:
+            settings: Settings object to convert
+        
+        Returns:
+            Dictionary containing the settings data
+        """
+        pass
+    
+    def migrate(
+        self, 
+        data: dict[str, Any], 
+        from_version: str, 
+        to_version: str
+    ) -> dict[str, Any]:
+        """
+        Migrate config data from one version to another.
+        
+        Override this method in child classes to handle version migrations.
+        The base implementation does nothing (no migration).
+        
+        Args:
+            data: Dictionary containing the config data (without metadata fields)
+            from_version: Version the config was created with
+            to_version: Current Forge version
+        
+        Returns:
+            Migrated dictionary (or original if no migration needed)
+        """
+        return data
+    
+    def get_forge_version(self) -> str:
+        """Get the current Forge version."""
+        from app_context import FORGE_VERSION
+        return FORGE_VERSION
+    
+    def active_path(self) -> Path:
+        """Return path to the active settings file."""
+        return self.root_dir / ACTIVE_FILENAME
+
+    def default_path(self) -> Path:
+        """Return path to the default settings file."""
+        return self.root_dir / self.default_filename
+
+    def backup_dir(self) -> Path:
+        """Return path to the backup directory."""
+        bd = self.root_dir / self.backup_dirname
+        bd.mkdir(exist_ok=True)
+        return bd
+    
+    def _add_metadata(self, data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Add config_type and config_version to a data dictionary.
+        
+        Args:
+            data: Dictionary to add metadata to
+        
+        Returns:
+            New dictionary with metadata fields added
+        """
+        return {
+            "config_type": self.config_type,
+            "config_version": self.get_forge_version(),
+            **data,
+        }
+    
+    def _extract_metadata(
+        self, data: dict[str, Any]
+    ) -> tuple[str | None, str | None, dict[str, Any]]:
+        """
+        Extract metadata and migrate if needed.
+        
+        Args:
+            data: Dictionary loaded from YAML
+        
+        Returns:
+            Tuple of (config_type, config_version, remaining_data)
+            The remaining_data will be migrated if version mismatch detected
+        """
+        data = data.copy()  # Don't modify the original
+        
+        config_type = data.pop("config_type", None)
+        config_version = data.pop("config_version", None)
+        
+        # Validate config_type matches if present
+        if config_type is not None and config_type != self.config_type:
+            warning(
+                f"Config type mismatch: expected '{self.config_type}', "
+                f"got '{config_type}' in file"
+            )
+        
+        # Handle migration if version mismatch
+        if config_version is not None:
+            current_version = self.get_forge_version()
+            
+            if config_version != current_version and current_version != "unknown":
+                info(
+                    f"Config version mismatch: file has v{config_version}, "
+                    f"current is v{current_version}. Running migration..."
+                )
+                try:
+                    data = self.migrate(data, config_version, current_version)
+                    info("Migration completed successfully")
+                except Exception as e:
+                    error(f"Migration failed: {e}")
+                    # Continue with unmigrated data - child class should handle it
+            else:
+                debug(f"Config version matches: v{config_version}")
+        
+        return config_type, config_version, data
+
+    def _load_dict_from_file(self, path: Path) -> dict[str, Any]:
+        """
+        Load a dictionary from a YAML file.
+        
+        Args:
+            path: Path to the YAML file
+        
+        Returns:
+            Dictionary loaded from the file (empty dict if file is empty)
+        
+        Raises:
+            IOError: If file cannot be read or parsed
+        """
+        
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+            return data or {}
+        except Exception as e:
+            error(f"Failed to load YAML from {path}: {e}")
+            raise IOError(f"Failed to load config from {path}") from e
+    
+    def _save_dict_to_file(self, data: dict[str, Any], path: Path) -> None:
+        """
+        Save a dictionary to a YAML file.
+        
+        Args:
+            data: Dictionary to save
+            path: Path to save to
+        
+        Raises:
+            IOError: If file cannot be written
+        """
+        
+        try:
+            with open(path, "w") as f:
+                yaml.safe_dump(data, f, sort_keys=False)
+            debug(f"Saved config to {path.name}")
+        except Exception as e:
+            error(f"Failed to save YAML to {path}: {e}")
+            raise IOError(f"Failed to save config to {path}") from e
 
     # -------------------------
-    # YAML (de)serialization
+    # Validation
     # -------------------------
-    def _to_dict(self, settings: S) -> Dict[str, Any]:
-        """Convert settings dataclass to dictionary."""
-        return asdict(settings)
-
-    def _from_dict(self, data: Union[Dict[str, Any], None]) -> S:
-        """
-        Create settings instance from dictionary.
-        Only includes fields that are defined in the schema.
-        """
-        data = data or {}
-        allowed = {f.name for f in fields(self.schema_cls)}
-        filtered = {k: v for k, v in data.items() if k in allowed}
-        return self.schema_cls(**filtered)  # type: ignore
-
+    
     def _validate(self, settings: S, context: str = "") -> None:
         """
-        Validate settings if a validate() method exists.
+        Validate settings if validate() method exists.
         
         Args:
             settings: Settings instance to validate
-            context: Additional context for error messages
+            context: Context string for logging (e.g., "after load", "before save")
         
         Raises:
             ConfigValidationError: If validation fails
         """
-        if hasattr(settings, 'validate') and callable(settings.validate):
-            try:
-                settings.validate()
-                self._logger.debug(f"Validation passed{' for ' + context if context else ''}")
-            except Exception as e:
-                error_msg = f"Settings validation failed{' for ' + context if context else ''}: {e}"
-                self._logger.error(error_msg)
-                raise ConfigValidationError(error_msg) from e
-
-    # -------------------------
-    # Path helpers
-    # -------------------------
-    def active_path(self) -> Path:
-        """Get the path to the active settings file."""
-        return self.root_dir / ACTIVE_FILENAME
-
-    def default_path(self) -> Path:
-        """Get the path to the default settings file."""
-        return self.root_dir / self.default_filename
-
-    def backup_dir(self) -> Path:
-        """Get the backup directory, creating it if needed."""
-        bd = self.root_dir / self.backup_dirname
-        bd.mkdir(parents=True, exist_ok=True)
-        return bd
+        if not hasattr(settings, "validate"):
+            return
+        
+        try:
+            settings.validate()
+            debug(f"Validation passed{f' ({context})' if context else ''}")
+        except Exception as e:
+            error(
+                f"Validation failed{f' ({context})' if context else ''}: {e}"
+            )
+            raise ConfigValidationError(f"Settings validation failed: {e}") from e
 
     # -------------------------
     # Backup management
     # -------------------------
-    def _backup_if_exists(self) -> None:
+    
+    def _backup_if_exists(self) -> Path | None:
         """
         Create a timestamped backup of the active settings file if it exists.
-        Also prunes old backups to maintain backup_keep limit.
+        Cleans up old backups to maintain backup_keep limit.
+        
+        Returns:
+            Path to the created backup, or None if no file to backup
         """
         src = self.active_path()
         if not src.exists():
-            return
+            return None
         
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        dst = self.backup_dir() / f"{src.stem}.{ts}{src.suffix}"
+        backup_dir = self.backup_dir()
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_name = f"{ACTIVE_FILENAME.split('.')[0]}.{timestamp}.yaml"
+        dst = backup_dir / backup_name
         
         try:
             shutil.copy2(src, dst)
-            self._logger.info(f"Created backup: {dst.name}")
+            info(f"Created backup: {backup_name}")
         except Exception as e:
-            self._logger.error(f"Failed to create settings backup: {e}")
-            raise IOError("Failed to create backup") from e
+            warning(f"Failed to create backup: {e}")
+            return None
         
-        # Prune old backups
-        try:
-            backups: List[Path] = sorted(
-                self.backup_dir().glob(f"{src.stem}.*{src.suffix}"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            
-            if len(backups) > self.backup_keep:
-                for old in backups[self.backup_keep:]:
-                    try:
-                        self._logger.debug(f"Pruning old backup: {old.name}")
-                        old.unlink(missing_ok=True)
-                    except Exception as e:
-                        self._logger.warning(f"Failed to delete backup {old.name}: {e}")
-                
-                self._logger.info(f"Pruned {len(backups) - self.backup_keep} old backup(s)")
-        except Exception as e:
-            self._logger.warning(f"Failed to prune old backups: {e}")
+        # Clean up old backups
+        self._cleanup_old_backups()
+        
+        return dst
+    
+    def _cleanup_old_backups(self) -> None:
+        """Remove old backups beyond the configured limit."""
+        backups = self.list_backups()
+        to_delete = backups[self.backup_keep:]
+        
+        for backup in to_delete:
+            try:
+                backup.unlink()
+                debug(f"Deleted old backup: {backup.name}")
+            except Exception as e:
+                warning(f"Failed to delete old backup {backup.name}: {e}")
 
     # -------------------------
     # Public API
     # -------------------------
+    
     def load(self) -> S:
         """
-        Load settings from the active settings file.
-        
-        Attempts to load in order:
-        1. Active settings file
-        2. Default settings file
-        3. Fresh instance from schema
+        Load settings with fallback chain: active → defaults → fresh instance.
         
         Returns:
             Settings instance (validated if validate() method exists)
         
         Raises:
             ConfigValidationError: If loaded settings fail validation
+            IOError: If all load attempts fail
         """
-        import yaml
-        
-        p = self.active_path()
-        
-        # Try loading active settings
-        if p.exists():
+        # Try active settings first
+        ap = self.active_path()
+        if ap.exists():
             try:
-                with open(p, "r") as f:
-                    data = yaml.safe_load(f) or {}
-                settings = self._from_dict(data)
+                data_dict = self._load_dict_from_file(ap)
+                _, _, clean_data = self._extract_metadata(data_dict)
+                settings = self.from_dict(clean_data)
                 self._validate(settings, "active settings")
-                self._logger.info(f"Loaded active settings from {p.name}")
+                info(f"Loaded active settings from {ap.name}")
                 return settings
             except ConfigValidationError:
                 raise
             except Exception as e:
-                self._logger.error(f"Failed to load settings from {p}: {e}")
+                error(f"Failed to load active settings from {ap}: {e}")
                 raise IOError("Failed to load active settings") from e
         
         # Fallback to defaults
         dp = self.default_path()
         if dp.exists():
             try:
-                with open(dp, "r") as f:
-                    data = yaml.safe_load(f) or {}
-                settings = self._from_dict(data)
+                data_dict = self._load_dict_from_file(dp)
+                _, _, clean_data = self._extract_metadata(data_dict)
+                settings = self.from_dict(clean_data)
                 self._validate(settings, "default settings")
-                self._logger.info(f"Loaded default settings from {dp.name}")
+                info(f"Loaded default settings from {dp.name}")
                 return settings
             except ConfigValidationError:
                 raise
             except Exception as e:
-                self._logger.error(f"Failed to load default settings from {dp}: {e}")
+                error(f"Failed to load default settings from {dp}: {e}")
                 raise IOError("Failed to load default settings") from e
         
         # Last resort: create fresh instance
-        self._logger.info("No existing settings found, using fresh instance")
-        settings = self.schema_cls()
+        info("No existing settings found, using fresh instance")
+        settings = self.from_dict({})
         self._validate(settings, "fresh instance")
         return settings
 
@@ -260,22 +439,34 @@ class ConfigManager(Generic[S]):
         
         Raises:
             ConfigValidationError: If loaded settings fail validation
-            IOError: If file cannot be read
+            IOError: If file cannot be read or config type mismatch
         """
-        import yaml
-        
         p = Path(path)
         try:
-            with open(p, "r") as f:
-                data = yaml.safe_load(f) or {}
-            settings = self._from_dict(data)
+            data_dict = self._load_dict_from_file(p)
+            file_config_type, _, clean_data = self._extract_metadata(data_dict)
+            
+            # Check if config_type matches
+            if file_config_type is not None and file_config_type != self.config_type:
+                error(
+                    f"Config type mismatch when loading from {p}: "
+                    f"expected '{self.config_type}', got '{file_config_type}'"
+                )
+                raise IOError(
+                    f"Config type mismatch: file is '{file_config_type}', "
+                    f"but this manager expects '{self.config_type}'"
+                )
+            
+            settings = self.from_dict(clean_data)
             self._validate(settings, f"file {p.name}")
-            self._logger.info(f"Loaded settings from file: {p}")
+            info(f"Loaded settings from file: {p}")
             return settings
         except ConfigValidationError:
             raise
+        except IOError:
+            raise
         except Exception as e:
-            self._logger.error(f"Failed to load settings from {p}: {e}")
+            error(f"Failed to load settings from {p}: {e}")
             raise IOError(f"Failed to load settings from {path}") from e
 
     def save(self, settings: S) -> None:
@@ -283,6 +474,7 @@ class ConfigManager(Generic[S]):
         Save settings to the active settings file.
         
         Creates a backup of existing settings before saving.
+        Automatically adds config_type and config_version metadata.
         
         Args:
             settings: Settings instance to save
@@ -291,30 +483,27 @@ class ConfigManager(Generic[S]):
             ConfigValidationError: If settings fail validation
             IOError: If file cannot be written
         """
-        import yaml
-        
         # Validate before saving
         self._validate(settings, "before save")
         
         # Backup existing file
         self._backup_if_exists()
         
-        # Save new settings
+        # Convert to dict and add metadata
+        data = self.to_dict(settings)
+        data_with_metadata = self._add_metadata(data)
+        
+        # Save
         p = self.active_path()
-        try:
-            with open(p, "w") as f:
-                yaml.safe_dump(self._to_dict(settings), f, sort_keys=False)
-            self._logger.info(f"Saved settings to {p.name}")
-        except Exception as e:
-            self._logger.error(f"Failed to save settings to {p}: {e}")
-            raise IOError("Failed to save settings") from e
+        self._save_dict_to_file(data_with_metadata, p)
+        info(f"Saved settings to {p.name}")
 
-    def write_defaults(self, settings: Union[S, None] = None) -> Path:
+    def write_defaults(self, settings: S | None = None) -> Path:
         """
         Write default settings file.
         
         Args:
-            settings: Settings to write as defaults. If None, uses fresh schema instance.
+            settings: Settings to write as defaults. If None, uses from_dict({})
         
         Returns:
             Path to the written defaults file
@@ -323,22 +512,16 @@ class ConfigManager(Generic[S]):
             ConfigValidationError: If settings fail validation
             IOError: If file cannot be written
         """
-        import yaml
-        
-        settings_to_save = settings or self.schema_cls()
+        settings_to_save = settings if settings is not None else self.from_dict({})
         self._validate(settings_to_save, "defaults")
         
-        payload = self._to_dict(settings_to_save)
-        dp = self.default_path()
+        data = self.to_dict(settings_to_save)
+        data_with_metadata = self._add_metadata(data)
         
-        try:
-            with open(dp, "w") as f:
-                yaml.safe_dump(payload, f, sort_keys=False)
-            self._logger.info(f"Wrote default settings to {dp.name}")
-            return dp
-        except Exception as e:
-            self._logger.error(f"Failed to write default settings to {dp}: {e}")
-            raise IOError("Failed to write default settings") from e
+        dp = self.default_path()
+        self._save_dict_to_file(data_with_metadata, dp)
+        info(f"Wrote default settings to {dp.name}")
+        return dp
 
     def restore_defaults(self) -> S:
         """
@@ -356,7 +539,7 @@ class ConfigManager(Generic[S]):
         defaults = self.load_defaults()
         self._backup_if_exists()
         self.save(defaults)
-        self._logger.info("Restored defaults as active settings")
+        info("Restored defaults as active settings")
         return defaults
 
     def load_defaults(self) -> S:
@@ -370,35 +553,28 @@ class ConfigManager(Generic[S]):
             ConfigValidationError: If default settings fail validation
             IOError: If defaults file cannot be read
         """
-        import yaml
-        
         dp = self.default_path()
         if not dp.exists():
-            self._logger.debug("No defaults file, using fresh instance")
-            settings = self.schema_cls()
+            debug("No defaults file, using fresh instance")
+            settings = self.from_dict({})
             self._validate(settings, "fresh defaults")
             return settings
         
         try:
-            with open(dp, "r") as f:
-                data = yaml.safe_load(f) or {}
-            settings = self._from_dict(data)
+            data_dict = self._load_dict_from_file(dp)
+            _, _, clean_data = self._extract_metadata(data_dict)
+            settings = self.from_dict(clean_data)
             self._validate(settings, "defaults")
-            self._logger.info(f"Loaded default settings from {dp.name}")
+            info(f"Loaded default settings from {dp.name}")
             return settings
         except ConfigValidationError:
             raise
         except Exception as e:
-            self._logger.error(f"Failed to load default settings from {dp}: {e}")
+            error(f"Failed to load default settings from {dp}: {e}")
             raise IOError("Failed to load defaults") from e
 
-    def list_backups(self) -> List[Path]:
-        """
-        List all backup files, most recent first.
-        
-        Returns:
-            List of backup file paths, sorted by modification time (newest first)
-        """
+    def list_backups(self) -> list[Path]:
+        """List all backup files, sorted by last modified."""
         bd = self.backup_dir()
         try:
             backups = sorted(
@@ -406,10 +582,10 @@ class ConfigManager(Generic[S]):
                 key=lambda p: p.stat().st_mtime,
                 reverse=True
             )
-            self._logger.debug(f"Found {len(backups)} backup(s)")
+            debug(f"Found {len(backups)} backup(s)")
             return backups
         except Exception as e:
-            self._logger.warning(f"Failed to list backups: {e}")
+            warning(f"Failed to list backups: {e}")
             return []
 
     @contextmanager
@@ -432,13 +608,13 @@ class ConfigManager(Generic[S]):
             ...     settings.value = 150
             # Auto-saves on successful exit
         """
-        self._logger.debug("Starting edit transaction")
+        debug("Starting edit transaction")
         settings = self.load()
         try:
             yield settings
         except Exception as e:
-            self._logger.error(f"Edit transaction failed: {e}")
+            error(f"Edit transaction failed: {e}")
             raise
         else:
             self.save(settings)
-            self._logger.info("Edit transaction completed")
+            info("Edit transaction completed")

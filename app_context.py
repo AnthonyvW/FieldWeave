@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from UI.settings.settings_main import SettingsDialog
     from UI.widgets.toast_widget import ToastManager
 
+# Current Forge version - update this when releasing new versions
+FORGE_VERSION = "1.2"
+
 
 class AppContext:
     """
@@ -79,6 +82,11 @@ class AppContext:
         return self._settings
     
     @property
+    def settings_manager(self) -> ForgeSettingsManager | None:
+        """Get the Forge settings manager"""
+        return self._settings_manager
+    
+    @property
     def settings_dialog(self) -> SettingsDialog | None:
         """Get the settings dialog instance"""
         return self._settings_dialog
@@ -87,6 +95,11 @@ class AppContext:
     def toast(self) -> ToastManager | None:
         """Get the toast manager instance"""
         return self._toast_manager
+    
+    @property
+    def current_version(self) -> str:
+        """Get the current Forge version"""
+        return FORGE_VERSION
     
     def register_main_window(self, window):
         """Register the main window instance"""
@@ -118,7 +131,13 @@ class AppContext:
         try:
             self._settings_manager = ForgeSettingsManager()
             self._settings = self._settings_manager.load()
-            info(f"Forge settings loaded - version: {self._settings.version}")
+            
+            info(f"Forge settings loaded - running v{FORGE_VERSION}")
+            
+            # Check if we should show patch notes
+            if self._settings.show_patchnotes:
+                info("New version detected - patch notes should be displayed")
+                
         except Exception as e:
             error(f"Failed to load Forge settings: {e}")
             # Create default settings if loading fails
@@ -155,7 +174,6 @@ class AppContext:
     def cleanup(self):
         """Cleanup resources"""
         if self._camera_manager:
-            info("Cleaning up camera manager")
             self._camera_manager.cleanup()
         
         self._camera_manager = None

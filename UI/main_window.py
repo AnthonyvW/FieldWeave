@@ -33,11 +33,8 @@ class MainWindow(QMainWindow):
         # Register this main window with app context (initializes toast manager)
         self.app_context.register_main_window(self)
         
-        # Set window title with version from config
-        version = "Unknown"
-        if self.app_context.settings:
-            version = self.app_context.settings.version
-        self.setWindowTitle(f"Forge - v{version}")
+        # Set window title with version
+        self.setWindowTitle(f"Forge - v{self.app_context.current_version}")
         self.resize(1920, 1080)
 
         self._state = State()

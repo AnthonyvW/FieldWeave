@@ -55,6 +55,9 @@ class AmscopeCamera(BaseCamera):
             model: Camera model name (default "Amscope")
         """
         super().__init__(model=model)
+
+        # Set Settings class
+        self._settings_class = AmscopeSettings
         
         # Initialize logger
         self._logger = get_logger()
@@ -67,13 +70,15 @@ class AmscopeCamera(BaseCamera):
         self._camera_info = None  # Must be set via set_camera_info() before opening
         self._frame_buffer = None
     
-    # -------------------------
-    # Settings Integration
-    # -------------------------
-    
-    # Settings are now managed by the base class
-    # The base class will automatically use AmscopeSettings
-    # through the CameraSettingsManager factory system
+    def _get_settings_class(self):
+        """
+        Get the settings class for Amscope cameras.
+        
+        Returns:
+            AmscopeSettings class
+        """
+        from camera.settings.amscope_settings import AmscopeSettings
+        return AmscopeSettings
     
     @property
     def settings(self) -> AmscopeSettings:
@@ -207,6 +212,8 @@ class AmscopeCamera(BaseCamera):
                 self._is_open = True
                 # Set RGB byte order for Qt compatibility
                 self._hcam.put_Option(self.OPTION_BYTEORDER, 0)
+                # Initialize settings
+                self.initialize_settings()
                 return True
             return False
         except self._get_sdk().HRESULTException:

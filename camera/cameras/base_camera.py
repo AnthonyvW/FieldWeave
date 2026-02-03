@@ -101,6 +101,25 @@ class BaseCamera(ABC):
         """
         return cls._sdk_loaded
     
+    @abstractmethod
+    def _get_settings_class(self) -> type[CameraSettings]:
+        """
+        Get the appropriate settings class for this camera.
+        
+        This method must be implemented by subclasses to return their
+        concrete settings class (e.g., AmscopeSettings, ToupcamSettings).
+        
+        Returns:
+            Concrete CameraSettings subclass for this camera type
+            
+        Example:
+            In AmscopeCamera:
+            >>> def _get_settings_class(self):
+            ...     from camera.settings.amscope_settings import AmscopeSettings
+            ...     return AmscopeSettings
+        """
+        pass
+
     def initialize_settings(self) -> None:
         """
         Initialize the settings system for this camera.
@@ -125,7 +144,10 @@ class BaseCamera(ABC):
         info(f"Initializing settings for {self.model}")
         
         # Create model-specific settings manager
-        self._settings_manager = CameraSettingsManager(model=self.model)
+        self._settings_manager = CameraSettingsManager(
+            model=self.model,
+            settings_class=self._get_settings_class()
+        )
         
         # Load saved settings or create defaults
         self._settings = self._settings_manager.load()
@@ -135,8 +157,6 @@ class BaseCamera(ABC):
         
         # Then apply settings to camera hardware
         self._settings.apply_to_camera(self)
-        
-        info("Settings initialized and applied to camera")
     
     @property
     def settings(self) -> CameraSettings:
