@@ -10,7 +10,7 @@ from camera.settings.camera_settings import (
     RGBALevel,
     FileFormat,
 )
-from logger import info, error, exception
+from logger import info, error, exception, debug
 
 if TYPE_CHECKING:
     from camera.cameras.base_camera import BaseCamera, CameraResolution
@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 @dataclass
 class AmscopeSettings(CameraSettings):
     version: str = "0"
-    auto_expo: bool = True
+    auto_exposure: bool = True
     exposure: int = 128
     exposure_time_us: int = 50000
-    resolution_index: int = 0
+    resolution: int = 0
     temp: int = 6500
     tint: int = 1000
     contrast: int = 0
@@ -35,7 +35,7 @@ class AmscopeSettings(CameraSettings):
     levelrange_high: RGBALevel = RGBALevel(255, 255, 255, 255)
     fformat: FileFormat = FileFormat.TIFF
     
-    fan_enabled: bool = field(default=False)
+    fan: bool = field(default=False)
     high_fullwell: bool = field(default=False)
     
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
@@ -43,11 +43,18 @@ class AmscopeSettings(CameraSettings):
     def __post_init__(self) -> None:
         super().__post_init__()
     
-    @classmethod
-    def get_metadata(cls) -> list[SettingMetadata]:
+    def get_metadata(self) -> list[SettingMetadata]:
+        """
+        Get metadata for all settings with dynamically populated resolution choices.
+        """
+        # Get available resolutions from camera
+        resolutions = self.get_resolutions()
+        resolution_choices = [f"{res.width}x{res.height}" 
+                            for idx, res in enumerate(resolutions)] if resolutions else []
+        
         return [
             SettingMetadata(
-                name="auto_expo",
+                name="auto_exposure",
                 display_name="Auto Exposure",
                 setting_type=SettingType.BOOL,
                 description="Enable automatic exposure control",
@@ -171,12 +178,11 @@ class AmscopeSettings(CameraSettings):
                 runtime_changeable=True,
             ),
             SettingMetadata(
-                name="resolution_index",
+                name="resolution",
                 display_name="Resolution",
-                setting_type=SettingType.RANGE,
-                description="Camera resolution index",
-                min_value=0,
-                max_value=10,
+                setting_type=SettingType.DROPDOWN,
+                description="Camera resolution",
+                choices=resolution_choices,  # Dynamically populated from camera
                 group="Capture",
                 runtime_changeable=False,
             ),
@@ -185,12 +191,12 @@ class AmscopeSettings(CameraSettings):
                 display_name="File Format",
                 setting_type=SettingType.DROPDOWN,
                 description="Default file format for saved images",
-                choices=["png", "tiff", "jpeg", "bmp"],
+                choices=self._file_formats,
                 group="Capture",
                 runtime_changeable=True,
             ),
             SettingMetadata(
-                name="fan_enabled",
+                name="fan",
                 display_name="Cooling Fan",
                 setting_type=SettingType.BOOL,
                 description="Enable cooling fan",
@@ -219,7 +225,7 @@ class AmscopeSettings(CameraSettings):
                 )
     
     def set_auto_exposure(self, enabled: bool) -> None:
-        self.auto_expo = enabled
+        self.auto_exposure = enabled
         if self._camera and hasattr(self._camera, '_hcam'):
             self._camera._hcam.put_AutoExpoEnable(1 if enabled else 0)
     
@@ -304,7 +310,7 @@ class AmscopeSettings(CameraSettings):
             )
     
     def set_fan(self, enabled: bool) -> None:
-        self.fan_enabled = enabled
+        self.fan = enabled
         if self._camera and hasattr(self._camera, '_hcam'):
             self._camera._hcam.put_Option(0x0a, 1 if enabled else 0)
     
@@ -322,7 +328,7 @@ class AmscopeSettings(CameraSettings):
         try:
             resolutions = []
             hcam = self._camera._hcam
-            count = hcam.ResolutionNumber
+            count = hcam.ResolutionNumber()
             for i in range(count):
                 width, height = hcam.get_Resolution(i)
                 resolutions.append(CameraResolution(width=width, height=height))
@@ -344,18 +350,30 @@ class AmscopeSettings(CameraSettings):
             error(f"Failed to get current resolution: {e}")
             return (0, 0, 0)
     
-    def set_resolution(self, resolution_index: int) -> bool:
-        if self._camera is None or not hasattr(self._camera, '_hcam'):
-            return False
-        
+    def set_resolution(self, index: int, value: str = "") -> bool:
+        """Set camera resolution. Requires camera restart."""
         try:
-            hcam = self._camera._hcam
-            if not (0 <= resolution_index < hcam.ResolutionNumber):
-                error(f"Invalid resolution index: {resolution_index}")
+            if not (0 <= index < len(self.get_resolutions())):
+                error(f"Invalid resolution index: {index}")
                 return False
             
-            hcam.put_eSize(resolution_index)
-            self.resolution_index = resolution_index
+            camera_was_open = self._camera.is_open
+            saved_callback = self._camera._callback
+            saved_context = self._camera._callback_context
+            
+            if camera_was_open:
+                info("Camera is open, stopping to set resolution")
+                self._camera.stop_capture()
+            
+            # Set resolution on the underlying camera
+            self._camera._hcam.put_eSize(index)
+            self.resolution = index
+                        
+            if camera_was_open:
+                info("Restarting camera to set resolution")
+                self._camera.start_capture(saved_callback, saved_context)
+            
+            debug(f"Successfully changed resolution to index {index}")
             return True
         except Exception as e:
             error(f"Failed to set resolution: {e}")
@@ -370,7 +388,7 @@ class AmscopeSettings(CameraSettings):
         try:
             resolutions = []
             hcam = self._camera._hcam
-            count = hcam.StillResolutionNumber
+            count = hcam.StillResolutionNumber()
             for i in range(count):
                 width, height = hcam.get_StillResolution(i)
                 resolutions.append(CameraResolution(width=width, height=height))
@@ -394,7 +412,8 @@ class AmscopeSettings(CameraSettings):
         info(f"Applying settings to camera {camera.model}")
         
         try:
-            self.set_auto_exposure(self.auto_expo)
+            self.set_resolution(self.resolution)
+            self.set_auto_exposure(self.auto_exposure)
             self.set_exposure(self.exposure)
             self.set_exposure_time(self.exposure_time_us)
             self.set_gain(self.gain_percent)
@@ -409,7 +428,7 @@ class AmscopeSettings(CameraSettings):
             
             self.set_level_range(self.levelrange_low, self.levelrange_high)
             
-            self.set_fan(self.fan_enabled)
+            self.set_fan(self.fan)
             self.set_high_fullwell(self.high_fullwell)
             
             info("Successfully applied all settings to camera")
@@ -428,7 +447,7 @@ class AmscopeSettings(CameraSettings):
         hcam = camera._hcam
         
         try:
-            self.auto_expo = bool(hcam.get_AutoExpoEnable())
+            self.auto_exposure = bool(hcam.get_AutoExpoEnable())
             self.exposure = hcam.get_AutoExpoTarget()
             self.exposure_time_us = hcam.get_ExpoTime()
             self.gain_percent = hcam.get_ExpoAGain()
@@ -447,9 +466,9 @@ class AmscopeSettings(CameraSettings):
             self.levelrange_low = RGBALevel(r=low[0], g=low[1], b=low[2], a=low[3])
             self.levelrange_high = RGBALevel(r=high[0], g=high[1], b=high[2], a=high[3])
             
-            self.resolution_index = hcam.get_eSize()
+            self.resolution = hcam.get_eSize()
             
-            self.fan_enabled = bool(hcam.get_Option(0x0a))
+            self.fan = bool(hcam.get_Option(0x0a))
             self.high_fullwell = bool(hcam.get_Option(0x51))
             
             info("Successfully refreshed all settings from camera")

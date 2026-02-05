@@ -209,11 +209,11 @@ class AmscopeCamera(BaseCamera):
         try:
             self._hcam = amcam.Amcam.Open(camera_id)
             if self._hcam:
-                self._is_open = True
                 # Set RGB byte order for Qt compatibility
                 self._hcam.put_Option(self.OPTION_BYTEORDER, 0)
                 # Initialize settings
                 self.initialize_settings()
+                self._is_open = True
                 return True
             return False
         except self._get_sdk().HRESULTException:
@@ -229,6 +229,16 @@ class AmscopeCamera(BaseCamera):
         self._callback_context = None
         self._camera_info = None
         self._frame_buffer = None
+    
+    def _reallocate_frame_buffer(self):
+        """Reallocate frame buffer based on current resolution."""
+        try:
+            width, height = self._hcam.get_Size()
+            buffer_size = self.calculate_buffer_size(width, height, 24)
+            self._frame_buffer = bytes(buffer_size)
+            info(f"Reallocated frame buffer: {width}x{height}, size={buffer_size}")
+        except Exception as e:
+            error(f"Failed to reallocate frame buffer: {e}")
     
     def start_capture(self, callback: Callable, context: Any) -> bool:
         """Start capturing frames with callback"""

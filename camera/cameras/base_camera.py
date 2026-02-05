@@ -152,9 +152,6 @@ class BaseCamera(ABC):
         # Load saved settings or create defaults
         self._settings = self._settings_manager.load()
         
-        # First refresh from camera to sync with current hardware state
-        self._settings.refresh_from_camera(self)
-        
         # Then apply settings to camera hardware
         self._settings.apply_to_camera(self)
     

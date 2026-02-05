@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, TYPE_CHECKING
 
 from generic_config import ConfigManager
-from logger import info, debug, exception
+from logger import info, debug, exception, error
 
 if TYPE_CHECKING:
     from camera.cameras.base_camera import BaseCamera, CameraResolution
@@ -17,7 +17,6 @@ class FileFormat(str, Enum):
     PNG = 'png'
     TIFF = 'tiff'
     JPEG = 'jpeg'
-    BMP = 'bmp'
 
 
 class RGBALevel(NamedTuple):
@@ -129,10 +128,10 @@ class CameraSettings(ABC):
     """
     
     version: str
-    auto_expo: bool
+    auto_exposure: bool
     exposure: int
     exposure_time_us: int
-    resolution_index: int
+    resolution: int
     tint: int
     contrast: int
     hue: int
@@ -144,6 +143,7 @@ class CameraSettings(ABC):
     fformat: FileFormat
     
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
+    _file_formats: tuple[str] = (f.value for f in FileFormat)
     
     def __post_init__(self) -> None:
         if isinstance(self.fformat, str):
@@ -180,7 +180,6 @@ class CameraSettings(ABC):
         if not isinstance(self.fformat, FileFormat):
             raise ValueError(f"fformat must be a FileFormat enum, got {type(self.fformat)}")
     
-    @classmethod
     @abstractmethod
     def get_metadata(cls) -> list[SettingMetadata]:
         pass
@@ -190,7 +189,7 @@ class CameraSettings(ABC):
         info(f"Applying settings to camera {camera.model}")
         
         try:
-            self.set_auto_exposure(self.auto_expo)
+            self.set_auto_exposure(self.auto_exposure)
             self.set_exposure(self.exposure)
             self.set_tint(self.tint)
             self.set_contrast(self.contrast)
@@ -242,6 +241,13 @@ class CameraSettings(ABC):
     def set_level_range(self, low: RGBALevel, high: RGBALevel) -> None:
         pass
     
+    def set_fformat(self, value: str, index: int | None = None) -> None:        
+        try:
+            format_enum = FileFormat(value)
+            self.fformat = format_enum
+        except ValueError as e:
+            raise ValueError(f"Invalid file format: {value}. Must be one of: png, tiff, jpeg") from e
+    
     @abstractmethod
     def get_resolutions(self) -> list['CameraResolution']:
         pass
@@ -251,7 +257,7 @@ class CameraSettings(ABC):
         pass
     
     @abstractmethod
-    def set_resolution(self, resolution_index: int) -> bool:
+    def set_resolution(self, index: int, value: str | None = None) -> bool:
         pass
     
     def get_still_resolutions(self) -> list['CameraResolution']:

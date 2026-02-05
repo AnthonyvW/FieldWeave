@@ -16,26 +16,33 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QFileDialog,
+    QScrollArea,
+    QFrame,
+    QMessageBox,
 )
 from PySide6.QtCore import Qt, Signal, Slot
 
 from app_context import get_app_context
 from logger import info, error, warning, debug
-
+from camera.cameras.base_camera import CameraResolution
 
 class CameraSettingsWidget(QWidget):
     """Widget for displaying and editing camera settings"""
     
     settings_loaded = Signal(bool, object)  # success, result
+    modifications_changed = Signal(bool)  # has_modifications
     
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         
+        self.parent_dialog = parent_dialog
         self.ctx = get_app_context()
         self._settings_widgets: dict[str, QWidget] = {}
         self._updating_from_camera = False
         self._modified_settings: set[str] = set()  # Track which settings have been modified
         self._saved_values: dict[str, any] = {}  # Store saved values for comparison
+        self._group_names: list[str] = []  # Track group names in order
+        self._group_widgets: dict[str, QGroupBox] = {}  # Map group names to widgets
         
         self._setup_ui()
         self._connect_signals()
@@ -44,6 +51,25 @@ class CameraSettingsWidget(QWidget):
     def _setup_ui(self) -> None:
         """Setup the user interface"""
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Scrollable content area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        
+        # Content widget inside scroll area with white background
+        content = QWidget()
+        content.setStyleSheet("background: white;")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        content_layout.setSpacing(10)
+        
+        # Camera title with larger font
+        camera_title = QLabel("Camera")
+        camera_title.setStyleSheet("font-size: 24px; font-weight: bold; color: #5f6368;")
+        content_layout.addWidget(camera_title)
         
         # Camera selection group
         camera_group = QGroupBox("Camera Device")
@@ -61,37 +87,49 @@ class CameraSettingsWidget(QWidget):
         
         camera_layout.addRow("Select Camera:", camera_select_layout)
         
-        layout.addWidget(camera_group)
+        content_layout.addWidget(camera_group)
         
         # Camera settings groups (will be populated dynamically)
         self.settings_container = QWidget()
         self.settings_layout = QVBoxLayout(self.settings_container)
         self.settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.settings_layout.setSpacing(10)
         
-        layout.addWidget(self.settings_container)
-        layout.addStretch()
+        content_layout.addWidget(self.settings_container)
+        content_layout.addStretch()
         
-        # Save/Load buttons
+        # Reset and Load buttons at bottom
         button_layout = QHBoxLayout()
-        self.save_btn = QPushButton("Save Settings")
-        self.load_btn = QPushButton("Load Settings")
         self.reset_btn = QPushButton("Reset to Defaults")
+        self.reset_btn.setEnabled(False)
+        self.load_btn = QPushButton("Load Settings")
+        self.load_btn.setEnabled(False)
         
-        button_layout.addWidget(self.save_btn)
-        button_layout.addWidget(self.load_btn)
         button_layout.addWidget(self.reset_btn)
+        button_layout.addWidget(self.load_btn)
         button_layout.addStretch()
         
-        layout.addLayout(button_layout)
+        content_layout.addLayout(button_layout)
+        
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
     
     def _connect_signals(self) -> None:
         """Connect signals and slots"""
         self.camera_combo.currentIndexChanged.connect(self._on_camera_changed)
         self.refresh_btn.clicked.connect(lambda: self._populate_camera_list(force_enumerate=True))
-        self.save_btn.clicked.connect(self._save_settings)
-        self.load_btn.clicked.connect(self._load_settings)
         self.reset_btn.clicked.connect(self._reset_settings)
+        self.load_btn.clicked.connect(self._load_settings)
         self.settings_loaded.connect(self._on_settings_loaded)
+        
+        # Connect to parent dialog's save button if available
+        if self.parent_dialog:
+            if hasattr(self.parent_dialog, 'save_btn'):
+                self.parent_dialog.save_btn.clicked.connect(self._save_settings)
+                # Connect modifications_changed signal to enable/disable save button
+                self.modifications_changed.connect(self.parent_dialog.save_btn.setEnabled)
+            if hasattr(self.parent_dialog, 'save_camera_settings'):
+                self.parent_dialog.save_camera_settings.connect(self._save_settings)
         
         # Connect to camera manager signals
         if self.ctx.camera_manager:
@@ -222,15 +260,32 @@ class CameraSettingsWidget(QWidget):
             # Group settings by category
             grouped_settings = self._group_settings(metadata_list)
             
+            # Clear and rebuild group tracking
+            self._group_names.clear()
+            self._group_widgets.clear()
+            
             # Create UI for each group
             for group_name, settings_in_group in grouped_settings.items():
                 group_box = self._create_settings_group(group_name, settings_in_group)
                 self.settings_layout.addWidget(group_box)
+                
+                # Track the group
+                self._group_names.append(group_name)
+                self._group_widgets[group_name] = group_box
+                
+                # Register with parent dialog for scrolling
+                if self.parent_dialog and hasattr(self.parent_dialog, 'register_group_box'):
+                    self.parent_dialog.register_group_box("Camera", group_name, group_box)
+            
+            # Update tree items in parent dialog
+            if self.parent_dialog and hasattr(self.parent_dialog, '_update_camera_groups'):
+                self.parent_dialog._update_camera_groups(self._group_names)
             
             # Enable buttons
-            self.save_btn.setEnabled(True)
-            self.load_btn.setEnabled(True)
+            if self.parent_dialog and hasattr(self.parent_dialog, 'save_btn'):
+                self.parent_dialog.save_btn.setEnabled(True)
             self.reset_btn.setEnabled(True)
+            self.load_btn.setEnabled(True)
             
         except Exception as e:
             error(f"Error loading camera settings: {e}")
@@ -246,9 +301,10 @@ class CameraSettingsWidget(QWidget):
         self._settings_widgets.clear()
         
         # Disable buttons
-        self.save_btn.setEnabled(False)
-        self.load_btn.setEnabled(False)
+        if self.parent_dialog and hasattr(self.parent_dialog, 'save_btn'):
+            self.parent_dialog.save_btn.setEnabled(False)
         self.reset_btn.setEnabled(False)
+        self.load_btn.setEnabled(False)
     
     def _show_no_camera_message(self) -> None:
         """Show message when no camera is available"""
@@ -361,6 +417,8 @@ class CameraSettingsWidget(QWidget):
             checkbox.stateChanged.connect(
                 lambda state: self._on_bool_changed(setter_name, state == Qt.CheckState.Checked)
             )
+        else:
+            warning(f"No setter found: {setter_name}")
         
         return checkbox
     
@@ -459,8 +517,10 @@ class CameraSettingsWidget(QWidget):
         setter_name = f"set_{meta.name}"
         if hasattr(settings, setter_name):
             combo.currentIndexChanged.connect(
-                lambda idx: self._on_dropdown_changed(setter_name, combo.itemData(idx))
+                lambda idx: self._on_dropdown_changed(setter_name, idx, combo.itemData(idx))
             )
+        else:
+            warning(f"No setter found: {setter_name}")
         
         return combo
     
@@ -557,6 +617,13 @@ class CameraSettingsWidget(QWidget):
         
         # Update widget styling
         self._update_widget_styling(setting_name, is_modified)
+        
+        # Update category color in parent dialog
+        if self.parent_dialog and hasattr(self.parent_dialog, 'set_category_modified'):
+            self.parent_dialog.set_category_modified("Camera", len(self._modified_settings) > 0)
+        
+        # Emit signal about modification state change
+        self.modifications_changed.emit(len(self._modified_settings) > 0)
     
     def _update_widget_styling(self, setting_name: str, is_modified: bool) -> None:
         """Update the visual styling of a widget to indicate modification"""
@@ -586,14 +653,12 @@ class CameraSettingsWidget(QWidget):
             if label:
                 label.setStyleSheet("QLabel { color: #FFA500; }")
             
-            # For different widget types, apply orange color to slider only
+            # For different widget types, apply orange
             if isinstance(control, QCheckBox):
                 control.setStyleSheet("QCheckBox { color: #FFA500; }")
             elif isinstance(control, QComboBox):
                 control.setStyleSheet("QComboBox { color: #FFA500; }")
             elif isinstance(control, QWidget):
-                # For container widgets (like the range widget container)
-                # Only style slider handle, not the groove
                 for child in control.findChildren(QSlider):
                     child.setStyleSheet("""
                         QSlider::handle:horizontal {
@@ -627,6 +692,21 @@ class CameraSettingsWidget(QWidget):
             self._update_widget_styling(setting_name, False)
         
         self._modified_settings.clear()
+        
+        # Update category color in parent dialog
+        if self.parent_dialog and hasattr(self.parent_dialog, 'set_category_modified'):
+            self.parent_dialog.set_category_modified("Camera", False)
+        
+        # Emit signal about modification state change
+        self.modifications_changed.emit(False)
+    
+    def has_unsaved_changes(self) -> bool:
+        """Check if there are unsaved changes"""
+        return len(self._modified_settings) > 0
+    
+    def get_group_names(self) -> list[str]:
+        """Get list of group names in the settings"""
+        return self._group_names.copy()
     
     def _on_bool_changed(self, setter_name: str, value: bool) -> None:
         """Handle boolean setting change"""
@@ -758,8 +838,14 @@ class CameraSettingsWidget(QWidget):
         except Exception as e:
             error(f"Error setting {setter_name}: {e}")
     
-    def _on_dropdown_changed(self, setter_name: str, value) -> None:
-        """Handle dropdown setting change"""
+    def _on_dropdown_changed(self, setter_name: str, index: int, value) -> None:
+        """Handle dropdown setting change
+        
+        Args:
+            setter_name: Name of the setter method (e.g., 'set_resolution')
+            index: Index of the selected item in the dropdown
+            value: Value associated with the selected item
+        """
         if self._updating_from_camera:
             return
         
@@ -769,13 +855,14 @@ class CameraSettingsWidget(QWidget):
         
         try:
             setter = getattr(camera.settings, setter_name)
-            setter(value)
+            # Pass both index and value to the setter
+            setter(index=index, value=value)
             
             # Extract setting name from setter name (remove "set_" prefix)
             setting_name = setter_name.replace("set_", "")
             self._mark_setting_modified(setting_name, value)
             
-            debug(f"Set {setter_name} to {value}")
+            debug(f"Set {setter_name} to index={index}, value={value}")
         except Exception as e:
             error(f"Error setting {setter_name}: {e}")
     
@@ -853,6 +940,18 @@ class CameraSettingsWidget(QWidget):
             warning("No camera to reset settings on")
             return
         
+        # Confirm reset with user
+        reply = QMessageBox.question(
+            self,
+            "Reset to Defaults",
+            "Are you sure you want to reset all camera settings to their default values? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
         try:
             # Refresh from camera hardware (gets defaults)
             settings = camera.settings
@@ -869,6 +968,6 @@ class CameraSettingsWidget(QWidget):
             self.ctx.toast.info(f"Error resetting settings: {e}", duration=3000)
 
 
-def camera_page() -> QWidget:
+def camera_page(parent_dialog=None) -> QWidget:
     """Create and return the camera settings page widget"""
-    return CameraSettingsWidget()
+    return CameraSettingsWidget(parent_dialog=parent_dialog)

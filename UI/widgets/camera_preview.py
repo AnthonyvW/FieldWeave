@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Any
+from typing import Any
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QTimer, Slot
 from PySide6.QtGui import QImage, QPixmap
@@ -30,7 +30,7 @@ class CameraPreview(QFrame):
         self._camera_info = None
         self._img_width = 0
         self._img_height = 0
-        self._img_buffer: Optional[bytes] = None
+        self._img_buffer: bytes | None = None
         self._is_streaming = False
         self._no_camera_logged = False
         
@@ -212,6 +212,22 @@ class CameraPreview(QFrame):
             return
         
         try:
+            # Check if resolution has changed
+            base_camera = self._camera.underlying_camera
+            _, current_width, current_height = base_camera.get_current_resolution()
+            
+            # If resolution changed, update buffer
+            if current_width != self._img_width or current_height != self._img_height:
+                info(f"Preview: Resolution changed from {self._img_width}x{self._img_height} to {current_width}x{current_height}")
+                self._img_width = current_width
+                self._img_height = current_height
+                
+                # Recalculate buffer size
+                base_camera_class = type(base_camera)
+                buffer_size = base_camera_class.calculate_buffer_size(current_width, current_height, 24)
+                self._img_buffer = bytes(buffer_size)
+                info(f"Preview: Buffer resized to {buffer_size} bytes")
+            
             # Pull image into buffer from underlying camera
             if self._camera.underlying_camera.pull_image(self._img_buffer, 24):
                 # Calculate stride using base camera class method
