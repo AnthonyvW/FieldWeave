@@ -14,7 +14,7 @@ import threading
 import gc
 
 from camera.cameras.base_camera import BaseCamera, CameraResolution, CameraInfo
-from logger import info, debug, error, exception, get_logger
+from logger import info, debug, error, exception, warning
 from camera.settings.amscope_settings import AmscopeSettings
 
 # Module-level reference to the loaded SDK
@@ -37,15 +37,6 @@ class AmscopeCamera(BaseCamera):
     # Class-level flag to track SDK loading
     _sdk_loaded = False
     
-    # Option constants (from amcam SDK documentation)
-    OPTION_FAN = 0x0a
-    OPTION_TEC = 0x08
-    OPTION_TECTARGET = 0x0c
-    OPTION_LOW_NOISE = 0x53
-    OPTION_HIGH_FULLWELL = 0x51
-    OPTION_TESTPATTERN = 0x2c
-    OPTION_DEMOSAIC = 0x5a
-    OPTION_BYTEORDER = 0x01
     
     def __init__(self, model: str):
         """
@@ -59,14 +50,12 @@ class AmscopeCamera(BaseCamera):
         # Set Settings class
         self._settings_class = AmscopeSettings
         
-        # Initialize logger
-        self._logger = get_logger()
-        
+        self._hcam = None  # Will be amcam.Amcam after SDK loads
+
         # Ensure SDK is loaded before instantiating
         if not AmscopeCamera._sdk_loaded:
             AmscopeCamera.ensure_sdk_loaded()
-        
-        self._hcam = None  # Will be amcam.Amcam after SDK loads
+
         self._camera_info = None  # Must be set via set_camera_info() before opening
         self._frame_buffer = None
     
@@ -210,7 +199,7 @@ class AmscopeCamera(BaseCamera):
             self._hcam = amcam.Amcam.Open(camera_id)
             if self._hcam:
                 # Set RGB byte order for Qt compatibility
-                self._hcam.put_Option(self.OPTION_BYTEORDER, 0)
+                self._hcam.put_Option(_amcam.AMCAM_OPTION_BYTEORDER, 0)
                 # Initialize settings
                 self.initialize_settings()
                 self._is_open = True
@@ -282,8 +271,7 @@ class AmscopeCamera(BaseCamera):
             True if successful, False otherwise
         """
         if not self._hcam:
-            logger = get_logger()
-            logger.error("Cannot pull image: camera handle is None")
+            error("Cannot pull image: camera handle is None")
             return False
         
         amcam = self._get_sdk()
@@ -294,8 +282,7 @@ class AmscopeCamera(BaseCamera):
             return True
         except amcam.HRESULTException as e:
             # If timeout or no frame available, log the error
-            logger = get_logger()
-            logger.error(f"Failed to pull image: {e}")
+            error(f"Failed to pull image: {e}")
             return False
     
     def snap_image(self, resolution_index: int = 0) -> bool:

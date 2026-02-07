@@ -333,12 +333,12 @@ class AmscopeSettings(CameraSettings):
     def set_fan(self, enabled: bool) -> None:
         self.fan = enabled
         if self._camera and hasattr(self._camera, '_hcam'):
-            self._camera._hcam.put_Option(0x0a, 1 if enabled else 0)
+            self._camera._hcam.put_Option(self._camera._hcam.AMCAM_OPTION_FAN, 1 if enabled else 0)
     
     def set_high_fullwell(self, enabled: bool) -> None:
         self.high_fullwell = enabled
         if self._camera and hasattr(self._camera, '_hcam'):
-            self._camera._hcam.put_Option(0x51, 1 if enabled else 0)
+            self._camera._hcam.put_Option(self._camera._hcam.AMCAM_OPTION_HIGH_FULLWELL, 1 if enabled else 0)
     
     def get_resolutions(self) -> list[CameraResolution]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
