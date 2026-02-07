@@ -130,7 +130,7 @@ class CameraSettings(ABC):
     version: str
     auto_exposure: bool
     exposure: int
-    exposure_time_us: int
+    exposure_time: int
     resolution: int
     tint: int
     contrast: int
@@ -138,8 +138,8 @@ class CameraSettings(ABC):
     saturation: int
     brightness: int
     gamma: int
-    levelrange_low: RGBALevel
-    levelrange_high: RGBALevel
+    level_range_low: RGBALevel
+    level_range_high: RGBALevel
     fformat: FileFormat
     
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
@@ -149,10 +149,10 @@ class CameraSettings(ABC):
         if isinstance(self.fformat, str):
             self.fformat = FileFormat(self.fformat)
         
-        if isinstance(self.levelrange_low, (tuple, list)):
-            self.levelrange_low = RGBALevel(*self.levelrange_low)
-        if isinstance(self.levelrange_high, (tuple, list)):
-            self.levelrange_high = RGBALevel(*self.levelrange_high)
+        if isinstance(self.level_range_low, (tuple, list)):
+            self.level_range_low = RGBALevel(*self.level_range_low)
+        if isinstance(self.level_range_high, (tuple, list)):
+            self.level_range_high = RGBALevel(*self.level_range_high)
     
     def validate(self) -> None:
         metadata_list = self.get_metadata()
@@ -168,14 +168,14 @@ class CameraSettings(ABC):
                         )
         
         try:
-            self.levelrange_low.validate()
+            self.level_range_low.validate()
         except ValueError as e:
-            raise ValueError(f"levelrange_low invalid: {e}") from e
+            raise ValueError(f"level_range_low invalid: {e}") from e
         
         try:
-            self.levelrange_high.validate()
+            self.level_range_high.validate()
         except ValueError as e:
-            raise ValueError(f"levelrange_high invalid: {e}") from e
+            raise ValueError(f"level_range_high invalid: {e}") from e
                 
         if not isinstance(self.fformat, FileFormat):
             raise ValueError(f"fformat must be a FileFormat enum, got {type(self.fformat)}")
@@ -197,9 +197,9 @@ class CameraSettings(ABC):
             self.set_saturation(self.saturation)
             self.set_brightness(self.brightness)
             self.set_gamma(self.gamma)
-            self.set_level_range(self.levelrange_low, self.levelrange_high)
+            self.set_level_range(self.level_range_low, self.level_range_high)
             
-            info("Successfully applied all settings to camera")
+            debug("Successfully applied all settings to camera")
             
         except Exception as e:
             exception(f"Failed to apply settings to camera: {e}")
@@ -300,11 +300,11 @@ class CameraSettingsManager(ConfigManager[CameraSettings]):
     def from_dict(self, data: dict[str, Any]) -> CameraSettings:
         processed_data = data.copy()
         
-        if 'levelrange_low' in processed_data and isinstance(processed_data['levelrange_low'], dict):
-            processed_data['levelrange_low'] = RGBALevel(**processed_data['levelrange_low'])
+        if 'level_range_low' in processed_data and isinstance(processed_data['level_range_low'], dict):
+            processed_data['level_range_low'] = RGBALevel(**processed_data['level_range_low'])
         
-        if 'levelrange_high' in processed_data and isinstance(processed_data['levelrange_high'], dict):
-            processed_data['levelrange_high'] = RGBALevel(**processed_data['levelrange_high'])
+        if 'level_range_high' in processed_data and isinstance(processed_data['level_range_high'], dict):
+            processed_data['level_range_high'] = RGBALevel(**processed_data['level_range_high'])
         
         settings = self.settings_class(**processed_data)
         return settings

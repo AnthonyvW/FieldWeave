@@ -399,8 +399,14 @@ class CameraSettingsWidget(QWidget):
             warning(f"Unknown setting type: {type_str} for {meta.name}")
             return None
     
-    def _create_bool_widget(self, meta, settings) -> QCheckBox:
+    def _create_bool_widget(self, meta, settings) -> QCheckBox | None:
         """Create checkbox for boolean settings"""
+        # Check if setter exists first
+        setter_name = f"set_{meta.name}"
+        if not hasattr(settings, setter_name):
+            warning(f"No setter found: {setter_name} - skipping widget creation")
+            return None
+        
         checkbox = QCheckBox()
         
         # Get current value
@@ -412,18 +418,20 @@ class CameraSettingsWidget(QWidget):
             checkbox.setToolTip(meta.description)
         
         # Connect to setter
-        setter_name = f"set_{meta.name}"
-        if hasattr(settings, setter_name):
-            checkbox.stateChanged.connect(
-                lambda state: self._on_bool_changed(setter_name, state == Qt.CheckState.Checked)
-            )
-        else:
-            warning(f"No setter found: {setter_name}")
+        checkbox.stateChanged.connect(
+            lambda state: self._on_bool_changed(setter_name, state == Qt.CheckState.Checked)
+        )
         
         return checkbox
     
-    def _create_range_widget(self, meta, settings) -> QWidget:
+    def _create_range_widget(self, meta, settings) -> QWidget | None:
         """Create slider with value display for range settings"""
+        # Check if setter exists first
+        setter_name = f"set_{meta.name}"
+        if not hasattr(settings, setter_name):
+            warning(f"No setter found: {setter_name} - skipping widget creation")
+            return None
+        
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -471,30 +479,34 @@ class CameraSettingsWidget(QWidget):
             slider.setValue(int(current_value))
         
         # Connect signals
-        setter_name = f"set_{meta.name}"
-        if hasattr(settings, setter_name):
-            if is_float:
-                spinbox.valueChanged.connect(
-                    lambda val: self._on_float_changed(setter_name, val, slider, meta)
-                )
-                slider.valueChanged.connect(
-                    lambda val: self._on_slider_changed_float(setter_name, val, spinbox, meta)
-                )
-            else:
-                spinbox.valueChanged.connect(
-                    lambda val: self._on_int_changed(setter_name, val, slider)
-                )
-                slider.valueChanged.connect(
-                    lambda val: self._on_slider_changed_int(setter_name, val, spinbox)
-                )
+        if is_float:
+            spinbox.valueChanged.connect(
+                lambda val: self._on_float_changed(setter_name, val, slider, meta)
+            )
+            slider.valueChanged.connect(
+                lambda val: self._on_slider_changed_float(setter_name, val, spinbox, meta)
+            )
+        else:
+            spinbox.valueChanged.connect(
+                lambda val: self._on_int_changed(setter_name, val, slider)
+            )
+            slider.valueChanged.connect(
+                lambda val: self._on_slider_changed_int(setter_name, val, spinbox)
+            )
         
         layout.addWidget(slider)
         layout.addWidget(spinbox)
         
         return container
     
-    def _create_dropdown_widget(self, meta, settings) -> QComboBox:
+    def _create_dropdown_widget(self, meta, settings) -> QComboBox | None:
         """Create dropdown for choice settings"""
+        # Check if setter exists first
+        setter_name = f"set_{meta.name}"
+        if not hasattr(settings, setter_name):
+            warning(f"No setter found: {setter_name} - skipping widget creation")
+            return None
+        
         combo = QComboBox()
         
         # Add choices
@@ -514,18 +526,20 @@ class CameraSettingsWidget(QWidget):
             combo.setToolTip(meta.description)
         
         # Connect to setter
-        setter_name = f"set_{meta.name}"
-        if hasattr(settings, setter_name):
-            combo.currentIndexChanged.connect(
-                lambda idx: self._on_dropdown_changed(setter_name, idx, combo.itemData(idx))
-            )
-        else:
-            warning(f"No setter found: {setter_name}")
+        combo.currentIndexChanged.connect(
+            lambda idx: self._on_dropdown_changed(setter_name, idx, combo.itemData(idx))
+        )
         
         return combo
     
-    def _create_rgba_level_widget(self, meta, settings) -> QWidget:
+    def _create_rgba_level_widget(self, meta, settings) -> QWidget | None:
         """Create RGBA level widget with four spinboxes for R, G, B, A"""
+        # Check if setter exists first
+        setter_name = f"set_{meta.name}"
+        if not hasattr(settings, setter_name):
+            warning(f"No setter found: {setter_name} - skipping widget creation")
+            return None
+        
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -558,38 +572,36 @@ class CameraSettingsWidget(QWidget):
             spinboxes[channel] = spinbox
         
         # Connect to setter
-        setter_name = f"set_{meta.name}"
-        if hasattr(settings, setter_name):
-            # Create a function that updates all values when any spinbox changes
-            def on_rgba_changed():
-                if self._updating_from_camera:
-                    return
-                
-                # Import RGBALevel here to avoid circular imports
-                try:
-                    from camera.settings.camera_settings import RGBALevel
-                    
-                    new_value = RGBALevel(
-                        r=spinboxes['r'].value(),
-                        g=spinboxes['g'].value(),
-                        b=spinboxes['b'].value(),
-                        a=spinboxes['a'].value()
-                    )
-                    
-                    setter = getattr(settings, setter_name)
-                    setter(new_value)
-                    
-                    # Mark as modified
-                    setting_name = setter_name.replace("set_", "")
-                    self._mark_setting_modified(setting_name, new_value)
-                    
-                    debug(f"Set {setter_name} to {new_value}")
-                except Exception as e:
-                    error(f"Error setting {setter_name}: {e}")
+        # Create a function that updates all values when any spinbox changes
+        def on_rgba_changed():
+            if self._updating_from_camera:
+                return
             
-            # Connect all spinboxes to the same handler
-            for spinbox in spinboxes.values():
-                spinbox.valueChanged.connect(on_rgba_changed)
+            # Import RGBALevel here to avoid circular imports
+            try:
+                from camera.settings.camera_settings import RGBALevel
+                
+                new_value = RGBALevel(
+                    r=spinboxes['r'].value(),
+                    g=spinboxes['g'].value(),
+                    b=spinboxes['b'].value(),
+                    a=spinboxes['a'].value()
+                )
+                
+                setter = getattr(settings, setter_name)
+                setter(new_value)
+                
+                # Mark as modified
+                setting_name = setter_name.replace("set_", "")
+                self._mark_setting_modified(setting_name, new_value)
+                
+                debug(f"Set {setter_name} to {new_value}")
+            except Exception as e:
+                error(f"Error setting {setter_name}: {e}")
+        
+        # Connect all spinboxes to the same handler
+        for spinbox in spinboxes.values():
+            spinbox.valueChanged.connect(on_rgba_changed)
         
         layout.addStretch()
         return container

@@ -21,7 +21,7 @@ class AmscopeSettings(CameraSettings):
     version: str = "0"
     auto_exposure: bool = True
     exposure: int = 128
-    exposure_time_us: int = 50000
+    exposure_time: int = 50000
     resolution: int = 0
     temp: int = 6500
     tint: int = 1000
@@ -30,9 +30,9 @@ class AmscopeSettings(CameraSettings):
     saturation: int = 128
     brightness: int = 0
     gamma: int = 100
-    gain_percent: int = 100
-    levelrange_low: RGBALevel = RGBALevel(0, 0, 0, 0)
-    levelrange_high: RGBALevel = RGBALevel(255, 255, 255, 255)
+    gain: int = 100
+    level_range_low: RGBALevel = RGBALevel(0, 0, 0, 0)
+    level_range_high: RGBALevel = RGBALevel(255, 255, 255, 255)
     fformat: FileFormat = FileFormat.TIFF
     
     fan: bool = field(default=False)
@@ -72,7 +72,7 @@ class AmscopeSettings(CameraSettings):
                 runtime_changeable=True,
             ),
             SettingMetadata(
-                name="exposure_time_us",
+                name="exposure_time",
                 display_name="Exposure Time (µs)",
                 setting_type=SettingType.RANGE,
                 description="Manual exposure time in microseconds",
@@ -82,12 +82,12 @@ class AmscopeSettings(CameraSettings):
                 runtime_changeable=True,
             ),
             SettingMetadata(
-                name="gain_percent",
-                display_name="Gain (%)",
+                name="gain",
+                display_name="Gain",
                 setting_type=SettingType.RANGE,
-                description="Sensor gain in percent",
+                description="Sensor gain",
                 min_value=100,
-                max_value=1600,
+                max_value=300,
                 group="Exposure",
                 runtime_changeable=True,
             ),
@@ -162,7 +162,7 @@ class AmscopeSettings(CameraSettings):
                 runtime_changeable=True,
             ),
             SettingMetadata(
-                name="levelrange_low",
+                name="level_range_low",
                 display_name="Black Point",
                 setting_type=SettingType.RGBA_LEVEL,
                 description="Output level for darkest input values",
@@ -170,7 +170,7 @@ class AmscopeSettings(CameraSettings):
                 runtime_changeable=True,
             ),
             SettingMetadata(
-                name="levelrange_high",
+                name="level_range_high",
                 display_name="White Point",
                 setting_type=SettingType.RGBA_LEVEL,
                 description="Output level for brightest input values",
@@ -236,17 +236,17 @@ class AmscopeSettings(CameraSettings):
             self._camera._hcam.put_AutoExpoTarget(value)
     
     def set_exposure_time(self, time_us: int) -> bool:
-        self._validate_range("exposure_time_us", time_us)
-        self.exposure_time_us = time_us
+        self._validate_range("exposure_time", time_us)
+        self.exposure_time = time_us
         if self._camera and hasattr(self._camera, '_hcam'):
             self._camera._hcam.put_ExpoTime(time_us)
         return True
     
-    def set_gain(self, gain_percent: int) -> None:
-        self._validate_range("gain_percent", gain_percent)
-        self.gain_percent = gain_percent
+    def set_gain(self, gain: int) -> None:
+        self._validate_range("gain", gain)
+        self.gain = gain
         if self._camera and hasattr(self._camera, '_hcam'):
-            self._camera._hcam.put_ExpoAGain(gain_percent)
+            self._camera._hcam.put_ExpoAGain(gain)
     
     def set_temp(self, value: int) -> None:
         self._validate_range("temp", value)
@@ -301,13 +301,34 @@ class AmscopeSettings(CameraSettings):
     def set_level_range(self, low: RGBALevel, high: RGBALevel) -> None:
         low.validate()
         high.validate()
-        self.levelrange_low = low
-        self.levelrange_high = high
-        if self._camera and hasattr(self._camera, '_hcam'):
+        self.level_range_low = low
+        self.level_range_high = high
+        if self._camera:
             self._camera._hcam.put_LevelRange(
                 (low.r, low.g, low.b, low.a),
                 (high.r, high.g, high.b, high.a)
             )
+
+    def set_level_range_low(self, low: RGBALevel) -> None:
+        low.validate()
+        if self._camera:
+            high = self.level_range_high
+            self._camera._hcam.put_LevelRange(
+                (low.r, low.g, low.b, low.a),
+                (high.r, high.g, high.b, high.a)
+            )
+            self.level_range_low = low
+
+    def set_level_range_high(self, high: RGBALevel) -> None:
+        high.validate()
+        if self._camera:
+            low = self.level_range_low
+            self._camera._hcam.put_LevelRange(
+                (low.r, low.g, low.b, low.a),
+                (high.r, high.g, high.b, high.a)
+            )
+            self.level_range_high = high
+
     
     def set_fan(self, enabled: bool) -> None:
         self.fan = enabled
@@ -362,7 +383,7 @@ class AmscopeSettings(CameraSettings):
             saved_context = self._camera._callback_context
             
             if camera_was_open:
-                info("Camera is open, stopping to set resolution")
+                debug("Camera is open, stopping to set resolution")
                 self._camera.stop_capture()
             
             # Set resolution on the underlying camera
@@ -370,7 +391,7 @@ class AmscopeSettings(CameraSettings):
             self.resolution = index
                         
             if camera_was_open:
-                info("Restarting camera to set resolution")
+                debug("Restarting camera to set resolution")
                 self._camera.start_capture(saved_callback, saved_context)
             
             debug(f"Successfully changed resolution to index {index}")
@@ -399,13 +420,13 @@ class AmscopeSettings(CameraSettings):
     
     def get_exposure_time(self) -> int:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
-            return self.exposure_time_us
+            return self.exposure_time
         
         try:
             return self._camera._hcam.get_ExpoTime()
         except Exception as e:
             error(f"Failed to get exposure time: {e}")
-            return self.exposure_time_us
+            return self.exposure_time
     
     def apply_to_camera(self, camera: BaseCamera) -> None:
         self._camera = camera
@@ -415,8 +436,8 @@ class AmscopeSettings(CameraSettings):
             self.set_resolution(self.resolution)
             self.set_auto_exposure(self.auto_exposure)
             self.set_exposure(self.exposure)
-            self.set_exposure_time(self.exposure_time_us)
-            self.set_gain(self.gain_percent)
+            self.set_exposure_time(self.exposure_time)
+            self.set_gain(self.gain)
             
             self.set_temp_tint(self.temp, self.tint)
             
@@ -426,12 +447,12 @@ class AmscopeSettings(CameraSettings):
             self.set_contrast(self.contrast)
             self.set_gamma(self.gamma)
             
-            self.set_level_range(self.levelrange_low, self.levelrange_high)
+            self.set_level_range(self.level_range_low, self.level_range_high)
             
             self.set_fan(self.fan)
             self.set_high_fullwell(self.high_fullwell)
             
-            info("Successfully applied all settings to camera")
+            debug("Successfully applied all settings to camera")
         except Exception as e:
             exception(f"Failed to apply settings to camera: {e}")
             raise
@@ -449,9 +470,8 @@ class AmscopeSettings(CameraSettings):
         try:
             self.auto_exposure = bool(hcam.get_AutoExpoEnable())
             self.exposure = hcam.get_AutoExpoTarget()
-            self.exposure_time_us = hcam.get_ExpoTime()
-            self.gain_percent = hcam.get_ExpoAGain()
-            
+            self.exposure_time = hcam.get_ExpoTime()
+            self.gain = hcam.get_ExpoAGain()
             temp, tint = hcam.get_TempTint()
             self.temp = temp
             self.tint = tint
@@ -463,8 +483,8 @@ class AmscopeSettings(CameraSettings):
             self.gamma = hcam.get_Gamma()
             
             low, high = hcam.get_LevelRange()
-            self.levelrange_low = RGBALevel(r=low[0], g=low[1], b=low[2], a=low[3])
-            self.levelrange_high = RGBALevel(r=high[0], g=high[1], b=high[2], a=high[3])
+            self.level_range_low = RGBALevel(r=low[0], g=low[1], b=low[2], a=low[3])
+            self.level_range_high = RGBALevel(r=high[0], g=high[1], b=high[2], a=high[3])
             
             self.resolution = hcam.get_eSize()
             

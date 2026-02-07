@@ -226,7 +226,6 @@ class CameraPreview(QFrame):
                 base_camera_class = type(base_camera)
                 buffer_size = base_camera_class.calculate_buffer_size(current_width, current_height, 24)
                 self._img_buffer = bytes(buffer_size)
-                info(f"Preview: Buffer resized to {buffer_size} bytes")
             
             # Pull image into buffer from underlying camera
             if self._camera.underlying_camera.pull_image(self._img_buffer, 24):
