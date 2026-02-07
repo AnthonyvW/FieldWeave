@@ -35,9 +35,6 @@ class AmscopeSettings(CameraSettings):
     level_range_high: RGBALevel = RGBALevel(255, 255, 255, 255)
     fformat: FileFormat = FileFormat.TIFF
     
-    fan: bool = field(default=False)
-    high_fullwell: bool = field(default=False)
-    
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
     
     def __post_init__(self) -> None:
@@ -195,22 +192,6 @@ class AmscopeSettings(CameraSettings):
                 group="Capture",
                 runtime_changeable=True,
             ),
-            SettingMetadata(
-                name="fan",
-                display_name="Cooling Fan",
-                setting_type=SettingType.BOOL,
-                description="Enable cooling fan",
-                group="Hardware",
-                runtime_changeable=True,
-            ),
-            SettingMetadata(
-                name="high_fullwell",
-                display_name="High Full-Well",
-                setting_type=SettingType.BOOL,
-                description="Enable high full-well capacity mode",
-                group="Hardware",
-                runtime_changeable=True,
-            ),
         ]
     
     def _get_metadata_map(self) -> dict[str, SettingMetadata]:
@@ -328,17 +309,6 @@ class AmscopeSettings(CameraSettings):
                 (high.r, high.g, high.b, high.a)
             )
             self.level_range_high = high
-
-    
-    def set_fan(self, enabled: bool) -> None:
-        self.fan = enabled
-        if self._camera and hasattr(self._camera, '_hcam'):
-            self._camera._hcam.put_Option(self._camera._hcam.AMCAM_OPTION_FAN, 1 if enabled else 0)
-    
-    def set_high_fullwell(self, enabled: bool) -> None:
-        self.high_fullwell = enabled
-        if self._camera and hasattr(self._camera, '_hcam'):
-            self._camera._hcam.put_Option(self._camera._hcam.AMCAM_OPTION_HIGH_FULLWELL, 1 if enabled else 0)
     
     def get_resolutions(self) -> list[CameraResolution]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
@@ -449,9 +419,6 @@ class AmscopeSettings(CameraSettings):
             
             self.set_level_range(self.level_range_low, self.level_range_high)
             
-            self.set_fan(self.fan)
-            self.set_high_fullwell(self.high_fullwell)
-            
             debug("Successfully applied all settings to camera")
         except Exception as e:
             exception(f"Failed to apply settings to camera: {e}")
@@ -487,9 +454,6 @@ class AmscopeSettings(CameraSettings):
             self.level_range_high = RGBALevel(r=high[0], g=high[1], b=high[2], a=high[3])
             
             self.resolution = hcam.get_eSize()
-            
-            self.fan = bool(hcam.get_Option(0x0a))
-            self.high_fullwell = bool(hcam.get_Option(0x51))
             
             info("Successfully refreshed all settings from camera")
         except Exception as e:
