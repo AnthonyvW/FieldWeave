@@ -392,7 +392,6 @@ class AmscopeCamera(BaseCamera):
         # Get metadata from settings if available
         if self._settings is not None:
             metadata['exposure_time_us'] = self._settings.get_exposure_time()
-            metadata['gain_percent'] = self._settings.get_gain()
             metadata['temperature'] = self._settings.temp
             metadata['tint'] = self._settings.tint
         
@@ -486,9 +485,6 @@ class AmscopeCamera(BaseCamera):
             h = capture_success['height']
             stride = amcam.TDIBWIDTHBYTES(w * 24)
             image_data = np.frombuffer(pData, dtype=np.uint8).reshape((h, stride))[:, :w*3].reshape((h, w, 3)).copy()
-            
-            # Convert BGR to RGB
-            image_data = image_data[:, :, ::-1].copy()
             
             del pData
             
