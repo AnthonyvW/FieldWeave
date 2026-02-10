@@ -418,7 +418,7 @@ class CameraSettingsWidget(QWidget):
             checkbox.setToolTip(meta.description)
         
         # Connect to setter
-        checkbox.stateChanged.connect(
+        checkbox.checkStateChanged.connect(
             lambda state: self._on_bool_changed(setter_name, state == Qt.CheckState.Checked)
         )
         
