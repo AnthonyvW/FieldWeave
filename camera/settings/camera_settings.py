@@ -119,6 +119,7 @@ class CameraSettings(ABC):
     
     4. Implement resolution and exposure methods:
        - get_resolutions(), set_resolution(), get_current_resolution()
+       - get_still_resolutions(), set_still_resolution()
        - get_exposure_time(), set_exposure_time()
     
     Note on Default Values:
@@ -131,7 +132,8 @@ class CameraSettings(ABC):
     auto_exposure: bool
     exposure: int
     exposure_time: int
-    resolution: int
+    preview_resolution: str
+    still_resolution: str
     tint: int
     contrast: int
     hue: int
@@ -257,7 +259,11 @@ class CameraSettings(ABC):
         pass
     
     @abstractmethod
-    def set_resolution(self, index: int, value: str | None = None) -> bool:
+    def set_preview_resolution(self, value: str, index: int | None = None) -> bool:
+        pass
+
+    @abstractmethod
+    def set_still_resolution(self, value: str, index: int | None = None) -> bool:
         pass
     
     def get_still_resolutions(self) -> list['CameraResolution']:

@@ -22,7 +22,8 @@ class AmscopeSettings(CameraSettings):
     auto_exposure: bool = True
     exposure: int = 128
     exposure_time: int = 50000
-    resolution: int = 0
+    preview_resolution: str = ""
+    still_resolution: str = ""
     temp: int = 6500
     tint: int = 1000
     contrast: int = 0
@@ -46,9 +47,11 @@ class AmscopeSettings(CameraSettings):
         """
         # Get available resolutions from camera
         resolutions = self.get_resolutions()
-        resolution_choices = [f"{res.width}x{res.height}" 
-                            for idx, res in enumerate(resolutions)] if resolutions else []
-        
+        resolution_choices = [f"{res.width}x{res.height}" for res in resolutions]
+
+        still_resolutions = self.get_still_resolutions()
+        still_resolution_choices = [f"{res.width}x{res.height}" for res in still_resolutions]
+
         return [
             SettingMetadata(
                 name="auto_exposure",
@@ -175,13 +178,22 @@ class AmscopeSettings(CameraSettings):
                 runtime_changeable=True,
             ),
             SettingMetadata(
-                name="resolution",
-                display_name="Resolution",
+                name="preview_resolution",
+                display_name="Preview Resolution",
                 setting_type=SettingType.DROPDOWN,
-                description="Camera resolution",
-                choices=resolution_choices,  # Dynamically populated from camera
+                description="Camera preview resolution",
+                choices=resolution_choices,
                 group="Capture",
                 runtime_changeable=False,
+            ),
+            SettingMetadata(
+                name="still_resolution",
+                display_name="Still Resolution",
+                setting_type=SettingType.DROPDOWN,
+                description="Resolution used when capturing a still image",
+                choices=still_resolution_choices,
+                group="Capture",
+                runtime_changeable=True,
             ),
             SettingMetadata(
                 name="fformat",
@@ -341,35 +353,86 @@ class AmscopeSettings(CameraSettings):
             error(f"Failed to get current resolution: {e}")
             return (0, 0, 0)
     
-    def set_resolution(self, index: int, value: str = "") -> bool:
-        """Set camera resolution. Requires camera restart."""
+    def set_preview_resolution(self, value: str, index: int | None = None) -> bool:
+        """
+        Set camera preview resolution. Requires camera restart.
+
+        The dropdown supplies both the string label (e.g. "1280x960") and the index
+        of that label in the choices list.  When ``index`` is provided it is used
+        directly; otherwise it is derived from ``value``.
+        """
         try:
-            if not (0 <= index < len(self.get_resolutions())):
-                error(f"Invalid resolution index: {index}")
-                return False
-            
+            resolutions = self.get_resolutions()
+            choices = [f"{r.width}x{r.height}" for r in resolutions]
+
+            if index is None:
+                if value not in choices:
+                    error(f"Invalid resolution value: {value!r}. Available: {choices}")
+                    return False
+                index = choices.index(value)
+            else:
+                if not (0 <= index < len(choices)):
+                    error(f"Invalid resolution index: {index}. Valid range: 0-{len(choices) - 1}")
+                    return False
+                value = choices[index]
+
             camera_was_open = self._camera.is_open
             saved_callback = self._camera._callback
             saved_context = self._camera._callback_context
-            
+
             if camera_was_open:
                 debug("Camera is open, stopping to set resolution")
                 self._camera.stop_capture()
-            
-            # Set resolution on the underlying camera
+
             self._camera._hcam.put_eSize(index)
-            self.resolution = index
-                        
+            self.preview_resolution = value
+
             if camera_was_open:
-                debug("Restarting camera to set resolution")
+                debug("Restarting camera after resolution change")
                 self._camera.start_capture(saved_callback, saved_context)
-            
-            debug(f"Successfully changed resolution to index {index}")
+
+            debug(f"Successfully changed preview resolution to {value} (index {index})")
             return True
         except Exception as e:
             error(f"Failed to set resolution: {e}")
             return False
-    
+
+    def set_still_resolution(self, value: str, index: int | None = None) -> bool:
+        """
+        Set the still-capture resolution.
+
+        The dropdown supplies both the string label (e.g. "2592x1944") and the index
+        of that label in the choices list.  When ``index`` is provided it is used
+        directly; otherwise it is derived from ``value``.  The camera does not need
+        to be restarted; the stored value is used as the index argument at Snap() time.
+        """
+        try:
+            still_resolutions = self.get_still_resolutions()
+            choices = [f"{r.width}x{r.height}" for r in still_resolutions]
+
+            if not choices:
+                # Camera doesn't support distinct still resolutions; store as-is.
+                self.still_resolution = value
+                return True
+
+            if index is None:
+                if value not in choices:
+                    error(f"Invalid still resolution value: {value!r}. Available: {choices}")
+                    return False
+                index = choices.index(value)
+            else:
+                if not (0 <= index < len(choices)):
+                    error(f"Invalid still resolution index: {index}. Valid range: 0-{len(choices) - 1}")
+                    return False
+                value = choices[index]
+
+            self.still_resolution = value
+            debug(f"Successfully changed still resolution to {value} (index {index})")
+            return True
+        except Exception as e:
+            error(f"Failed to set still resolution: {e}")
+            return False
+
     def get_still_resolutions(self) -> list[CameraResolution]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
             return []
@@ -403,7 +466,10 @@ class AmscopeSettings(CameraSettings):
         info(f"Applying settings to camera {camera.model}")
         
         try:
-            self.set_resolution(self.resolution)
+            if self.preview_resolution:
+                self.set_preview_resolution(self.preview_resolution)
+            if self.still_resolution:
+                self.set_still_resolution(self.still_resolution)
             self.set_auto_exposure(self.auto_exposure)
             self.set_exposure(self.exposure)
             self.set_exposure_time(self.exposure_time)
@@ -453,7 +519,20 @@ class AmscopeSettings(CameraSettings):
             self.level_range_low = RGBALevel(r=low[0], g=low[1], b=low[2], a=low[3])
             self.level_range_high = RGBALevel(r=high[0], g=high[1], b=high[2], a=high[3])
             
-            self.resolution = hcam.get_eSize()
+            index = hcam.get_eSize()
+            resolutions = self.get_resolutions()
+            if 0 <= index < len(resolutions):
+                r = resolutions[index]
+                self.preview_resolution = f"{r.width}x{r.height}"
+            else:
+                self.preview_resolution = ""
+
+            still_resolutions = self.get_still_resolutions()
+            if still_resolutions:
+                # The SDK has no dedicated "get current still resolution" call; default
+                # to the highest-resolution option (index 0) when refreshing.
+                r = still_resolutions[0]
+                self.still_resolution = f"{r.width}x{r.height}"
             
             info("Successfully refreshed all settings from camera")
         except Exception as e:

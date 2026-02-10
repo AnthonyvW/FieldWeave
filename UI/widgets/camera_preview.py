@@ -135,12 +135,6 @@ class CameraPreview(QFrame):
                     self._video_label.setText("Camera has no resolutions available")
                     return
                 
-                # Use first resolution (typically highest quality)
-                if not base_camera.set_resolution(0):
-                    error("Preview: Failed to set resolution")
-                    self._video_label.setText("Failed to set camera resolution")
-                    return
-                
                 # Get resolution again after setting
                 res_index, width, height = base_camera.get_current_resolution()
             

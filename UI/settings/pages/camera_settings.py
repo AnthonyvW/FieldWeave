@@ -854,7 +854,7 @@ class CameraSettingsWidget(QWidget):
         """Handle dropdown setting change
         
         Args:
-            setter_name: Name of the setter method (e.g., 'set_resolution')
+            setter_name: Name of the setter method (e.g., 'set_preview_resolution')
             index: Index of the selected item in the dropdown
             value: Value associated with the selected item
         """

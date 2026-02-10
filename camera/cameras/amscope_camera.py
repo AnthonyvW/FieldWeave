@@ -308,7 +308,7 @@ class AmscopeCamera(BaseCamera):
 
     def set_resolution(self, resolution_index: int) -> bool:
         """Set camera resolution"""
-        return self.settings.set_resolution(resolution_index)
+        return self.settings.set_still_resolution(resolution_index)
 
     def supports_still_capture(self) -> bool:
         """Check if camera supports separate still image capture"""
