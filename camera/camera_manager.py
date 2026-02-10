@@ -5,7 +5,6 @@ Provides plugin architecture for multiple camera types.
 
 from __future__ import annotations
 
-from typing import Optional, List, Callable
 from PySide6.QtCore import QObject, Signal
 
 from camera.cameras.base_camera import BaseCamera
@@ -39,34 +38,34 @@ class CameraManager(QObject):
         super().__init__()
         
         # Available camera enumerators (plugin architecture)
-        self._enumerators: List[CameraEnumerator] = [
+        self._enumerators: list[CameraEnumerator] = [
             AmscopeEnumerator(),
             GenericUSBEnumerator(),
             # Future: Add more enumerators here
         ]
         
         # Available cameras (from last enumeration)
-        self._available_cameras: List[CameraInfo] = []
+        self._available_cameras: list[CameraInfo] = []
         
         # Active camera
-        self._active_camera: Optional[BaseCamera] = None
-        self._active_camera_info: Optional[CameraInfo] = None
+        self._active_camera: BaseCamera | None = None
+        self._active_camera_info: CameraInfo | None = None
         self._camera_thread_started = False
         
         info("Camera manager initialized")
     
     @property
-    def available_cameras(self) -> List[CameraInfo]:
+    def available_cameras(self) -> list[CameraInfo]:
         """Get list of available cameras from last enumeration"""
         return self._available_cameras.copy()
     
     @property
-    def active_camera(self) -> Optional[BaseCamera]:
+    def active_camera(self) -> BaseCamera | None:
         """Get the currently active camera (may be None)"""
         return self._active_camera
     
     @property
-    def active_camera_info(self) -> Optional[CameraInfo]:
+    def active_camera_info(self) -> CameraInfo | None:
         """Get info about the currently active camera"""
         return self._active_camera_info
     
@@ -75,7 +74,7 @@ class CameraManager(QObject):
         """Check if there is an active camera"""
         return self._active_camera is not None
     
-    def enumerate_cameras(self) -> List[CameraInfo]:
+    def enumerate_cameras(self) -> list[CameraInfo]:
         """
         Enumerate all available cameras across all enumerators.
         
@@ -112,7 +111,7 @@ class CameraManager(QObject):
         
         return cameras
     
-    def get_camera_by_id(self, device_id: str) -> Optional[CameraInfo]:
+    def get_camera_by_id(self, device_id: str) -> CameraInfo | None:
         """
         Find a camera by its device ID.
         
@@ -127,7 +126,7 @@ class CameraManager(QObject):
                 return camera_info
         return None
     
-    def get_cameras_by_type(self, camera_type: CameraType) -> List[CameraInfo]:
+    def get_cameras_by_type(self, camera_type: CameraType) -> list[CameraInfo]:
         """
         Get all cameras of a specific type.
         
@@ -162,17 +161,6 @@ class CameraManager(QObject):
         if camera is None:
             error(f"Failed to create camera instance for {camera_info}")
             return False
-        
-        # Set camera info if the camera supports it
-        if hasattr(camera, 'set_camera_info'):
-            # Create the old-style CameraInfo from our new CameraInfo
-            from camera.cameras.base_camera import CameraInfo as OldCameraInfo
-            old_camera_info = OldCameraInfo(
-                id=camera_info.device_id,
-                displayname=camera_info.display_name,
-                model=camera_info.metadata.get('model_info') if camera_info.metadata else None
-            )
-            camera.set_camera_info(old_camera_info)
         
         # Wrap in threaded camera
         threaded_camera = ThreadedCamera(camera)
@@ -277,7 +265,7 @@ class CameraManager(QObject):
             self.active_camera_changed.emit(None)
             return False
     
-    def _create_camera_instance(self, camera_info: CameraInfo) -> Optional[BaseCamera]:
+    def _create_camera_instance(self, camera_info: CameraInfo) -> BaseCamera | None:
         """
         Factory method to create camera instance based on camera info.
         

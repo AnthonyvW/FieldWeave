@@ -8,7 +8,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import Any
 from logger import error, exception, debug
 
 from camera.cameras.amscope_camera import AmscopeCamera
@@ -28,11 +28,11 @@ class CameraInfo:
     camera_type: CameraType
     device_id: str
     display_name: str
-    model: Optional[str] = None
-    manufacturer: Optional[str] = None
-    serial_number: Optional[str] = None
-    max_resolution: Optional[tuple[int, int]] = None
-    metadata: Optional[Dict[str, Any]] = None
+    model: str | None = None
+    manufacturer: str | None = None
+    serial_number: str | None = None
+    max_resolution: tuple[int, int] | None = None
+    metadata: dict[str, Any] | None = None
     
     def __str__(self) -> str:
         parts = [self.display_name]
@@ -53,7 +53,7 @@ class CameraEnumerator(ABC):
     """
     
     @abstractmethod
-    def enumerate(self) -> List[CameraInfo]:
+    def enumerate(self) -> list[CameraInfo]:
         """
         Enumerate all cameras of this type.
         
@@ -137,7 +137,7 @@ class AmscopeEnumerator(CameraEnumerator):
             self._sdk = None
             return False
     
-    def enumerate(self) -> List[CameraInfo]:
+    def enumerate(self) -> list[CameraInfo]:
         """Enumerate Amscope cameras"""
         # Ensure SDK is available before enumerating
         if not self.is_available():
@@ -212,7 +212,7 @@ class GenericUSBEnumerator(CameraEnumerator):
         except ImportError:
             return False
     
-    def enumerate(self) -> List[CameraInfo]:
+    def enumerate(self) -> list[CameraInfo]:
         """Enumerate generic USB cameras (placeholder)"""
         # For now, return empty list
         # Future: Implement using OpenCV or platform-specific APIs

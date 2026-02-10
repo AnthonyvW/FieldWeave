@@ -13,7 +13,7 @@ import numpy as np
 import threading
 import gc
 
-from camera.cameras.base_camera import BaseCamera, CameraResolution, CameraInfo
+from camera.cameras.base_camera import BaseCamera, CameraResolution
 from logger import info, debug, error, exception, warning
 from camera.settings.amscope_settings import AmscopeSettings
 
@@ -56,7 +56,6 @@ class AmscopeCamera(BaseCamera):
         if not AmscopeCamera._sdk_loaded:
             AmscopeCamera.ensure_sdk_loaded()
 
-        self._camera_info = None  # Must be set via set_camera_info() before opening
         self._frame_buffer = None
     
     def _get_settings_class(self):
@@ -216,7 +215,6 @@ class AmscopeCamera(BaseCamera):
         self._is_open = False
         self._callback = None
         self._callback_context = None
-        self._camera_info = None
         self._frame_buffer = None
     
     def _reallocate_frame_buffer(self):
@@ -300,62 +298,28 @@ class AmscopeCamera(BaseCamera):
     # Resolution Management
     # -------------------------
     
-    def set_camera_info(self, info: CameraInfo):
-        """Set camera information (needed before get_resolutions works)"""
-        self._camera_info = info
-    
     def get_resolutions(self) -> list[CameraResolution]:
         """Get available preview resolutions"""
-        if not self._camera_info or not self._camera_info.model:
-            return []
-        
-        resolutions = []
-        for i in range(self._camera_info.model.preview):
-            res = self._camera_info.model.res[i]
-            resolutions.append(CameraResolution(width=res.width, height=res.height))
-        
-        return resolutions
-    
-    def get_current_resolution(self) -> Tuple[int, int, int]:
+        return self.settings.get_resolutions()
+
+    def get_current_resolution(self) -> tuple[int, int, int]:
         """Get current resolution index, width, and height"""
-        if not self._hcam or not self._camera_info:
-            return 0, 0, 0
-        
-        res_index = self._hcam.get_eSize()
-        res = self._camera_info.model.res[res_index]
-        return res_index, res.width, res.height
-    
+        return self.settings.get_current_resolution()
+
     def set_resolution(self, resolution_index: int) -> bool:
         """Set camera resolution"""
-        if not self._hcam:
-            return False
-        
-        try:
-            self._hcam.put_eSize(resolution_index)
-            return True
-        except:
-            return False
-    
+        return self.settings.set_resolution(resolution_index)
+
     def supports_still_capture(self) -> bool:
         """Check if camera supports separate still image capture"""
-        if not self._camera_info or not self._camera_info.model:
-            return False
-        
-        return self._camera_info.model.still > 0
-    
+        return len(self.settings.get_still_resolutions()) > 0
+
     def get_still_resolutions(self) -> list[CameraResolution]:
         """Get available still image resolutions"""
-        if not self._camera_info or not self._camera_info.model:
-            return []
-        
-        resolutions = []
-        for i in range(self._camera_info.model.still):
-            res = self._camera_info.model.res[i]
-            resolutions.append(CameraResolution(width=res.width, height=res.height))
-        
-        return resolutions
-    
-    def pull_still_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24) -> Tuple[bool, int, int]:
+        return self.settings.get_still_resolutions()
+
+
+    def pull_still_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24) -> tuple[bool, int, int]:
         """
         Pull a still image into buffer
         

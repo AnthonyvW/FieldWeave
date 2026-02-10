@@ -28,14 +28,6 @@ class CameraResolution:
         return f"{self.width}*{self.height}"
 
 
-@dataclass
-class CameraInfo:
-    """Basic camera information"""
-    id: str
-    displayname: str
-    model: Any  # Model-specific information
-
-
 class BaseCamera(ABC):
     """
     Abstract base class for camera operations.
