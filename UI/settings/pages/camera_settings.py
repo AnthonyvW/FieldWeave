@@ -20,11 +20,15 @@ from PySide6.QtWidgets import (
     QFrame,
     QMessageBox,
 )
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import Qt, Signal, Slot, QTimer
 
 from app_context import get_app_context
 from logger import info, error, warning, debug
 from camera.cameras.base_camera import CameraResolution
+
+# Interval (ms) between live-value polls for hardware-controlled fields.
+_LIVE_POLL_INTERVAL_MS = 500
+
 
 class CameraSettingsWidget(QWidget):
     """Widget for displaying and editing camera settings"""
@@ -43,6 +47,15 @@ class CameraSettingsWidget(QWidget):
         self._saved_values: dict[str, any] = {}  # Store saved values for comparison
         self._group_names: list[str] = []  # Track group names in order
         self._group_widgets: dict[str, QGroupBox] = {}  # Map group names to widgets
+
+        # Maps field_name -> (controller_field_name, controlled_when) for all fields
+        # with controlled_by set.  Populated in _refresh_settings_display().
+        self._controlled_fields: dict[str, tuple[str, bool]] = {}
+
+        # Live-value polling timer — fires when at least one controller is True.
+        self._live_poll_timer = QTimer(self)
+        self._live_poll_timer.setInterval(_LIVE_POLL_INTERVAL_MS)
+        self._live_poll_timer.timeout.connect(self._poll_live_values)
         
         self._setup_ui()
         self._connect_signals()
@@ -232,6 +245,9 @@ class CameraSettingsWidget(QWidget):
     
     def _refresh_settings_display(self) -> None:
         """Refresh the settings display based on current camera"""
+        self._live_poll_timer.stop()
+        self._controlled_fields.clear()
+
         # Clear existing settings widgets
         self._clear_settings_display()
         
@@ -256,6 +272,12 @@ class CameraSettingsWidget(QWidget):
             for meta in metadata_list:
                 current_value = getattr(settings, meta.name, None)
                 self._saved_values[meta.name] = current_value
+
+            # Build controlled-field index from metadata
+            for meta in metadata_list:
+                if meta.controlled_by:
+                    controlled_when = getattr(meta, 'controlled_when', True)
+                    self._controlled_fields[meta.name] = (meta.controlled_by, controlled_when)
             
             # Group settings by category
             grouped_settings = self._group_settings(metadata_list)
@@ -277,6 +299,13 @@ class CameraSettingsWidget(QWidget):
                 if self.parent_dialog and hasattr(self.parent_dialog, 'register_group_box'):
                     self.parent_dialog.register_group_box("Camera", group_name, group_box)
             
+            # Apply initial controlled-field state (greyed-out / locked if controller is on)
+            self._apply_all_controlled_states(settings)
+
+            # Start live polling if any controller is currently active
+            if self._any_controller_active(settings):
+                self._live_poll_timer.start()
+
             # Update tree items in parent dialog
             if self.parent_dialog and hasattr(self.parent_dialog, '_update_camera_groups'):
                 self.parent_dialog._update_camera_groups(self._group_names)
@@ -356,8 +385,8 @@ class CameraSettingsWidget(QWidget):
                 
                 layout.addRow(label, widget)
                 
-                # Store both widget and label for styling
-                # Create a container that holds both for easier styling
+                # Store a container that holds references to both label and control
+                # for later styling and enable/disable operations.
                 widget_container = QWidget()
                 widget_container.setProperty("label", label)
                 widget_container.setProperty("control", widget)
@@ -605,6 +634,113 @@ class CameraSettingsWidget(QWidget):
         
         layout.addStretch()
         return container
+
+    # ------------------------------------------------------------------
+    # Controlled-field helpers
+    # ------------------------------------------------------------------
+
+    def _any_controller_active(self, settings) -> bool:
+        """Return True if at least one field is currently in its controlled (locked) state."""
+        for field_name, (controller_name, controlled_when) in self._controlled_fields.items():
+            controller_value = bool(getattr(settings, controller_name, False))
+            if controller_value == controlled_when:
+                return True
+        return False
+
+    def _apply_all_controlled_states(self, settings) -> None:
+        """Apply grey-out / lock state for every controlled field based on current settings."""
+        for field_name, (controller_name, controlled_when) in self._controlled_fields.items():
+            controller_value = bool(getattr(settings, controller_name, False))
+            is_locked = controller_value == controlled_when
+            self._set_field_controlled(field_name, is_locked)
+
+    def _set_field_controlled(self, field_name: str, controlled: bool) -> None:
+        """Grey out (and lock) or restore a controlled field widget."""
+        container = self._settings_widgets.get(field_name)
+        if not container:
+            return
+
+        label = container.property("label")
+        control = container.property("control")
+
+        if controlled:
+            # Visually dim the label
+            if label:
+                label.setStyleSheet("QLabel { color: #aaaaaa; }")
+            # Disable all interactive child widgets so the user cannot edit
+            if control:
+                for child in control.findChildren(QWidget):
+                    child.setEnabled(False)
+                control.setEnabled(False)
+        else:
+            # Restore normal appearance and re-enable
+            if label:
+                label.setStyleSheet("")
+            if control:
+                control.setEnabled(True)
+                for child in control.findChildren(QWidget):
+                    child.setEnabled(True)
+            # Re-apply any existing "modified" orange styling
+            is_modified = field_name in self._modified_settings
+            if is_modified:
+                self._apply_orange_styling(container, True)
+
+    def _update_display_value(self, field_name: str, value: int) -> None:
+        """Update only the visual display of a controlled field without touching settings."""
+        container = self._settings_widgets.get(field_name)
+        if not container:
+            return
+
+        control = container.property("control")
+        if not control:
+            return
+
+        self._updating_from_camera = True
+        try:
+            # Range widgets: container holds a slider and a spinbox
+            spinboxes = control.findChildren(QSpinBox)
+            dbl_spinboxes = control.findChildren(QDoubleSpinBox)
+            sliders = control.findChildren(QSlider)
+
+            for sb in spinboxes:
+                sb.blockSignals(True)
+                sb.setValue(int(value))
+                sb.blockSignals(False)
+            for sb in dbl_spinboxes:
+                sb.blockSignals(True)
+                sb.setValue(float(value))
+                sb.blockSignals(False)
+            for sl in sliders:
+                sl.blockSignals(True)
+                sl.setValue(int(value))
+                sl.blockSignals(False)
+        finally:
+            self._updating_from_camera = False
+
+    @Slot()
+    def _poll_live_values(self) -> None:
+        """Timer slot: read live hardware values and update display widgets."""
+        camera = self.ctx.camera
+        if not camera:
+            self._live_poll_timer.stop()
+            return
+
+        settings = camera.settings
+        try:
+            live = settings.get_live_values()
+        except Exception as e:
+            error(f"Error polling live values: {e}")
+            return
+
+        if not live:
+            # No controlled fields are active; stop polling.
+            self._live_poll_timer.stop()
+            return
+
+        for field_name, value in live.items():
+            self._update_display_value(field_name, value)
+
+    # ------------------------------------------------------------------
     
     def _mark_setting_modified(self, setting_name: str, current_value) -> None:
         """Mark a setting as modified and update its widget styling"""
@@ -627,13 +763,25 @@ class CameraSettingsWidget(QWidget):
         else:
             self._modified_settings.discard(setting_name)
         
-        # Update widget styling
+        # Update widget styling (skip if still greyed out / controlled)
+        entry = self._controlled_fields.get(setting_name)
+        if entry:
+            controller_name, controlled_when = entry
+            camera = self.ctx.camera
+            if camera:
+                controller_value = bool(getattr(camera.settings, controller_name, False))
+                if controller_value == controlled_when:
+                    # Field is still locked — don't apply orange yet
+                    self._emit_modifications_changed()
+                    return
+
         self._update_widget_styling(setting_name, is_modified)
-        
+        self._emit_modifications_changed()
+
+    def _emit_modifications_changed(self) -> None:
         # Update category color in parent dialog
         if self.parent_dialog and hasattr(self.parent_dialog, 'set_category_modified'):
             self.parent_dialog.set_category_modified("Camera", len(self._modified_settings) > 0)
-        
         # Emit signal about modification state change
         self.modifications_changed.emit(len(self._modified_settings) > 0)
     
@@ -645,7 +793,6 @@ class CameraSettingsWidget(QWidget):
         
         if is_modified:
             # Orange text and slider for modified settings
-            # Apply styling to all child widgets
             self._apply_orange_styling(widget, True)
         else:
             # Clear custom styling to revert to default
@@ -728,18 +875,50 @@ class CameraSettingsWidget(QWidget):
         camera = self.ctx.camera
         if not camera:
             return
-        
+
+        field_name = setter_name.removeprefix("set_")
+
+        # Determine if this boolean is a controller for other fields.
+        controlled_by_this = [
+            (fn, controlled_when)
+            for fn, (ctrl, controlled_when) in self._controlled_fields.items()
+            if ctrl == field_name
+        ]
+
+        # If we are turning the controller OFF, flush live-value fields (controlled_when=True).
+        if not value and controlled_by_this:
+            try:
+                camera.settings.on_controller_disabled(field_name)
+            except Exception as e:
+                error(f"Error flushing controlled values for {field_name}: {e}")
+
         try:
             setter = getattr(camera.settings, setter_name)
             setter(value)
-            
-            # Extract setting name from setter name (remove "set_" prefix)
-            setting_name = setter_name.replace("set_", "")
-            self._mark_setting_modified(setting_name, value)
-            
+            self._mark_setting_modified(field_name, value)
             debug(f"Set {setter_name} to {value}")
         except Exception as e:
             error(f"Error setting {setter_name}: {e}")
+            return
+
+        # Update controlled field state and live polling
+        if controlled_by_this:
+            for fn, controlled_when in controlled_by_this:
+                is_locked = value == controlled_when
+                self._set_field_controlled(fn, is_locked)
+
+                if not is_locked and controlled_when:
+                    # A live-value field just became editable — flush its display and mark modified.
+                    flushed_value = getattr(camera.settings, fn, None)
+                    if flushed_value is not None:
+                        self._update_display_value(fn, flushed_value)
+                    self._mark_setting_modified(fn, flushed_value)
+
+            if self._any_controller_active(camera.settings):
+                if not self._live_poll_timer.isActive():
+                    self._live_poll_timer.start()
+            else:
+                self._live_poll_timer.stop()
     
     def _on_int_changed(self, setter_name: str, value: int, slider: QSlider) -> None:
         """Handle integer setting change from spinbox"""

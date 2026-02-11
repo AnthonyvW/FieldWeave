@@ -49,83 +49,32 @@ class SettingMetadata:
     choices: list[str] | None = None
     group: str = "General"
     runtime_changeable: bool = True
+    # When set, this field is greyed out (and, for live-value fields, polled from
+    # hardware) while the named boolean setting equals *controlled_when*.
+    #
+    # controlled_when=True  (default): grey out while the controller is ON.
+    #   Example: exposure_time / gain are greyed while auto_exposure is True.
+    # controlled_when=False: grey out while the controller is OFF.
+    #   Example: exposure target is greyed while auto_exposure is False.
+    controlled_by: str | None = None
+    controlled_when: bool = True
 
 
 @dataclass
 class CameraSettings(ABC):
     """
     Abstract base camera settings class with validation and hardware manipulation.
-    
-    This is an abstract base class that MUST be subclassed for each camera type.
-    Subclasses must implement all abstract methods and provide camera-specific configuration.
-    
-    Architecture:
-    - CameraSettings owns settings storage, validation, and hardware access
-    - For cameras with SDKs (like AmScope): subclass accesses camera._sdk directly
-    - For cameras without SDKs (like USB): subclass implements direct hardware access
-    - BaseCamera provides camera operations, SDK loading, and settings management
-    - CameraSettingsManager handles loading/saving settings from YAML files
-    
-    Responsibilities of CameraSettings:
-    1. Storage of settings values (dataclass fields)
-    2. Validation of settings (using metadata from get_metadata())
-    3. High-level API (set_* methods with validation)
-    4. Low-level hardware access (directly to SDK/hardware via abstract methods)
-    5. Applying settings to camera hardware
-    6. Reading settings from camera hardware
-    7. Providing metadata for GUI generation and validation (single source of truth)
-    
-    Requirements for Subclasses:
-    
-    1. Implement get_metadata() class method (SINGLE SOURCE OF TRUTH):
-       - Return SettingMetadata list for GUI generation AND validation
-       - Include ranges, descriptions, groups, types for ALL settings
-       - This replaces the old get_ranges() method - no duplication needed
-       - Example:
-         @classmethod
-         def get_metadata(cls) -> list[SettingMetadata]:
-             return [
-                 SettingMetadata(
-                     name="exposure",
-                     display_name="Exposure Target",
-                     setting_type=SettingType.RANGE,
-                     description="Target brightness for auto exposure",
-                     min_value=16,
-                     max_value=220,
-                     group="Exposure",
-                 ),
-                 # ... all other settings
-             ]
-    
-    2. Implement all abstract setter methods (set_exposure, set_temp, etc.):
-       - Get validation ranges from get_metadata()
-       - Validate input against those ranges
-       - Update the corresponding dataclass field
-       - Access hardware directly to apply the setting
-       - Example:
-         def set_exposure(self, value: int) -> None:
-             metadata = {m.name: m for m in self.get_metadata()}
-             meta = metadata['exposure']
-             if not (meta.min_value <= value <= meta.max_value):
-                 raise ValueError(f"exposure must be in [{meta.min_value}, {meta.max_value}]")
-             
-             self.exposure = value
-             if self._camera and hasattr(self._camera, '_sdk'):
-                 self._camera._sdk.put_AutoExpoTarget(self._camera._device, value)
-    
-    3. Implement refresh_from_camera():
-       - Read all current settings from camera hardware
-       - Update all dataclass fields with hardware values
-    
-    4. Implement resolution and exposure methods:
-       - get_resolutions(), set_resolution(), get_current_resolution()
-       - get_still_resolutions(), set_still_resolution()
-       - get_exposure_time(), set_exposure_time()
-    
-    Note on Default Values:
-    - Default values are loaded from YAML files by CameraSettingsManager
-    - Subclasses do NOT need a create_default() method
-    - The YAML file serves as the default configuration
+
+    Live-value protocol (for settings driven by automatic hardware control):
+    - Mark controlled fields with ``controlled_by="<bool_field_name>"`` in
+      SettingMetadata.
+    - Override ``get_live_values()`` to return {field_name: current_hw_value} for
+      all fields currently being driven by hardware.  Return an empty dict when no
+      field is under hardware control.
+    - Override ``on_controller_disabled()`` if you need custom flush logic; the
+      default calls ``get_live_values()`` and writes each value to self.
+    - The GUI polls ``get_live_values()`` on a timer, updates display widgets only,
+      and calls ``on_controller_disabled()`` when the controlling boolean turns off.
     """
     
     version: str
@@ -185,6 +134,48 @@ class CameraSettings(ABC):
     @abstractmethod
     def get_metadata(cls) -> list[SettingMetadata]:
         pass
+
+    # ------------------------------------------------------------------
+    # Live-value protocol
+    # ------------------------------------------------------------------
+
+    def get_live_values(self) -> dict[str, int]:
+        """Return the current hardware values for any fields under automatic control.
+
+        Returns a mapping of ``{field_name: current_hardware_value}`` for fields
+        whose controlling boolean is currently True.  Return an empty dict when no
+        field is actively being driven by hardware.
+
+        The GUI polls this on a short interval and updates display widgets without
+        writing back to the stored settings object.
+        """
+        return {}
+
+    def on_controller_disabled(self, controller_name: str) -> None:
+        """Flush current hardware values for fields controlled by *controller_name*.
+
+        Called by the GUI immediately after the user turns off a controlling
+        boolean (e.g. ``auto_exposure``).  The default implementation reads
+        ``get_live_values()`` and writes any value whose metadata ``controlled_by``
+        matches *controller_name* back into self, so that the stored settings
+        reflect the actual hardware state the moment control was released.
+
+        Subclasses may override for clamping, extra register reads, etc.
+        """
+        live = self.get_live_values()
+        metadata_map = {m.name: m for m in self.get_metadata()}
+        for field_name, value in live.items():
+            meta = metadata_map.get(field_name)
+            if (
+                meta
+                and meta.controlled_by == controller_name
+                and meta.controlled_when  # only flush live-value fields (controlled_when=True)
+                and hasattr(self, field_name)
+            ):
+                setattr(self, field_name, value)
+                debug(f"Flushed live value {field_name}={value} after {controller_name} disabled")
+
+    # ------------------------------------------------------------------
     
     def apply_to_camera(self, camera: BaseCamera) -> None:
         self._camera = camera

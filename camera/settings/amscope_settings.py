@@ -97,6 +97,8 @@ class AmscopeSettings(CameraSettings):
                 max_value=235,
                 group="Exposure",
                 runtime_changeable=True,
+                controlled_by="auto_exposure",
+                controlled_when=False,
             ),
             SettingMetadata(
                 name="exposure_time",
@@ -107,6 +109,7 @@ class AmscopeSettings(CameraSettings):
                 max_value=1000000,
                 group="Exposure",
                 runtime_changeable=True,
+                controlled_by="auto_exposure",
             ),
             SettingMetadata(
                 name="gain",
@@ -117,6 +120,7 @@ class AmscopeSettings(CameraSettings):
                 max_value=300,
                 group="Exposure",
                 runtime_changeable=True,
+                controlled_by="auto_exposure",
             ),
             SettingMetadata(
                 name="temp",
@@ -216,8 +220,51 @@ class AmscopeSettings(CameraSettings):
                 raise ValueError(
                     f"{name} must be in [{meta.min_value}, {meta.max_value}], got {value}"
                 )
+
+    # ------------------------------------------------------------------
+    # Live-value protocol
+    # ------------------------------------------------------------------
+
+    def get_live_values(self) -> dict[str, int]:
+        """Return live hardware exposure_time and gain while auto_exposure is on."""
+        if not self.auto_exposure:
+            return {}
+        if not (self._camera and hasattr(self._camera, '_hcam')):
+            return {}
+        try:
+            hcam = self._camera._hcam
+            return {
+                "exposure_time": hcam.get_ExpoTime(),
+                "gain": hcam.get_ExpoAGain(),
+            }
+        except Exception as e:
+            error(f"Failed to read live exposure values: {e}")
+            return {}
+
+    def on_controller_disabled(self, controller_name: str) -> None:
+        """Flush live exposure_time / gain into stored settings when auto_exposure turns off."""
+        if controller_name != "auto_exposure":
+            super().on_controller_disabled(controller_name)
+            return
+
+        if not (self._camera and hasattr(self._camera, '_hcam')):
+            return
+        try:
+            hcam = self._camera._hcam
+            self.exposure_time = hcam.get_ExpoTime()
+            self.gain = hcam.get_ExpoAGain()
+            debug(
+                f"Flushed auto-exposure values: exposure_time={self.exposure_time}, gain={self.gain}"
+            )
+        except Exception as e:
+            error(f"Failed to flush live exposure values: {e}")
+
+    # ------------------------------------------------------------------
     
     def set_auto_exposure(self, enabled: bool) -> None:
+        if not enabled and self.auto_exposure:
+            # Flush hardware values before turning off so stored settings are up-to-date.
+            self.on_controller_disabled("auto_exposure")
         self.auto_exposure = enabled
         if self._camera and hasattr(self._camera, '_hcam'):
             self._camera._hcam.put_AutoExpoEnable(1 if enabled else 0)
@@ -403,15 +450,13 @@ class AmscopeSettings(CameraSettings):
 
         The dropdown supplies both the string label (e.g. "2592x1944") and the index
         of that label in the choices list.  When ``index`` is provided it is used
-        directly; otherwise it is derived from ``value``.  The camera does not need
-        to be restarted; the stored value is used as the index argument at Snap() time.
+        directly; otherwise it is derived from ``value``.
         """
         try:
             still_resolutions = self.get_still_resolutions()
             choices = [f"{r.width}x{r.height}" for r in still_resolutions]
 
             if not choices:
-                # Camera doesn't support distinct still resolutions; store as-is.
                 self.still_resolution = value
                 return True
 
@@ -529,8 +574,6 @@ class AmscopeSettings(CameraSettings):
 
             still_resolutions = self.get_still_resolutions()
             if still_resolutions:
-                # The SDK has no dedicated "get current still resolution" call; default
-                # to the highest-resolution option (index 0) when refreshing.
                 r = still_resolutions[0]
                 self.still_resolution = f"{r.width}x{r.height}"
             
