@@ -69,6 +69,28 @@ def apply_style(app: QApplication) -> None:
             background : transparent;
         }}
 
+        /* Push Buttons - Grey styling */
+        QPushButton {{
+            background-color: #d0d3d6;
+            border: 1px solid #b0b3b6;
+            border-radius: 0px;
+            padding: 2px 8px;
+            color: #2c2c2c;
+        }}
+        QPushButton:hover {{
+            background-color: #c0c3c6;
+            border-color: #a0a3a6;
+        }}
+        QPushButton:pressed {{
+            background-color: #b0b3b6;
+            border-color: #909396;
+        }}
+        QPushButton:disabled {{
+            background-color: #e0e3e6;
+            border-color: #d0d3d6;
+            color: #a0a3a6;
+        }}
+
         
         /* Status panel in tab corner */
         QFrame#StatusBar {{

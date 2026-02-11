@@ -35,6 +35,9 @@ class AmscopeSettings(CameraSettings):
     level_range_low: RGBALevel = RGBALevel(0, 0, 0, 0)
     level_range_high: RGBALevel = RGBALevel(255, 255, 255, 255)
     fformat: FileFormat = FileFormat.TIFF
+    rotate: int = 0
+    hflip: bool = False
+    vflip: bool = False
     
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
     
@@ -77,6 +80,31 @@ class AmscopeSettings(CameraSettings):
                 setting_type=SettingType.DROPDOWN,
                 description="Default file format for saved images",
                 choices=self._file_formats,
+                group="Capture",
+                runtime_changeable=True,
+            ),
+            SettingMetadata(
+                name="rotate",
+                display_name="Rotation",
+                setting_type=SettingType.DROPDOWN,
+                description="Rotate the camera image clockwise. Requires camera restart to apply.",
+                choices=["0", "90", "180", "270"],
+                group="Capture",
+                runtime_changeable=False,
+            ),
+            SettingMetadata(
+                name="hflip",
+                display_name="Flip Horizontal",
+                setting_type=SettingType.BOOL,
+                description="Mirror the image horizontally",
+                group="Capture",
+                runtime_changeable=True,
+            ),
+            SettingMetadata(
+                name="vflip",
+                display_name="Flip Vertical",
+                setting_type=SettingType.BOOL,
+                description="Mirror the image vertically",
                 group="Capture",
                 runtime_changeable=True,
             ),
@@ -369,6 +397,72 @@ class AmscopeSettings(CameraSettings):
             )
             self.level_range_high = high
     
+    def set_rotate(self, value: int | str, index: int | None = None) -> bool:
+        """
+        Set the camera image rotation (0, 90, 180, 270 degrees clockwise).
+
+        AMCAM_OPTION_ROTATE cannot be changed while the camera is running, so
+        this method follows the same stop/restart pattern as set_preview_resolution.
+        The dropdown supplies both the string label (e.g. "90") and the index of
+        that label in the choices list.  When ``index`` is provided it is used
+        directly; otherwise it is derived from ``value``.
+        """
+        valid_degrees = [0, 90, 180, 270]
+
+        if index is not None:
+            if not (0 <= index < len(valid_degrees)):
+                error(f"Invalid rotation index: {index}. Valid range: 0-{len(valid_degrees) - 1}")
+                return False
+            degrees = valid_degrees[index]
+        else:
+            try:
+                degrees = int(value)
+            except (ValueError, TypeError):
+                error(f"Invalid rotation value: {value!r}. Must be one of {valid_degrees}")
+                return False
+            if degrees not in valid_degrees:
+                error(f"Invalid rotation value: {degrees}. Must be one of {valid_degrees}")
+                return False
+
+        try:
+            self.rotate = degrees
+
+            if not (self._camera and hasattr(self._camera, '_hcam')):
+                return True
+
+            camera_was_open = self._camera.is_open
+            saved_callback = self._camera._callback
+            saved_context = self._camera._callback_context
+
+            if camera_was_open:
+                debug("Camera is open, stopping to set rotation")
+                self._camera.stop_capture()
+
+            amcam = self._camera._get_sdk()
+            self._camera._hcam.put_Option(amcam.AMCAM_OPTION_ROTATE, degrees)
+
+            if camera_was_open:
+                debug("Restarting camera after rotation change")
+                self._camera.start_capture(saved_callback, saved_context)
+
+            debug(f"Successfully changed rotation to {degrees} degrees")
+            return True
+        except Exception as e:
+            error(f"Failed to set rotation: {e}")
+            return False
+
+    def set_hflip(self, enabled: bool) -> None:
+        """Flip the image horizontally."""
+        self.hflip = enabled
+        if self._camera and hasattr(self._camera, '_hcam'):
+            self._camera._hcam.put_HFlip(1 if enabled else 0)
+
+    def set_vflip(self, enabled: bool) -> None:
+        """Flip the image vertically."""
+        self.vflip = enabled
+        if self._camera and hasattr(self._camera, '_hcam'):
+            self._camera._hcam.put_VFlip(1 if enabled else 0)
+
     def get_resolutions(self) -> list[CameraResolution]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
             return []
@@ -399,14 +493,25 @@ class AmscopeSettings(CameraSettings):
         except Exception as e:
             error(f"Failed to get current resolution: {e}")
             return (0, 0, 0)
+
+    def get_output_dimensions(self) -> tuple[int, int]:
+        """
+        Return the final (width, height) of frames delivered by the SDK.
+        """
+        if self._camera is None or not hasattr(self._camera, '_hcam'):
+            return (0, 0)
+        try:
+            width, height = self._camera._hcam.get_FinalSize()
+            return (width, height)
+        except Exception:
+            pass
+        # Fallback: raw sensor resolution (no rotation compensation)
+        _, width, height = self.get_current_resolution()
+        return (width, height)
     
     def set_preview_resolution(self, value: str, index: int | None = None) -> bool:
         """
         Set camera preview resolution. Requires camera restart.
-
-        The dropdown supplies both the string label (e.g. "1280x960") and the index
-        of that label in the choices list.  When ``index`` is provided it is used
-        directly; otherwise it is derived from ``value``.
         """
         try:
             resolutions = self.get_resolutions()
@@ -530,6 +635,10 @@ class AmscopeSettings(CameraSettings):
             
             self.set_level_range(self.level_range_low, self.level_range_high)
             
+            self.set_rotate(self.rotate)
+            self.set_hflip(self.hflip)
+            self.set_vflip(self.vflip)
+            
             debug("Successfully applied all settings to camera")
         except Exception as e:
             exception(f"Failed to apply settings to camera: {e}")
@@ -576,6 +685,11 @@ class AmscopeSettings(CameraSettings):
             if still_resolutions:
                 r = still_resolutions[0]
                 self.still_resolution = f"{r.width}x{r.height}"
+
+            rotate_raw = hcam.get_Option(camera._get_sdk().AMCAM_OPTION_ROTATE)
+            self.rotate = rotate_raw if rotate_raw in (0, 90, 180, 270) else 0
+            self.hflip = bool(hcam.get_HFlip())
+            self.vflip = bool(hcam.get_VFlip())
             
             info("Successfully refreshed all settings from camera")
         except Exception as e:

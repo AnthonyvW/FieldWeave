@@ -138,6 +138,10 @@ class CameraPreview(QFrame):
                 # Get resolution again after setting
                 res_index, width, height = base_camera.get_current_resolution()
             
+            # Use final (post-rotation) dimensions for buffer and QImage.
+            # For 90/270-degree rotations the SDK transposes width and height
+            # before delivering frames; get_output_dimensions() reflects this.
+            width, height = self._camera.settings.get_output_dimensions()
             self._img_width = width
             self._img_height = height
             
@@ -206,9 +210,9 @@ class CameraPreview(QFrame):
             return
         
         try:
-            # Check if resolution has changed
+            # Check if resolution has changed (use final post-rotation dimensions)
             base_camera = self._camera.underlying_camera
-            _, current_width, current_height = base_camera.get_current_resolution()
+            current_width, current_height = self._camera.settings.get_output_dimensions()
             
             # If resolution changed, update buffer
             if current_width != self._img_width or current_height != self._img_height:

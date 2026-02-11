@@ -74,7 +74,8 @@ class CameraSettingsWidget(QWidget):
         
         # Content widget inside scroll area with white background
         content = QWidget()
-        content.setStyleSheet("background: white;")
+        content.setObjectName("CameraSettingsContent")
+        content.setStyleSheet("QWidget#CameraSettingsContent { background: white; }")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(10, 10, 10, 10)
         content_layout.setSpacing(10)
