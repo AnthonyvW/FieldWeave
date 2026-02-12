@@ -188,6 +188,38 @@ def apply_style(app: QApplication) -> None:
             color: rgba(0,0,0,0.62);
         }}
 
+        /* Camera Preview */
+        QFrame#CameraPreview {{
+            background: #000000;
+        }}
+        
+        QLabel#VideoLabel {{
+            color: #888888;
+            font-size: 16px;
+        }}
+
+        /* Camera Preview Overlay Buttons */
+        QPushButton#OverlayButton, QPushButton#CrosshairButton {{
+            background-color: rgba(240, 240, 240, 180);
+            color: #000;
+            border: 1px solid rgba(200, 200, 200, 255);
+            border-radius: 4px;
+            font-size: 18px;
+            font-weight: bold;
+        }}
+        QPushButton#OverlayButton:hover, QPushButton#CrosshairButton:hover {{
+            background-color: rgba(255, 255, 255, 200);
+        }}
+        QPushButton#OverlayButton:checked, QPushButton#CrosshairButton:checked {{
+            background-color: rgba(100, 150, 200, 200);
+            color: white;
+            border: 2px solid rgba(150, 200, 255, 255);
+        }}
+        
+        QPushButton#CrosshairButton {{
+            padding-bottom: 4px;
+        }}
+
         
         """
     )

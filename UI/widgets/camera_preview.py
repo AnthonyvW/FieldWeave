@@ -1,12 +1,100 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy
+from PySide6.QtCore import Qt, Slot, QRect
+from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
+from PySide6.QtWidgets import (
+    QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy, 
+    QPushButton, QHBoxLayout
+)
 
 from app_context import get_app_context
 from logger import info, error, warning
+
+
+class OverlayLabel(QLabel):
+    """Custom QLabel that can draw overlays on top of the image"""
+    
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.show_grid = False
+        self.show_crosshair = False
+    
+    def paintEvent(self, event):
+        """Override paint event to draw overlays"""
+        # First draw the base image
+        super().paintEvent(event)
+        
+        # Only draw overlays if we have a pixmap
+        if self.pixmap() is None or self.pixmap().isNull():
+            return
+        
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Get the actual image rect (considering aspect ratio)
+        pixmap = self.pixmap()
+        if pixmap.width() == 0 or pixmap.height() == 0:
+            return
+        
+        # Calculate the displayed image rect
+        widget_rect = self.rect()
+        pixmap_rect = pixmap.rect()
+        
+        # Calculate scaled rect maintaining aspect ratio
+        scale = min(
+            widget_rect.width() / pixmap_rect.width(),
+            widget_rect.height() / pixmap_rect.height()
+        )
+        
+        scaled_width = int(pixmap_rect.width() * scale)
+        scaled_height = int(pixmap_rect.height() * scale)
+        
+        x = (widget_rect.width() - scaled_width) // 2
+        y = (widget_rect.height() - scaled_height) // 2
+        
+        image_rect = QRect(x, y, scaled_width, scaled_height)
+        
+        # Set up pen for drawing overlays
+        pen = QPen(QColor(0, 0, 0, 180))  # Black with transparency
+        pen.setWidth(2)
+        painter.setPen(pen)
+        
+        # Draw grid if enabled
+        if self.show_grid:
+            self._draw_grid(painter, image_rect)
+        
+        # Draw crosshair if enabled
+        if self.show_crosshair:
+            self._draw_crosshair(painter, image_rect)
+        
+        painter.end()
+    
+    def _draw_grid(self, painter: QPainter, rect: QRect):
+        """Draw a 3x3 grid"""
+        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+        
+        # Vertical lines
+        for i in range(1, 3):
+            x_pos = x + (w * i // 3)
+            painter.drawLine(x_pos, y, x_pos, y + h)
+        
+        # Horizontal lines
+        for i in range(1, 3):
+            y_pos = y + (h * i // 3)
+            painter.drawLine(x, y_pos, x + w, y_pos)
+    
+    def _draw_crosshair(self, painter: QPainter, rect: QRect):
+        """Draw a crosshair at the center"""
+        center_x = rect.x() + rect.width() // 2
+        center_y = rect.y() + rect.height() // 2
+        
+        # Draw horizontal line - smaller (1/24 of smaller dimension)
+        line_length = min(rect.width(), rect.height()) // 24
+        painter.drawLine(center_x - line_length, center_y, center_x + line_length, center_y)
+        
+        # Draw vertical line
+        painter.drawLine(center_x, center_y - line_length, center_x, center_y + line_length)
 
 
 class CameraPreview(QFrame):
@@ -18,26 +106,45 @@ class CameraPreview(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setObjectName("CameraPreview")
         
         # Display state
         self._current_width = 0
         self._current_height = 0
         
-        # UI elements
-        self._video_label = QLabel()
+        # UI elements - use custom overlay label
+        self._video_label = OverlayLabel()
+        self._video_label.setObjectName("VideoLabel")
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._video_label.setScaledContents(False)
         self._video_label.setMinimumSize(1, 1)
         self._video_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self._video_label.setStyleSheet("color: #888; font-size: 16px;")
         self._video_label.setText("No camera stream")
         
+        # Main layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._video_label, 1)
         
-        self.setStyleSheet("QFrame { background: #000000; }")
+        # Create overlay control buttons as direct children (true overlay)
+        self._crosshair_button = QPushButton("+", self)
+        self._crosshair_button.setObjectName("CrosshairButton")
+        self._crosshair_button.setCheckable(True)
+        self._crosshair_button.setFixedSize(30, 30)
+        self._crosshair_button.setToolTip("Toggle Crosshair")
+        self._crosshair_button.clicked.connect(self._toggle_crosshair)
+        self._crosshair_button.move(10, 10)  # Position in top left
+        self._crosshair_button.raise_()  # Ensure it's on top
+        
+        self._grid_button = QPushButton("⌗", self)
+        self._grid_button.setObjectName("OverlayButton")
+        self._grid_button.setCheckable(True)
+        self._grid_button.setFixedSize(30, 30)
+        self._grid_button.setToolTip("Toggle Grid")
+        self._grid_button.clicked.connect(self._toggle_grid)
+        self._grid_button.move(10, 45)  # Position below crosshair button (10 + 30 + 5)
+        self._grid_button.raise_()  # Ensure it's on top
         
         # Connect to camera manager signals
         self._connect_to_camera_manager()
@@ -67,6 +174,20 @@ class CameraPreview(QFrame):
             self._video_label.setText("Camera ready - not streaming")
         else:
             self._video_label.setText("No camera connected")
+    
+    @Slot(bool)
+    def _toggle_crosshair(self, checked: bool):
+        """Toggle crosshair overlay"""
+        self._video_label.show_crosshair = checked
+        self._video_label.update()  # Trigger repaint
+        info(f"Preview: Crosshair {'enabled' if checked else 'disabled'}")
+    
+    @Slot(bool)
+    def _toggle_grid(self, checked: bool):
+        """Toggle grid overlay"""
+        self._video_label.show_grid = checked
+        self._video_label.update()  # Trigger repaint
+        info(f"Preview: Grid {'enabled' if checked else 'disabled'}")
     
     @Slot(int, int)
     def _on_frame_ready(self, width: int, height: int):
