@@ -93,7 +93,9 @@ class CameraControlsWidget(QWidget):
         
         self._format_combo = QComboBox()
         self._format_combo.addItems(self._image_formats.keys())
-        self._format_combo.setCurrentText("TIFF")  # Default to TIFF
+        
+        # Set default format from camera settings
+        self._format_combo.setCurrentText(get_app_context().camera.settings.fformat.upper())
         
         self._open_folder_button = QPushButton("Browse Output")
         self._open_folder_button.clicked.connect(self._open_folder)
