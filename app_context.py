@@ -53,7 +53,7 @@ class AppContext:
     def camera_manager(self) -> CameraManager:
         """
         Get the camera manager instance.
-        Use this to enumerate cameras, switch cameras, etc.
+        Use this to enumerate cameras, switch cameras, start/stop streaming, etc.
         """
         if self._camera_manager is None:
             self._initialize_camera_manager()
@@ -158,10 +158,10 @@ class AppContext:
             cameras = self._camera_manager.enumerate_cameras()
             
             if cameras:
-                # Auto-open the first camera
+                # Auto-open the first camera and start streaming
                 info("Auto-opening first available camera...")
-                if self._camera_manager.open_first_available():
-                    debug("Camera opened successfully during initialization")
+                if self._camera_manager.open_first_available(start_streaming=True):
+                    debug("Camera opened and streaming started successfully")
                 else:
                     warning("Failed to auto-open first camera")
             else:

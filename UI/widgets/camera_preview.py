@@ -1,38 +1,27 @@
 from __future__ import annotations
 
-from typing import Any
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QTimer, Slot
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy
 
 from app_context import get_app_context
-from camera.cameras.base_camera import BaseCamera
 from logger import info, error, warning
+
 
 class CameraPreview(QFrame):
     """
-    Camera-agnostic Preview Area with live streaming.
+    Camera preview widget that displays frames from the camera manager.
+    This widget only handles display - it does not manage camera lifecycle.
     """
-    
-    # Signal for camera events (thread-safe)
-    camera_event = Signal(int)
-    
-    # Signal when new frame is available for capture
-    frame_ready = Signal(np.ndarray)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         
-        # Camera state
-        self._camera: BaseCamera | None = None
-        self._camera_info = None
-        self._img_width = 0
-        self._img_height = 0
-        self._img_buffer: bytes | None = None
-        self._is_streaming = False
-        self._no_camera_logged = False
+        # Display state
+        self._current_width = 0
+        self._current_height = 0
         
         # UI elements
         self._video_label = QLabel()
@@ -41,7 +30,7 @@ class CameraPreview(QFrame):
         self._video_label.setMinimumSize(1, 1)
         self._video_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self._video_label.setStyleSheet("color: #888; font-size: 16px;")
-        self._video_label.setText("Initializing camera...")
+        self._video_label.setText("No camera stream")
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -50,259 +39,141 @@ class CameraPreview(QFrame):
         
         self.setStyleSheet("QFrame { background: #000000; }")
         
-        # Timer for checking camera availability
-        self._init_timer = QTimer(self)
-        self._init_timer.timeout.connect(self._try_initialize_camera)
-        
-        # Connect camera event signal
-        self.camera_event.connect(self._on_camera_event)
-        
-        # Start initialization
-        self._init_timer.start(500)
+        # Connect to camera manager signals
+        self._connect_to_camera_manager()
     
-    @Slot()
-    def _try_initialize_camera(self):
-        """Try to initialize and connect to camera"""
-        self._init_timer.stop()
-        
-        # Get camera manager from app context
+    def _connect_to_camera_manager(self):
+        """Connect to camera manager signals"""
         ctx = get_app_context()
         camera_manager = ctx.camera_manager
         
-        # Check if camera is already active
-        if camera_manager.has_active_camera:
-            info("Preview: Using active camera")
-            self._camera = ctx.camera
-            
-            if self._camera:
-                # Get camera info from manager
-                self._camera_info = camera_manager.active_camera_info
-                self._start_streaming()
-            else:
-                error("Preview: Camera manager says camera is active but ctx.camera is None")
-                self._init_timer.start(3000)
-            return
+        # Connect to frame ready signal
+        camera_manager.frame_ready.connect(self._on_frame_ready)
         
-        # No active camera, enumerate and open
-        info("Preview: No active camera, enumerating...")
-        cameras = camera_manager.enumerate_cameras()
+        # Connect to streaming status signals
+        camera_manager.streaming_started.connect(self._on_streaming_started)
+        camera_manager.streaming_stopped.connect(self._on_streaming_stopped)
         
-        if not cameras:
-            self._video_label.setText("No camera detected")
-            if not self._no_camera_logged:
-                warning("Preview: No cameras found")
-                self._no_camera_logged = True
-            # Retry in a few seconds
-            self._init_timer.start(3000)
-            return
+        # Connect to camera status signals
+        camera_manager.camera_error.connect(self._on_camera_error)
+        camera_manager.camera_disconnected.connect(self._on_camera_disconnected)
+        camera_manager.active_camera_changed.connect(self._on_active_camera_changed)
         
-        # Camera found, reset flag
-        self._no_camera_logged = False
-        
-        # Open first camera
-        if camera_manager.switch_camera(cameras[0]):
-            info(f"Preview: Opened camera: {cameras[0]}")
-            self._camera = ctx.camera
-            self._camera_info = cameras[0]
-            self._start_streaming()
+        # Update initial state
+        if camera_manager.is_streaming:
+            width, height = camera_manager.frame_dimensions
+            self._on_streaming_started(width, height)
+        elif camera_manager.has_active_camera:
+            self._video_label.setText("Camera ready - not streaming")
         else:
-            self._video_label.setText("Failed to open camera")
-            error("Preview: Failed to open camera")
-            # Retry
-            self._init_timer.start(3000)
+            self._video_label.setText("No camera connected")
     
-    def _start_streaming(self):
-        """Start camera streaming after camera is opened"""
-        if not self._camera:
-            error("Preview: Cannot start streaming - no camera")
+    @Slot(int, int)
+    def _on_frame_ready(self, width: int, height: int):
+        """Handle new frame available from camera manager"""
+        ctx = get_app_context()
+        camera_manager = ctx.camera_manager
+        
+        # Get frame buffer from camera manager
+        frame_buffer = camera_manager.get_current_frame()
+        if not frame_buffer:
             return
         
         try:
-            # Get underlying camera
-            base_camera = self._camera.underlying_camera
+            # Check if dimensions changed
+            if width != self._current_width or height != self._current_height:
+                self._current_width = width
+                self._current_height = height
             
-            # Get current resolution from underlying camera
-            res_index, width, height = base_camera.get_current_resolution()
-            
-            # If no resolution set (0x0), set to first resolution
-            if width == 0 or height == 0:
-                info("Preview: Setting default resolution...")
-                
-                # Get available resolutions
-                resolutions = base_camera.get_resolutions()
-                if not resolutions:
-                    error("Preview: No resolutions available")
-                    self._video_label.setText("Camera has no resolutions available")
-                    return
-                
-                # Get resolution again after setting
-                res_index, width, height = base_camera.get_current_resolution()
-            
-            # Use final (post-rotation) dimensions for buffer and QImage.
-            # For 90/270-degree rotations the SDK transposes width and height
-            # before delivering frames; get_output_dimensions() reflects this.
-            width, height = self._camera.settings.get_output_dimensions()
-            self._img_width = width
-            self._img_height = height
-            
-            # Calculate buffer size using base camera class method
-            base_camera_class = type(base_camera)
-            buffer_size = base_camera_class.calculate_buffer_size(width, height, 24)
-            self._img_buffer = bytes(buffer_size)
-            
-            # Start capture - use underlying camera directly
-            success = base_camera.start_capture(
-                self._camera_callback,
-                self
-            )
-            
-            if not success:
-                error("Preview: start_capture returned False")
-                self._video_label.setText("Failed to start camera stream")
+            # Calculate stride
+            camera = camera_manager.active_camera
+            if not camera:
                 return
             
-            self._is_streaming = True
-            # Clear text when streaming starts
-            self._video_label.setText("")
-            info(f"Preview: Streaming started ({width}x{height})")
+            base_camera = camera.underlying_camera
+            base_camera_class = type(base_camera)
+            stride = base_camera_class.calculate_stride(width, 24)
             
-        except Exception as e:
-            self._video_label.setText(f"Error: {str(e)}")
-            error(f"Preview: Camera start streaming error: {e}")
-            import traceback
-            error(traceback.format_exc())
-    
-    @staticmethod
-    def _camera_callback(event: int, context: Any):
-        """
-        Camera event callback (called from camera thread).
-        Forward to UI thread via signal.
-        """
-        if isinstance(context, CameraPreview):
-            context.camera_event.emit(event)
-    
-    @Slot(int)
-    def _on_camera_event(self, event: int):
-        """Handle camera events in UI thread"""
-        if not self._camera:
-            return
-        
-        # Get underlying camera
-        base_camera = self._camera.underlying_camera
-        
-        # Check if camera is open
-        if not base_camera.is_open:
-            return
-        
-        # Get event constants from camera
-        events = base_camera.get_event_constants()
-        
-        if event == events.IMAGE:
-            self._handle_image_event()
-        elif event == events.ERROR:
-            self._handle_error()
-        elif event == events.DISCONNECTED:
-            self._handle_disconnected()
-    
-    def _handle_image_event(self):
-        """Handle new image from camera"""
-        if not self._camera or not self._img_buffer:
-            return
-        
-        try:
-            # Check if resolution has changed (use final post-rotation dimensions)
-            base_camera = self._camera.underlying_camera
-            current_width, current_height = self._camera.settings.get_output_dimensions()
+            # Create QImage from buffer
+            image = QImage(
+                frame_buffer,
+                width,
+                height,
+                stride,
+                QImage.Format.Format_RGB888
+            )
             
-            # If resolution changed, update buffer
-            if current_width != self._img_width or current_height != self._img_height:
-                info(f"Preview: Resolution changed from {self._img_width}x{self._img_height} to {current_width}x{current_height}")
-                self._img_width = current_width
-                self._img_height = current_height
-                
-                # Recalculate buffer size
-                base_camera_class = type(base_camera)
-                buffer_size = base_camera_class.calculate_buffer_size(current_width, current_height, 24)
-                self._img_buffer = bytes(buffer_size)
+            # Make a deep copy for display
+            image = image.copy()
             
-            # Pull image into buffer from underlying camera
-            if self._camera.underlying_camera.pull_image(self._img_buffer, 24):
-                # Calculate stride using base camera class method
-                base_camera_class = type(self._camera.underlying_camera)
-                stride = base_camera_class.calculate_stride(self._img_width, 24)
-                
-                # Create QImage from buffer
-                image = QImage(
-                    self._img_buffer,
-                    self._img_width,
-                    self._img_height,
-                    stride,
-                    QImage.Format.Format_RGB888
+            # Scale to fit label while maintaining aspect ratio
+            if self._video_label.width() > 0 and self._video_label.height() > 0:
+                scaled_image = image.scaled(
+                    self._video_label.width(),
+                    self._video_label.height(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation
                 )
+                self._video_label.setPixmap(QPixmap.fromImage(scaled_image))
                 
-                # Make a deep copy for display
-                image = image.copy()
-                
-                # Scale to fit label while maintaining aspect ratio
-                if self._video_label.width() > 0 and self._video_label.height() > 0:
-                    scaled_image = image.scaled(
-                        self._video_label.width(),
-                        self._video_label.height(),
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.FastTransformation
-                    )
-                    self._video_label.setPixmap(QPixmap.fromImage(scaled_image))
         except Exception as e:
-            error(f"Preview: Error handling image: {e}")
+            error(f"Preview: Error displaying frame: {e}")
     
-    def _handle_error(self):
+    @Slot(int, int)
+    def _on_streaming_started(self, width: int, height: int):
+        """Handle streaming started signal"""
+        info(f"Preview: Streaming started ({width}x{height})")
+        self._current_width = width
+        self._current_height = height
+        self._video_label.setText("")  # Clear any text when streaming starts
+    
+    @Slot()
+    def _on_streaming_stopped(self):
+        """Handle streaming stopped signal"""
+        info("Preview: Streaming stopped")
+        self._video_label.setText("Camera stream stopped")
+    
+    @Slot()
+    def _on_camera_error(self):
         """Handle camera error"""
         self._video_label.setText("Camera error occurred")
         error("Preview: Camera error occurred")
-        self._close_camera()
-        # Try to reconnect
-        self._init_timer.start(3000)
     
-    def _handle_disconnected(self):
+    @Slot()
+    def _on_camera_disconnected(self):
         """Handle camera disconnection"""
         self._video_label.setText("Camera disconnected")
         warning("Preview: Camera disconnected")
-        self._close_camera()
-        # Try to reconnect
-        self._init_timer.start(3000)
     
-    def _close_camera(self):
-        """Close camera and cleanup"""
-        self._is_streaming = False
-        
-        if self._camera:
-            try:
-                # Stop capture first (use underlying camera for immediate effect)
-                info("Preview: Stopping camera capture...")
-                if self._camera.underlying_camera.is_open:
-                    self._camera.underlying_camera.stop_capture()
-                
-                info("Preview: Stopped using camera")
-                
-            except Exception as e:
-                error(f"Preview: Error stopping camera: {e}")
-        
-        self._img_buffer = None
-        self._camera = None
-    
-    def closeEvent(self, event):
-        """Handle widget close event"""
-        self._close_camera()
-        super().closeEvent(event)
+    @Slot(object)
+    def _on_active_camera_changed(self, camera_info):
+        """Handle active camera changed"""
+        if camera_info is None:
+            self._video_label.setText("No camera connected")
+            info("Preview: No active camera")
+        else:
+            info(f"Preview: Active camera changed to {camera_info.display_name}")
+            # Don't clear text yet - wait for streaming to start
+            ctx = get_app_context()
+            if not ctx.camera_manager.is_streaming:
+                self._video_label.setText("Camera ready - not streaming")
     
     def cleanup(self):
         """Cleanup resources when widget is being destroyed"""
         info("Preview: cleanup starting...")
         
-        # Stop the initialization timer first
-        self._init_timer.stop()
-        
-        # Stop using camera
-        self._close_camera()
+        # Disconnect from camera manager signals
+        try:
+            ctx = get_app_context()
+            camera_manager = ctx.camera_manager
+            
+            camera_manager.frame_ready.disconnect(self._on_frame_ready)
+            camera_manager.streaming_started.disconnect(self._on_streaming_started)
+            camera_manager.streaming_stopped.disconnect(self._on_streaming_stopped)
+            camera_manager.camera_error.disconnect(self._on_camera_error)
+            camera_manager.camera_disconnected.disconnect(self._on_camera_disconnected)
+            camera_manager.active_camera_changed.disconnect(self._on_active_camera_changed)
+        except Exception as e:
+            error(f"Preview: Error disconnecting signals: {e}")
         
         info("Preview cleanup complete")
