@@ -36,6 +36,9 @@ class SettingType(str, Enum):
     RANGE = "range"
     DROPDOWN = "dropdown"
     RGBA_LEVEL = "rgba_level"
+    BUTTON = "button"
+    FILE_PICKER_BUTTON = "file_picker_button"
+    NUMBER_PICKER = "number_picker"
 
 
 @dataclass

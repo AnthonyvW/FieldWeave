@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from pathlib import Path
 
 from camera.settings.camera_settings import (
     CameraSettings,
@@ -10,7 +11,7 @@ from camera.settings.camera_settings import (
     RGBALevel,
     FileFormat,
 )
-from logger import info, error, exception, debug
+from logger import info, error, exception, debug, warning
 
 if TYPE_CHECKING:
     from camera.cameras.base_camera import BaseCamera, CameraResolution
@@ -39,7 +40,14 @@ class AmscopeSettings(CameraSettings):
     hflip: bool = False
     vflip: bool = False
     
+    # Dark Field Correction
+    dfc_enable: bool = False
+    _dfc_initialized: bool = False  # Track if DFC has been captured or imported
+    dfc_quantity: int = 10
+    dfc_filepath: str = ""  # Path to the DFC file
+    
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
+    _ui_update_callback: callable | None = field(default=None, repr=False, compare=False)
     
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -234,6 +242,50 @@ class AmscopeSettings(CameraSettings):
                 setting_type=SettingType.RGBA_LEVEL,
                 description="Output level for brightest input values",
                 group="Levels",
+                runtime_changeable=True,
+            ),
+            SettingMetadata(
+                name="dfc_enable",
+                display_name="Enable",
+                setting_type=SettingType.BOOL,
+                description="Enable dark field correction (must capture or import DFC data first)",
+                group="Dark Field Correction",
+                runtime_changeable=True,
+                controlled_by="_dfc_initialized",
+                controlled_when=False,
+            ),
+            SettingMetadata(
+                name="dfc_capture",
+                display_name="Capture",
+                setting_type=SettingType.BUTTON,
+                description="Capture dark field correction frames",
+                group="Dark Field Correction",
+                runtime_changeable=True,
+            ),
+            SettingMetadata(
+                name="dfc_import",
+                display_name="Import",
+                setting_type=SettingType.FILE_PICKER_BUTTON,
+                description="Import dark field correction from file",
+                group="Dark Field Correction",
+                runtime_changeable=True,
+            ),
+            SettingMetadata(
+                name="dfc_export",
+                display_name="Export",
+                setting_type=SettingType.FILE_PICKER_BUTTON,
+                description="Export dark field correction to file",
+                group="Dark Field Correction",
+                runtime_changeable=True,
+            ),
+            SettingMetadata(
+                name="dfc_quantity",
+                display_name="Quantity",
+                setting_type=SettingType.NUMBER_PICKER,
+                description="Number of frames to average for dark field correction",
+                min_value=1,
+                max_value=255,
+                group="Dark Field Correction",
                 runtime_changeable=True,
             ),
         ]
@@ -463,6 +515,150 @@ class AmscopeSettings(CameraSettings):
         if self._camera and hasattr(self._camera, '_hcam'):
             self._camera._hcam.put_VFlip(1 if enabled else 0)
 
+    # Dark Field Correction methods
+    def set_dfc_enable(self, enabled: bool) -> None:
+        """Enable or disable dark field correction."""
+        self.dfc_enable = enabled
+        if self._camera and hasattr(self._camera, '_hcam'):
+            try:
+                amcam = self._camera._get_sdk()
+                self._camera._hcam.put_Option(amcam.AMCAM_OPTION_DFC, 1 if enabled else 0)
+                debug(f"Set DFC enable to {enabled}")
+            except Exception as e:
+                error(f"Failed to set DFC enable: {e}")
+    
+    def set_dfc_capture(self) -> None:
+        """Capture dark field correction frames and save to config directory."""
+        if self._camera and hasattr(self._camera, '_hcam'):
+            try:                
+                # Save whether DFC was enabled before capture
+                dfc_was_enabled = self.dfc_enable
+                
+                # Reset initialized flag when starting new capture
+                self._dfc_initialized = False
+                
+                # Reset DFC to clear any existing data before capturing new frames
+                amcam = self._camera._get_sdk()
+                self._camera._hcam.put_Option(amcam.AMCAM_OPTION_DFC, -1)
+                info("Reset DFC before capturing new frames")
+                
+                # Set the average number
+                self._camera._hcam.put_Option(amcam.AMCAM_OPTION_DFC, 0xff000000 | self.dfc_quantity)
+                
+                info(f"Starting DFC capture with {self.dfc_quantity} frames...")
+                
+                # Store completion handler on camera
+                logged_sequences = set()
+                
+                def on_dfc_event():
+                    """Called when DFC event fires - check if we're done"""
+                    try:
+                        # Query the current DFC state
+                        dfc_val = self._camera._hcam.get_Option(amcam.AMCAM_OPTION_DFC)
+                        dfc_state = dfc_val & 0xff  # 0=disabled, 1=enabled, 2=inited
+                        dfc_sequence = (dfc_val & 0xff00) >> 8  # Current sequence number
+                        
+                        # Log frame capture if we haven't logged this sequence yet
+                        if dfc_sequence > 0 and dfc_sequence not in logged_sequences:
+                            info(f"DFC frame {dfc_sequence}/{self.dfc_quantity} captured")
+                            logged_sequences.add(dfc_sequence)
+                        
+                        # Check if DFC is initialized (state == 2) - means all frames captured
+                        if dfc_state == 2:
+                            info(f"All {self.dfc_quantity} DFC frames captured and processed")
+                            
+                            # Generate timestamped filename
+                            filename = f"dark_field_correction.dfc"
+                            
+                            # Get config directory
+                            config_dir = Path("./config/cameras") / self._camera.model
+                            config_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            filepath = config_dir / filename
+                            
+                            # Export the captured DFC to the file
+                            self._camera._hcam.DfcExport(str(filepath))
+                            
+                            # Store the filepath
+                            self.dfc_filepath = str(filepath)
+                            self._dfc_initialized = True
+                            
+                            info(f"DFC successfully exported to {filepath}")
+                            
+                            # Re-enable DFC if it was enabled before capture
+                            if dfc_was_enabled:
+                                self._camera._hcam.put_Option(amcam.AMCAM_OPTION_DFC, 1)
+                                self.dfc_enable = True
+                                info("Re-enabled DFC after capture completion")
+                            
+                            # Clean up - remove the callback
+                            self._camera._dfc_completion_callback = None
+                            
+                            # Notify UI that _dfc_initialized has changed
+                            # This will enable the dfc_enable checkbox in the UI
+                            if self._ui_update_callback:
+                                try:
+                                    debug(f"Calling UI update callback for _dfc_initialized=True")
+                                    self._ui_update_callback('_dfc_initialized', True)
+                                    debug(f"UI update callback completed successfully")
+                                except Exception as e:
+                                    error(f"Failed to notify UI of DFC initialization: {e}")
+                            else:
+                                warning("No UI update callback registered - UI won't be notified of DFC initialization")
+                            
+                    except Exception as e:
+                        error(f"Failed to process DFC completion: {e}")
+                        # Clean up on error
+                        self._camera._dfc_completion_callback = None
+                
+                # Register the callback
+                self._camera._dfc_completion_callback = on_dfc_event
+                
+                # Trigger the capture (async - will complete via events)
+                self._camera._hcam.DfcOnce()
+                
+                info("DFC capture started (will complete asynchronously)")
+                
+            except Exception as e:
+                error(f"Failed to start DFC capture: {e}")
+                raise
+    
+    def set_dfc_import(self, filepath: str) -> None:
+        """Import dark field correction from file."""
+        if self._camera and hasattr(self._camera, '_hcam'):
+            try:
+                self._camera._hcam.DfcImport(filepath)
+                self.dfc_filepath = filepath
+                self._dfc_initialized = True
+                info(f"Imported DFC from {filepath} - DFC initialized")
+                
+                # Notify UI that _dfc_initialized has changed
+                if self._ui_update_callback:
+                    try:
+                        self._ui_update_callback('_dfc_initialized', True)
+                    except Exception as e:
+                        error(f"Failed to notify UI of DFC initialization: {e}")
+            except Exception as e:
+                error(f"Failed to import DFC: {e}")
+                raise  # Re-raise so UI can show error
+    
+    def set_dfc_export(self, filepath: str) -> None:
+        """Export dark field correction to file."""
+        if self._camera and hasattr(self._camera, '_hcam'):
+            try:
+                self._camera._hcam.DfcExport(filepath)
+                info(f"Exported DFC to {filepath}")
+            except Exception as e:
+                error(f"Failed to export DFC: {e}")
+    
+    def set_dfc_quantity(self, value: int) -> None:
+        """Set the number of frames to average for dark field correction."""
+        if not (1 <= value <= 255):
+            error(f"DFC quantity must be between 1 and 255, got {value}")
+            return
+        self.dfc_quantity = value
+        debug(f"Set DFC quantity to {value}")
+
     def get_resolutions(self) -> list[CameraResolution]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
             return []
@@ -639,6 +835,33 @@ class AmscopeSettings(CameraSettings):
             self.set_hflip(self.hflip)
             self.set_vflip(self.vflip)
             
+            # Dark Field Correction
+            # Load DFC file if filepath is set and file exists
+            if self.dfc_filepath:
+                dfc_path = Path(self.dfc_filepath)
+                if dfc_path.exists():
+                    try:
+                        self._camera._hcam.DfcImport(str(dfc_path))
+                        self._dfc_initialized = True
+                        info(f"Loaded DFC from {dfc_path}")
+                    except Exception as e:
+                        error(f"Failed to load DFC from {dfc_path}: {e}")
+                        self._dfc_initialized = False
+                        self.dfc_filepath = ""
+                else:
+                    warning(f"DFC file not found: {dfc_path}")
+                    self._dfc_initialized = False
+                    self.dfc_filepath = ""
+            else:
+                self._dfc_initialized = False
+            
+            if self.dfc_enable and not self._dfc_initialized:
+                warning("Cannot enable DFC: no DFC data available. Disabling DFC.")
+                self.dfc_enable = False
+            
+            self.set_dfc_quantity(self.dfc_quantity)
+            self.set_dfc_enable(self.dfc_enable)
+            
             debug("Successfully applied all settings to camera")
         except Exception as e:
             exception(f"Failed to apply settings to camera: {e}")
@@ -690,6 +913,16 @@ class AmscopeSettings(CameraSettings):
             self.rotate = rotate_raw if rotate_raw in (0, 90, 180, 270) else 0
             self.hflip = bool(hcam.get_HFlip())
             self.vflip = bool(hcam.get_VFlip())
+            
+            # Dark Field Correction
+            amcam = camera._get_sdk()
+            dfc_val = hcam.get_Option(amcam.AMCAM_OPTION_DFC)
+            dfc_state = dfc_val & 0xff
+            self.dfc_enable = (dfc_state == 1)  # 0=disabled, 1=enabled, 2=inited
+            self._dfc_initialized = (dfc_state >= 1)
+            dfc_avg = (dfc_val & 0xff0000) >> 16
+            if dfc_avg > 0:
+                self.dfc_quantity = dfc_avg
             
             info("Successfully refreshed all settings from camera")
         except Exception as e:

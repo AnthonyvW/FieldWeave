@@ -35,6 +35,7 @@ class CameraSettingsWidget(QWidget):
     
     settings_loaded = Signal(bool, object)  # success, result
     modifications_changed = Signal(bool)  # has_modifications
+    external_setting_changed = Signal(str, object)  # field_name, value
     
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -135,6 +136,7 @@ class CameraSettingsWidget(QWidget):
         self.reset_btn.clicked.connect(self._reset_settings)
         self.load_btn.clicked.connect(self._load_settings)
         self.settings_loaded.connect(self._on_settings_loaded)
+        self.external_setting_changed.connect(self._handle_external_setting_change)
         
         # Connect to parent dialog's save button if available
         if self.parent_dialog:
@@ -302,6 +304,13 @@ class CameraSettingsWidget(QWidget):
             
             # Apply initial controlled-field state (greyed-out / locked if controller is on)
             self._apply_all_controlled_states(settings)
+            
+            # Register callback for external setting changes (e.g., async DFC completion)
+            if hasattr(settings, '_ui_update_callback'):
+                settings._ui_update_callback = self._on_external_setting_change
+                debug("Registered UI update callback for external setting changes")
+            else:
+                debug("Settings object does not support _ui_update_callback")
 
             # Start live polling if any controller is currently active
             if self._any_controller_active(settings):
@@ -421,6 +430,12 @@ class CameraSettingsWidget(QWidget):
             return self._create_dropdown_widget(meta, settings)
         elif type_str == "rgba_level":
             return self._create_rgba_level_widget(meta, settings)
+        elif type_str == "button":
+            return self._create_button_widget(meta, settings)
+        elif type_str == "file_picker_button":
+            return self._create_file_picker_button_widget(meta, settings)
+        elif type_str == "number_picker":
+            return self._create_number_picker_widget(meta, settings)
         elif type_str == "rgb_gain":
             # TODO: Implement custom RGB gain widget
             warning(f"RGB_GAIN widget not yet implemented for {meta.name}")
@@ -635,6 +650,188 @@ class CameraSettingsWidget(QWidget):
         
         layout.addStretch()
         return container
+    
+    def _create_button_widget(self, meta, settings) -> QPushButton | None:
+        """Create a button that calls a setter method without arguments"""
+        setter_name = f"set_{meta.name}"
+        if not hasattr(settings, setter_name):
+            warning(f"No setter found: {setter_name} - skipping widget creation")
+            return None
+        
+        button = QPushButton(meta.display_name)
+        
+        # Set tooltip
+        if hasattr(meta, 'description') and meta.description:
+            button.setToolTip(meta.description)
+        
+        # Connect to setter
+        def on_button_clicked():
+            if self._updating_from_camera:
+                return
+            
+            camera = self.ctx.camera
+            if not camera:
+                return
+            
+            try:
+                setter = getattr(camera.settings, setter_name)
+                setter()
+                debug(f"Called {setter_name}")
+                
+                # Refresh controlled states in case this button enabled other controls
+                self._apply_all_controlled_states(camera.settings)
+                
+                if self.ctx and hasattr(self.ctx, 'toast'):
+                    self.ctx.toast.success(f"{meta.display_name} completed", duration=2000)
+            except Exception as e:
+                error(f"Error calling {setter_name}: {e}")
+                if self.ctx and hasattr(self.ctx, 'toast'):
+                    self.ctx.toast.error(f"Error: {e}", duration=3000)
+        
+        button.clicked.connect(on_button_clicked)
+        return button
+    
+    def _create_file_picker_button_widget(self, meta, settings) -> QPushButton | None:
+        """Create a file picker button that calls a setter method with a filepath"""
+        setter_name = f"set_{meta.name}"
+        if not hasattr(settings, setter_name):
+            warning(f"No setter found: {setter_name} - skipping widget creation")
+            return None
+        
+        button = QPushButton(meta.display_name)
+        
+        # Set tooltip
+        if hasattr(meta, 'description') and meta.description:
+            button.setToolTip(meta.description)
+        
+        # Determine if this is an import or export button based on name
+        is_export = 'export' in meta.name.lower()
+        
+        # Connect to setter
+        def on_button_clicked():
+            if self._updating_from_camera:
+                return
+            
+            camera = self.ctx.camera
+            if not camera:
+                return
+            
+            # Determine file extension from metadata name (e.g., dfc_import -> .dfc)
+            name_parts = meta.name.split('_')
+            if len(name_parts) >= 2:
+                file_ext = name_parts[0]  # e.g., 'dfc'
+            else:
+                file_ext = 'dat'
+            
+            # Get default directory and filename
+            # Try to use stored filepath if available, otherwise use config directory
+            from pathlib import Path
+            default_path = ""
+            
+            # Look for a filepath field (e.g., dfc_filepath for dfc_import/dfc_export)
+            filepath_field = f"{file_ext}_filepath"
+            if hasattr(camera.settings, filepath_field):
+                stored_path = getattr(camera.settings, filepath_field)
+                if stored_path:
+                    default_path = stored_path
+            
+            # If no stored path, use config directory
+            if not default_path:
+                config_dir = Path("./config/cameras") / camera.underlying_camera.model
+                config_dir.mkdir(parents=True, exist_ok=True)
+                if is_export:
+                    # Suggest a timestamped filename for exports
+                    from datetime import datetime
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    default_path = str(config_dir / f"{file_ext}_{timestamp}.{file_ext}")
+                else:
+                    # Just use the directory for imports
+                    default_path = str(config_dir)
+            
+            # Open file dialog
+            if is_export:
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    f"Export {meta.display_name}",
+                    default_path,
+                    f"{file_ext.upper()} Files (*.{file_ext});;All Files (*)"
+                )
+            else:
+                file_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    f"Import {meta.display_name}",
+                    default_path,
+                    f"{file_ext.upper()} Files (*.{file_ext});;All Files (*)"
+                )
+            
+            if not file_path:
+                return
+            
+            try:
+                setter = getattr(camera.settings, setter_name)
+                setter(file_path)
+                debug(f"Called {setter_name} with {file_path}")
+                
+                # Refresh controlled states in case this button enabled other controls
+                self._apply_all_controlled_states(camera.settings)
+                
+                action = "exported to" if is_export else "imported from"
+                if self.ctx and hasattr(self.ctx, 'toast'):
+                    self.ctx.toast.success(f"Successfully {action} {file_path}", duration=2000)
+            except Exception as e:
+                error(f"Error calling {setter_name}: {e}")
+                if self.ctx and hasattr(self.ctx, 'toast'):
+                    self.ctx.toast.error(f"Error: {e}", duration=3000)
+        
+        button.clicked.connect(on_button_clicked)
+        return button
+    
+    def _create_number_picker_widget(self, meta, settings) -> QSpinBox | None:
+        """Create a number picker (spinbox only, no slider)"""
+        setter_name = f"set_{meta.name}"
+        if not hasattr(settings, setter_name):
+            warning(f"No setter found: {setter_name} - skipping widget creation")
+            return None
+        
+        spinbox = QSpinBox()
+        spinbox.setFixedWidth(90)
+        
+        # Set range
+        if hasattr(meta, 'min_value') and hasattr(meta, 'max_value'):
+            spinbox.setMinimum(meta.min_value)
+            spinbox.setMaximum(meta.max_value)
+        
+        # Get current value
+        current_value = getattr(settings, meta.name, 0)
+        spinbox.setValue(current_value)
+        
+        # Set tooltip
+        if hasattr(meta, 'description') and meta.description:
+            spinbox.setToolTip(meta.description)
+        
+        # Connect to setter
+        def on_value_changed(value: int):
+            if self._updating_from_camera:
+                return
+            
+            camera = self.ctx.camera
+            if not camera:
+                return
+            
+            try:
+                setter = getattr(camera.settings, setter_name)
+                setter(value)
+                
+                # Extract setting name from setter name (remove "set_" prefix)
+                setting_name = setter_name.replace("set_", "")
+                self._mark_setting_modified(setting_name, value)
+                
+                debug(f"Set {setter_name} to {value}")
+            except Exception as e:
+                error(f"Error setting {setter_name}: {e}")
+        
+        spinbox.valueChanged.connect(on_value_changed)
+        return spinbox
 
     # ------------------------------------------------------------------
     # Controlled-field helpers
@@ -740,6 +937,54 @@ class CameraSettingsWidget(QWidget):
 
         for field_name, value in live.items():
             self._update_display_value(field_name, value)
+    
+    def _on_external_setting_change(self, field_name: str, value) -> None:
+        """Handle setting changes that occur externally (e.g., async callbacks).
+        
+        This is called from a camera thread and needs to be marshalled to the UI thread.
+        We emit a signal which will be delivered to the UI thread automatically.
+        """
+        debug(f"_on_external_setting_change called: {field_name} = {value}")
+        self.external_setting_changed.emit(field_name, value)
+    
+    @Slot(str, object)
+    def _handle_external_setting_change(self, field_name: str, value) -> None:
+        """Handle external setting change on the UI thread (connected to signal).
+        
+        This runs on the UI thread after the signal is emitted from the camera thread.
+        """
+        camera = self.ctx.camera
+        if not camera:
+            debug(f"External setting change for '{field_name}': no camera")
+            return
+                
+        # Update the actual setting value in the widget (if it has one)
+        container = self._settings_widgets.get(field_name)
+        if container:
+            control = container.property("control")
+            if control and isinstance(control, QCheckBox):
+                self._updating_from_camera = True
+                try:
+                    control.blockSignals(True)
+                    control.setChecked(value)
+                    control.blockSignals(False)
+                    debug(f"Updated checkbox widget for '{field_name}' to {value}")
+                finally:
+                    self._updating_from_camera = False
+        else:
+            debug(f"No widget found for '{field_name}' (this is normal for controller-only fields)")
+        
+        # If this field controls others, update their state
+        controlled_by_this = [
+            (fn, controlled_when)
+            for fn, (ctrl, controlled_when) in self._controlled_fields.items()
+            if ctrl == field_name
+        ]
+        
+        if controlled_by_this:
+            for fn, controlled_when in controlled_by_this:
+                is_locked = value == controlled_when
+                self._set_field_controlled(fn, is_locked)
 
     # ------------------------------------------------------------------
     

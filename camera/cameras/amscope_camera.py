@@ -57,6 +57,7 @@ class AmscopeCamera(BaseCamera):
             AmscopeCamera.ensure_sdk_loaded()
 
         self._frame_buffer = None
+        self._dfc_completion_callback = None  # Callback for DFC completion
     
     def _get_settings_class(self):
         """
@@ -541,12 +542,20 @@ class AmscopeCamera(BaseCamera):
     
     def _event_callback_wrapper(self, event: int, context: Any):
         """Internal wrapper for camera events."""
+        amcam = self._get_sdk()
+        
         # Update frame buffer on IMAGE events
         if event == self.EVENT_IMAGE and hasattr(self, '_frame_buffer') and self._frame_buffer is not None:
             try:
                 self._hcam.PullImageV4(self._frame_buffer, 0, 24, 0, None)
+                debug("Frame captured and pulled to buffer")
             except:
                 pass
+        elif event == amcam.AMCAM_EVENT_DFC:
+            # DFC event received - call completion callback if registered
+            debug("DFC event received")
+            if hasattr(self, '_dfc_completion_callback') and self._dfc_completion_callback:
+                self._dfc_completion_callback()
         
         # Call registered callback
         if self._callback:
