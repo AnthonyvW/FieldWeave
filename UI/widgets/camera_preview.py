@@ -128,7 +128,7 @@ class CameraPreview(QFrame):
         layout.addWidget(self._video_label, 1)
         
         # Create overlay control buttons as direct children (true overlay)
-        self._crosshair_button = QPushButton("+", self)
+        self._crosshair_button = QPushButton("⌖", self)
         self._crosshair_button.setObjectName("CrosshairButton")
         self._crosshair_button.setCheckable(True)
         self._crosshair_button.setFixedSize(30, 30)
@@ -145,6 +145,36 @@ class CameraPreview(QFrame):
         self._grid_button.clicked.connect(self._toggle_grid)
         self._grid_button.move(10, 45)  # Position below crosshair button (10 + 30 + 5)
         self._grid_button.raise_()  # Ensure it's on top
+        
+        # Create focus button with custom overlaid text
+        self._focus_button = QPushButton(self)
+        self._focus_button.setObjectName("FocusButton")
+        self._focus_button.setCheckable(True)
+        self._focus_button.setFixedSize(30, 30)
+        self._focus_button.setToolTip("Toggle Focus Overlay")
+        self._focus_button.clicked.connect(self._toggle_focus)
+        self._focus_button.move(10, 80)  # Position below grid button (45 + 30 + 5)
+        
+        # Create labels for the overlaid symbols - each line separate
+        focus_top_corners = QLabel("⌜⌝", self._focus_button)
+        focus_top_corners.setObjectName("FocusOverlayLabel")
+        focus_top_corners.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        focus_top_corners.setGeometry(0, -2, 30, 30)
+        focus_top_corners.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        focus_bottom_corners = QLabel("⌞⌟", self._focus_button)
+        focus_bottom_corners.setObjectName("FocusOverlayLabel")
+        focus_bottom_corners.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        focus_bottom_corners.setGeometry(0, 2, 30, 30)
+        focus_bottom_corners.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        focus_center = QLabel("⌖", self._focus_button)
+        focus_center.setObjectName("FocusOverlayLabel")
+        focus_center.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        focus_center.setGeometry(0, 0, 30, 30)
+        focus_center.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        self._focus_button.raise_()  # Ensure it's on top
         
         # Connect to camera manager signals
         self._connect_to_camera_manager()
@@ -188,6 +218,11 @@ class CameraPreview(QFrame):
         self._video_label.show_grid = checked
         self._video_label.update()  # Trigger repaint
         info(f"Preview: Grid {'enabled' if checked else 'disabled'}")
+    
+    @Slot(bool)
+    def _toggle_focus(self, checked: bool):
+        """Toggle focus overlay"""
+        info(f"Focus Overlay Toggled {'on' if checked else 'off'}")
     
     @Slot(int, int)
     def _on_frame_ready(self, width: int, height: int):
