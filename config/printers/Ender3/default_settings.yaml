@@ -26,3 +26,9 @@ sample_positions:
   18: { x: 213.36, y: 200.00, z: 29.00 }
   19: { x: 224.88, y: 200.00, z: 29.00 }
   20: { x: 224.88, y: 200.00, z: 29.00 }
+calibration_y: 220.0
+calibration_z: 26.0
+calibration_pattern_position:
+  x: 226.08
+  y: 186.9
+  z: 33.2
