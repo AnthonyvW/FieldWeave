@@ -24,7 +24,6 @@ from PySide6.QtCore import Qt, Signal, Slot, QTimer
 
 from app_context import get_app_context
 from logger import info, error, warning, debug
-from camera.cameras.base_camera import CameraResolution
 
 # Interval (ms) between live-value polls for hardware-controlled fields.
 _LIVE_POLL_INTERVAL_MS = 500

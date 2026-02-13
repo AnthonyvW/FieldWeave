@@ -1,12 +1,6 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLineEdit,
-    QPushButton,
     QVBoxLayout,
     QWidget,
     QScrollArea,
@@ -18,6 +12,7 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.camera_preview import CameraPreview
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.camera_controls_widget import CameraControlsWidget
+from UI.widgets.navigation_widget import NavigationWidget
 
 from app_context import open_settings
 
@@ -39,6 +34,10 @@ class NavigateTab(CameraWithSidebarPage):
         content_layout.setSpacing(10)
 
         # Start Widgets
+
+        navigation = CollapsibleSection("Navigation", on_settings=lambda: open_settings("Navigation"))
+        navigation.layout_for_content().addWidget(NavigationWidget())
+        content_layout.addWidget(navigation)
 
         camera_controls = CollapsibleSection("Camera Controls", on_settings=lambda: open_settings("Camera"))
         camera_controls.layout_for_content().addWidget(CameraControlsWidget())

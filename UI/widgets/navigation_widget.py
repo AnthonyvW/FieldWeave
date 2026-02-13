@@ -1,0 +1,544 @@
+from __future__ import annotations
+
+import math
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QFrame,
+)
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QPainterPath, QTransform, QRegion, QPolygon
+from PySide6.QtCore import Qt, QRectF, QPointF
+
+def clamp(v: int, lo: int = 0, hi: int = 255) -> int:
+    return max(lo, min(hi, v))
+
+
+def adjust_color(c: QColor, factor: float) -> QColor:
+    return QColor(
+        clamp(int(c.red() * factor)),
+        clamp(int(c.green() * factor)),
+        clamp(int(c.blue() * factor)),
+    )
+
+
+class DiamondButton(QPushButton):
+    def __init__(
+        self,
+        label: str = "",
+        parent: QWidget | None = None,
+        base_color: QColor = QColor(208, 211, 214),
+        font_px: int = 28,
+        size: int = 90,
+        text_offset_y: int = 0
+    ):
+        super().__init__("", parent)
+        self.setFixedSize(size, size)
+        self.setStyleSheet("border: none; background: transparent;")
+        self.setMouseTracking(True)
+        
+        # Enable mouse tracking on parent to handle pass-through
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+
+        self._base = QColor(base_color)
+        self._hover = False
+        self._label = label
+        self._font_px = font_px
+        self._text_offset_y = text_offset_y
+
+    def enterEvent(self, event):
+        # Don't automatically set hover - check in mouseMoveEvent
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.unsetCursor()
+        self.update()
+        super().leaveEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        # Update hover state based on whether mouse is over diamond
+        was_hover = self._hover
+        is_over_diamond = self.hitButton(event.position().toPoint())
+        self._hover = is_over_diamond
+        
+        # Set or unset cursor based on position
+        if is_over_diamond:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
+        
+        if was_hover != self._hover:
+            self.update()
+        super().mouseMoveEvent(event)
+    
+    def mousePressEvent(self, event):
+        # Check if click is inside diamond
+        if self.hitButton(event.position().toPoint()):
+            super().mousePressEvent(event)
+        else:
+            # Pass the event to the parent by ignoring it
+            event.ignore()
+    
+    def mouseReleaseEvent(self, event):
+        if self.hitButton(event.position().toPoint()):
+            super().mouseReleaseEvent(event)
+        else:
+            event.ignore()
+
+    def hitButton(self, pos):
+        w = self.width()
+        h = self.height()
+
+        cx = w / 2
+        cy = h / 2
+
+        # Translate point to origin
+        x = pos.x() - cx
+        y = pos.y() - cy
+
+        # Rotate point by -45 degrees (inverse of the 45 degree rotation in paintEvent)
+        angle = -45 * math.pi / 180
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        
+        rotated_x = x * cos_a - y * sin_a
+        rotated_y = x * sin_a + y * cos_a
+
+        # Check if the rotated point is inside the square
+        side = min(w, h) / math.sqrt(2)
+        half_side = side / 2
+
+        return (abs(rotated_x) <= half_side and abs(rotated_y) <= half_side)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+
+        color = QColor(self._base)
+        if self._hover:
+            color = adjust_color(color, 0.90)  # Darken on hover
+        if self.isDown():
+            color = adjust_color(color, 0.85)
+
+        # Move origin to center
+        painter.translate(w / 2, h / 2)
+
+        # Rotate 45 degrees
+        painter.rotate(45)
+
+        # Define square centered at origin
+        side = min(w, h) / math.sqrt(2)  # scale factor controls diamond size
+        rect = QRectF(-side / 2, -side / 2, side, side)
+
+        # Fill
+        painter.setBrush(color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(rect)
+
+        # Border
+        pen = QPen(QColor(120, 120, 120))
+        pen.setWidth(2)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+
+        # Reset transform for text
+        painter.resetTransform()
+
+        # Draw label normally with offset
+        font = self.font()
+        font.setPixelSize(self._font_px)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(Qt.GlobalColor.black)
+        
+        # Apply vertical offset to text rect
+        text_rect = self.rect()
+        if self._text_offset_y != 0:
+            text_rect = text_rect.adjusted(0, self._text_offset_y, 0, self._text_offset_y)
+        
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self._label)
+
+
+
+class NavigationWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        
+        # Mock position data
+        self._x_pos = 123.45
+        self._y_pos = 678.90
+        self._z_pos = 42.00
+        
+        # Step size in mm
+        self._step_size = 0.4  # Default to 0.4mm
+        
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(15)
+        
+        # Set white background
+        self.setStyleSheet("""
+            NavigationWidget {
+                background: white;
+                border-radius: 8px;
+            }
+        """)
+
+        # Step size controls
+        step_size_controls = self._create_step_size_controls()
+        main_layout.addWidget(step_size_controls)
+
+        # Combined jog controls
+        jog_controls = self._create_jog_controls()
+        main_layout.addWidget(jog_controls)
+
+        main_layout.addStretch(1)
+
+    def _create_step_size_controls(self) -> QWidget:
+        """Create step size selection buttons with position display"""
+        from PySide6.QtWidgets import QGroupBox
+        
+        group = QGroupBox("Step Size")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(10, 5, 10, 5)
+        group_layout.setSpacing(10)
+        
+        # Buttons row
+        buttons_row = QWidget()
+        buttons_layout = QHBoxLayout(buttons_row)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(8)
+        
+        # Step size buttons
+        step_sizes = [0.04, 0.4, 2.0, 10.0]
+        self.step_buttons = []
+        
+        for size in step_sizes:
+            btn = QPushButton(f"{size}mm")
+            btn.setFixedHeight(30)
+            btn.setCheckable(True)
+            btn.setStyleSheet("padding: 0px;")  # Smaller padding
+            btn.clicked.connect(lambda checked, s=size: self._set_step_size(s))
+            buttons_layout.addWidget(btn)
+            self.step_buttons.append((btn, size))
+        
+        # Set default button as checked (0.4mm)
+        self.step_buttons[1][0].setChecked(True)
+        
+        group_layout.addWidget(buttons_row)
+        
+        # Position display
+        self.position_label = QLabel()
+        self.position_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.position_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                padding: 2px;
+            }
+        """)
+        self._update_position_display()
+        group_layout.addWidget(self.position_label)
+        
+        return group
+
+    def _set_step_size(self, size: float) -> None:
+        """Set the step size and update button states"""
+        self._step_size = size
+        
+        # Update button checked states
+        for btn, btn_size in self.step_buttons:
+            btn.setChecked(btn_size == size)
+        
+        print(f"Step size set to {size}mm")
+
+    def _create_jog_controls(self) -> QWidget:
+        """Create combined jog controls with diamond navigation and Z-axis"""
+        from PySide6.QtWidgets import QGroupBox
+        
+        group = QGroupBox("Jog")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.setSpacing(0)
+        
+        # Top row: diamond and z-axis controls
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(15)
+        
+        # Diamond panel
+        diamond_container = self._create_diamond_panel()
+        top_layout.addWidget(diamond_container, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        # Z-axis controls
+        z_container = self._create_z_controls()
+        top_layout.addWidget(z_container, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        top_layout.addStretch(1)
+        
+        group_layout.addWidget(top_row)
+        
+        return group
+    
+    def _create_diamond_panel(self) -> QWidget:
+        """Create the diamond navigation with home button in center"""
+        container = QWidget()
+        container.setFixedSize(240, 200)  # Slightly larger for better spacing
+        
+        # Outer arrows (Unicode) - larger size
+        self.top_btn = DiamondButton("↑", parent=container, font_px=32, size=90)
+        self.left_btn = DiamondButton("←", parent=container, font_px=32, size=90, text_offset_y=-3)
+        self.right_btn = DiamondButton("→", parent=container, font_px=32, size=90, text_offset_y=-3)
+        self.bot_btn = DiamondButton("↓", parent=container, font_px=32, size=90)
+
+        # Center home icon - smaller and orange
+        self.center_btn = DiamondButton(
+            "H",
+            parent=container,
+            font_px=20,
+            size=60  # Smaller than outer buttons
+        )
+        
+        # Install event filters on all buttons for click pass-through
+        for btn in [self.top_btn, self.left_btn, self.right_btn, self.bot_btn, self.center_btn]:
+            btn.installEventFilter(self)
+        
+        # Connect buttons to placeholder functions
+        self.top_btn.clicked.connect(self._move_up)
+        self.left_btn.clicked.connect(self._move_left)
+        self.right_btn.clicked.connect(self._move_right)
+        self.bot_btn.clicked.connect(self._move_down)
+        self.center_btn.clicked.connect(self._go_home)
+        
+        self.center_btn.raise_()
+
+        # Position buttons when container is shown
+        container.resizeEvent = lambda event: self._layout_diamond_buttons(container)
+        
+        return container
+    
+    def eventFilter(self, obj, event):
+        """Intercept button events and pass through if in corner regions"""
+        from PySide6.QtCore import QEvent
+        
+        # Only filter events on DiamondButtons
+        if not isinstance(obj, DiamondButton):
+            return super().eventFilter(obj, event)
+        
+        # Handle mouse move events for hover
+        if event.type() == QEvent.Type.MouseMove:
+            btn_local_pos = event.position().toPoint()
+            is_over_obj_diamond = obj.hitButton(btn_local_pos)
+            global_pos = obj.mapToGlobal(btn_local_pos)
+            
+            # Define buttons in z-order (home button is on top)
+            buttons = [self.center_btn, self.top_btn, self.left_btn, 
+                      self.right_btn, self.bot_btn]
+            
+            # Find which button should be hovered
+            hovered_btn = None
+            
+            if is_over_obj_diamond:
+                # Mouse is over this button's diamond - it should be hovered
+                hovered_btn = obj
+            else:
+                # Mouse is in corner region - check buttons beneath
+                for btn in buttons:
+                    if btn is obj:
+                        continue
+                    
+                    btn_local = btn.mapFromGlobal(global_pos)
+                    if btn.geometry().contains(btn.mapToParent(btn_local)):
+                        if btn.hitButton(btn_local):
+                            hovered_btn = btn
+                            break  # Stop at first match (top-most button)
+            
+            # Update hover state on all buttons
+            for btn in buttons:
+                if btn is hovered_btn:
+                    # Set hover on this button
+                    if not btn._hover:
+                        btn._hover = True
+                        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                        btn.update()
+                else:
+                    # Clear hover on all other buttons
+                    if btn._hover:
+                        btn._hover = False
+                        btn.unsetCursor()
+                        btn.update()
+            
+            return False  # Don't consume move events
+        
+        # Handle mouse button press events
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                # Check if click is actually inside the diamond shape
+                btn_local_pos = event.position().toPoint()
+                if not obj.hitButton(btn_local_pos):
+                    # Click is in corner region - manually pass to buttons beneath
+                    global_pos = obj.mapToGlobal(btn_local_pos)
+                    
+                    # Define buttons in z-order (home button is on top)
+                    buttons = [self.center_btn, self.top_btn, self.left_btn, 
+                              self.right_btn, self.bot_btn]
+                    
+                    for btn in buttons:
+                        if btn is obj:
+                            continue  # Skip the button we're filtering
+                        
+                        # Check if this button is beneath the click
+                        btn_local = btn.mapFromGlobal(global_pos)
+                        if btn.geometry().contains(btn.mapToParent(btn_local)):
+                            if btn.hitButton(btn_local):
+                                # Manually trigger this button (first match due to z-order)
+                                btn.clicked.emit()
+                                return True  # Consume the event
+                    
+                    # No button beneath, just consume the event (don't trigger anything)
+                    return True
+        
+        return super().eventFilter(obj, event)
+
+    def _layout_diamond_buttons(self, container: QWidget) -> None:
+        """Layout the diamond buttons in proper positions"""        
+        # Container center
+        cx = container.width() // 2
+        cy = container.height() // 2
+        
+        # Simple positioning: place outer buttons at fixed distance from center
+        # Distance should be enough to have visible gap between buttons
+        distance = 50  # Distance from center to outer button centers
+        
+        def place(btn: QPushButton, x: int, y: int) -> None:
+            """Place button centered at x, y"""
+            btn.move(x - btn.width() // 2, y - btn.height() // 2)
+        
+        # Place outer buttons in cardinal directions
+        place(self.top_btn, cx, cy - distance)
+        place(self.bot_btn, cx, cy + distance)
+        place(self.left_btn, cx - distance, cy)
+        place(self.right_btn, cx + distance, cy)
+        
+        # Place home button at center
+        place(self.center_btn, cx, cy)
+        
+        self.center_btn.raise_()
+
+    def _create_z_controls(self) -> QWidget:
+        """Create Z-axis increase/decrease buttons"""
+        container = QWidget()
+        container.setFixedHeight(200)  # Match diamond container height
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        
+        # Add stretch to center vertically
+        layout.addStretch(1)
+
+        # Increase button - smaller with border
+        self.z_up_btn = QPushButton("▲")
+        self.z_up_btn.setFixedSize(55, 55)  # Smaller square
+        self.z_up_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgb(208, 211, 214);
+                border: 2px solid rgb(120, 120, 120);
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: rgb(187, 190, 193);
+            }
+            QPushButton:pressed {
+                background-color: rgb(177, 180, 182);
+            }
+        """)
+        self.z_up_btn.clicked.connect(self._z_increase)
+        layout.addWidget(self.z_up_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        # Decrease button - smaller with border
+        self.z_down_btn = QPushButton("▼")
+        self.z_down_btn.setFixedSize(55, 55)  # Smaller square
+        self.z_down_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgb(208, 211, 214);
+                border: 2px solid rgb(120, 120, 120);
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: rgb(187, 190, 193);
+            }
+            QPushButton:pressed {
+                background-color: rgb(177, 180, 182);
+            }
+        """)
+        self.z_down_btn.clicked.connect(self._z_decrease)
+        layout.addWidget(self.z_down_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        # Add stretch to center vertically
+        layout.addStretch(1)
+
+        return container
+
+    def _update_position_display(self) -> None:
+        """Update the position display label"""
+        self.position_label.setText(
+            f"X: {self._x_pos:.2f}  Y: {self._y_pos:.2f}  Z: {self._z_pos:.2f} mm"
+        )
+
+    # Placeholder movement functions
+    def _move_up(self) -> None:
+        """Move stage up (positive Y)"""
+        print(f"Moving up (Y+) by {self._step_size}mm")
+        self._y_pos += self._step_size
+        self._update_position_display()
+
+    def _move_down(self) -> None:
+        """Move stage down (negative Y)"""
+        print(f"Moving down (Y-) by {self._step_size}mm")
+        self._y_pos -= self._step_size
+        self._update_position_display()
+
+    def _move_left(self) -> None:
+        """Move stage left (negative X)"""
+        print(f"Moving left (X-) by {self._step_size}mm")
+        self._x_pos -= self._step_size
+        self._update_position_display()
+
+    def _move_right(self) -> None:
+        """Move stage right (positive X)"""
+        print(f"Moving right (X+) by {self._step_size}mm")
+        self._x_pos += self._step_size
+        self._update_position_display()
+
+    def _go_home(self) -> None:
+        """Return stage to home position"""
+        print("Going to home position")
+        self._x_pos = 0.0
+        self._y_pos = 0.0
+        self._z_pos = 0.0
+        self._update_position_display()
+
+    def _z_increase(self) -> None:
+        """Increase Z height"""
+        print(f"Increasing Z height by {self._step_size}mm")
+        self._z_pos += self._step_size
+        self._update_position_display()
+
+    def _z_decrease(self) -> None:
+        """Decrease Z height"""
+        print(f"Decreasing Z height by {self._step_size}mm")
+        self._z_pos -= self._step_size
+        self._update_position_display()
