@@ -24,6 +24,7 @@ from PySide6.QtCore import Qt, Signal, Slot, QTimer
 
 from app_context import get_app_context
 from logger import info, error, warning, debug
+from common.setting_types import SettingMetadata
 
 # Interval (ms) between live-value polls for hardware-controlled fields.
 _LIVE_POLL_INTERVAL_MS = 500
@@ -365,12 +366,12 @@ class CameraSettingsWidget(QWidget):
         label.setStyleSheet("color: red; padding: 20px;")
         self.settings_layout.addWidget(label)
     
-    def _group_settings(self, metadata_list: list) -> dict[str, list]:
+    def _group_settings(self, metadata_list: list[SettingMetadata]) -> dict[str, list[SettingMetadata]]:
         """Group settings by their group property"""
-        grouped = {}
+        grouped: dict[str, list[SettingMetadata]] = {}
         
         for meta in metadata_list:
-            group = meta.group if hasattr(meta, 'group') and meta.group else "General"
+            group = meta.group  # Always present with default "General"
             
             if group not in grouped:
                 grouped[group] = []
@@ -379,7 +380,7 @@ class CameraSettingsWidget(QWidget):
         
         return grouped
     
-    def _create_settings_group(self, group_name: str, settings_list: list) -> QGroupBox:
+    def _create_settings_group(self, group_name: str, settings_list: list[SettingMetadata]) -> QGroupBox:
         """Create a group box for a category of settings"""
         group_box = QGroupBox(group_name)
         layout = QFormLayout(group_box)
@@ -389,7 +390,7 @@ class CameraSettingsWidget(QWidget):
             if widget:
                 # Create label with tooltip
                 label = QLabel(setting_meta.display_name + ":")
-                if hasattr(setting_meta, 'description') and setting_meta.description:
+                if setting_meta.description:
                     label.setToolTip(setting_meta.description)
                 
                 layout.addRow(label, widget)
@@ -403,22 +404,16 @@ class CameraSettingsWidget(QWidget):
         
         return group_box
     
-    def _create_setting_widget(self, meta) -> QWidget | None:
+    def _create_setting_widget(self, meta: SettingMetadata) -> QWidget | None:
         """Create appropriate widget for a setting based on its metadata"""
         camera = self.ctx.camera
         if not camera:
             return None
         
         settings = camera.settings
-        setting_type = meta.setting_type if hasattr(meta, 'setting_type') else None
-        
-        # Handle both enum and string values
-        if setting_type is None:
-            warning(f"No setting type for {meta.name}")
-            return None
         
         # Convert enum to string value if needed
-        type_str = setting_type.value if hasattr(setting_type, 'value') else str(setting_type)
+        type_str = meta.setting_type.value if hasattr(meta.setting_type, 'value') else str(meta.setting_type)
         
         # Create widget based on type
         if type_str == "bool":
@@ -443,7 +438,7 @@ class CameraSettingsWidget(QWidget):
             warning(f"Unknown setting type: {type_str} for {meta.name}")
             return None
     
-    def _create_bool_widget(self, meta, settings) -> QCheckBox | None:
+    def _create_bool_widget(self, meta: SettingMetadata, settings) -> QCheckBox | None:
         """Create checkbox for boolean settings"""
         # Check if setter exists first
         setter_name = f"set_{meta.name}"
@@ -458,7 +453,7 @@ class CameraSettingsWidget(QWidget):
         checkbox.setChecked(current_value)
         
         # Set tooltip
-        if hasattr(meta, 'description') and meta.description:
+        if meta.description:
             checkbox.setToolTip(meta.description)
         
         # Connect to setter
@@ -468,7 +463,7 @@ class CameraSettingsWidget(QWidget):
         
         return checkbox
     
-    def _create_range_widget(self, meta, settings) -> QWidget | None:
+    def _create_range_widget(self, meta: SettingMetadata, settings) -> QWidget | None:
         """Create slider with value display for range settings"""
         # Check if setter exists first
         setter_name = f"set_{meta.name}"
@@ -481,7 +476,7 @@ class CameraSettingsWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         
         # Determine if we need float or int
-        is_float = hasattr(meta, 'min_value') and isinstance(meta.min_value, float)
+        is_float = meta.min_value is not None and isinstance(meta.min_value, float)
         
         if is_float:
             # Use double spin box for float values
@@ -495,7 +490,7 @@ class CameraSettingsWidget(QWidget):
         spinbox.setFixedWidth(90)
         
         # Set range
-        if hasattr(meta, 'min_value') and hasattr(meta, 'max_value'):
+        if meta.min_value is not None and meta.max_value is not None:
             spinbox.setMinimum(meta.min_value)
             spinbox.setMaximum(meta.max_value)
         
@@ -504,7 +499,7 @@ class CameraSettingsWidget(QWidget):
         spinbox.setValue(current_value)
         
         # Set tooltip
-        if hasattr(meta, 'description') and meta.description:
+        if meta.description:
             spinbox.setToolTip(meta.description)
         
         # Create slider
@@ -518,8 +513,8 @@ class CameraSettingsWidget(QWidget):
                 int((current_value - meta.min_value) / (meta.max_value - meta.min_value) * 1000)
             )
         else:
-            slider.setMinimum(int(meta.min_value) if hasattr(meta, 'min_value') else 0)
-            slider.setMaximum(int(meta.max_value) if hasattr(meta, 'max_value') else 100)
+            slider.setMinimum(int(meta.min_value) if meta.min_value is not None else 0)
+            slider.setMaximum(int(meta.max_value) if meta.max_value is not None else 100)
             slider.setValue(int(current_value))
         
         # Connect signals
@@ -543,7 +538,7 @@ class CameraSettingsWidget(QWidget):
         
         return container
     
-    def _create_dropdown_widget(self, meta, settings) -> QComboBox | None:
+    def _create_dropdown_widget(self, meta: SettingMetadata, settings) -> QComboBox | None:
         """Create dropdown for choice settings"""
         # Check if setter exists first
         setter_name = f"set_{meta.name}"
@@ -554,7 +549,7 @@ class CameraSettingsWidget(QWidget):
         combo = QComboBox()
         
         # Add choices
-        if hasattr(meta, 'choices') and meta.choices:
+        if meta.choices:
             for choice in meta.choices:
                 combo.addItem(str(choice), choice)
         
@@ -566,7 +561,7 @@ class CameraSettingsWidget(QWidget):
                 combo.setCurrentIndex(index)
         
         # Set tooltip
-        if hasattr(meta, 'description') and meta.description:
+        if meta.description:
             combo.setToolTip(meta.description)
         
         # Connect to setter
@@ -576,7 +571,7 @@ class CameraSettingsWidget(QWidget):
         
         return combo
     
-    def _create_rgba_level_widget(self, meta, settings) -> QWidget | None:
+    def _create_rgba_level_widget(self, meta: SettingMetadata, settings) -> QWidget | None:
         """Create RGBA level widget with four spinboxes for R, G, B, A"""
         # Check if setter exists first
         setter_name = f"set_{meta.name}"
@@ -650,7 +645,7 @@ class CameraSettingsWidget(QWidget):
         layout.addStretch()
         return container
     
-    def _create_button_widget(self, meta, settings) -> QPushButton | None:
+    def _create_button_widget(self, meta: SettingMetadata, settings) -> QPushButton | None:
         """Create a button that calls a setter method without arguments"""
         setter_name = f"set_{meta.name}"
         if not hasattr(settings, setter_name):
@@ -660,7 +655,7 @@ class CameraSettingsWidget(QWidget):
         button = QPushButton(meta.display_name)
         
         # Set tooltip
-        if hasattr(meta, 'description') and meta.description:
+        if meta.description:
             button.setToolTip(meta.description)
         
         # Connect to setter
@@ -690,7 +685,7 @@ class CameraSettingsWidget(QWidget):
         button.clicked.connect(on_button_clicked)
         return button
     
-    def _create_file_picker_button_widget(self, meta, settings) -> QPushButton | None:
+    def _create_file_picker_button_widget(self, meta: SettingMetadata, settings) -> QPushButton | None:
         """Create a file picker button that calls a setter method with a filepath"""
         setter_name = f"set_{meta.name}"
         if not hasattr(settings, setter_name):
@@ -700,7 +695,7 @@ class CameraSettingsWidget(QWidget):
         button = QPushButton(meta.display_name)
         
         # Set tooltip
-        if hasattr(meta, 'description') and meta.description:
+        if meta.description:
             button.setToolTip(meta.description)
         
         # Determine if this is an import or export button based on name
@@ -785,7 +780,7 @@ class CameraSettingsWidget(QWidget):
         button.clicked.connect(on_button_clicked)
         return button
     
-    def _create_number_picker_widget(self, meta, settings) -> QSpinBox | None:
+    def _create_number_picker_widget(self, meta: SettingMetadata, settings) -> QSpinBox | None:
         """Create a number picker (spinbox only, no slider)"""
         setter_name = f"set_{meta.name}"
         if not hasattr(settings, setter_name):
@@ -796,7 +791,7 @@ class CameraSettingsWidget(QWidget):
         spinbox.setFixedWidth(90)
         
         # Set range
-        if hasattr(meta, 'min_value') and hasattr(meta, 'max_value'):
+        if meta.min_value is not None and meta.max_value is not None:
             spinbox.setMinimum(meta.min_value)
             spinbox.setMaximum(meta.max_value)
         
@@ -805,7 +800,7 @@ class CameraSettingsWidget(QWidget):
         spinbox.setValue(current_value)
         
         # Set tooltip
-        if hasattr(meta, 'description') and meta.description:
+        if meta.description:
             spinbox.setToolTip(meta.description)
         
         # Connect to setter
