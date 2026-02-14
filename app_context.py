@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING
 from camera.camera_manager import CameraManager
 from camera.cameras.base_camera import BaseCamera
 from logger import info, error, warning, debug
-from forgeConfig import ForgeSettingsManager, ForgeSettings
+from fieldweaveConfig import FieldWeaveSettingsManager, FieldWeaveSettings
 
 if TYPE_CHECKING:
     from UI.settings.settings_main import SettingsDialog
     from UI.widgets.toast_widget import ToastManager
 
-# Current Forge version - update this when releasing new versions
-FORGE_VERSION = "1.2"
+FIELDWEAVE_VERSION = "1.2"
 
 
 class AppContext:
@@ -37,8 +36,8 @@ class AppContext:
             
         self._camera_manager: CameraManager | None = None
         self._settings_dialog: SettingsDialog | None = None
-        self._settings_manager: ForgeSettingsManager | None = None
-        self._settings: ForgeSettings | None = None
+        self._settings_manager: FieldWeaveSettingsManager | None = None
+        self._settings: FieldWeaveSettings | None = None
         self._toast_manager: ToastManager | None = None
         self._main_window = None
         self._initialized = True
@@ -77,13 +76,13 @@ class AppContext:
         return self.camera is not None
     
     @property
-    def settings(self) -> ForgeSettings | None:
-        """Get the Forge settings"""
+    def settings(self) -> FieldWeaveSettings | None:
+        """Get the FieldWeave settings"""
         return self._settings
     
     @property
-    def settings_manager(self) -> ForgeSettingsManager | None:
-        """Get the Forge settings manager"""
+    def settings_manager(self) -> FieldWeaveSettingsManager | None:
+        """Get the FieldWeave settings manager"""
         return self._settings_manager
     
     @property
@@ -98,8 +97,8 @@ class AppContext:
     
     @property
     def current_version(self) -> str:
-        """Get the current Forge version"""
-        return FORGE_VERSION
+        """Get the current FieldWeave version"""
+        return FIELDWEAVE_VERSION
     
     def register_main_window(self, window):
         """Register the main window instance"""
@@ -127,22 +126,22 @@ class AppContext:
             self._settings_dialog.activateWindow()
     
     def _load_settings(self):
-        """Load Forge application settings"""
+        """Load FieldWeave application settings"""
         try:
-            self._settings_manager = ForgeSettingsManager()
+            self._settings_manager = FieldWeaveSettingsManager()
             self._settings = self._settings_manager.load()
             
-            info(f"Forge settings loaded - running v{FORGE_VERSION}")
+            info(f"FieldWeave settings loaded - running v{FIELDWEAVE_VERSION}")
             
             # Check if we should show patch notes
             if self._settings.show_patchnotes:
                 info("New version detected - patch notes should be displayed")
                 
         except Exception as e:
-            error(f"Failed to load Forge settings: {e}")
+            error(f"Failed to load FieldWeave settings: {e}")
             # Create default settings if loading fails
-            self._settings = ForgeSettings()
-            warning("Using default Forge settings")
+            self._settings = FieldWeaveSettings()
+            warning("Using default FieldWeave settings")
     
     def _initialize_camera_manager(self):
         """Initialize the camera manager and open first available camera"""

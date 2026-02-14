@@ -1,5 +1,5 @@
 """
-Toast notification widget for Forge microscope application.
+Toast notification widget for FieldWeave microscope application.
 
 Provides temporary, color-coded notifications that stack and auto-dismiss.
 Integrates with the logging system for consistent message handling.

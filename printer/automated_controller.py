@@ -14,8 +14,8 @@ from UI.input.button import Button
 from UI.input.toggle_button import ToggleButton
 from UI.input.text_field import TextField
 
-from forgeConfig import (
-    ForgeSettings,
+from fieldweaveConfig import (
+    FieldWeaveSettings,
 )
 from .automation_config import (
     AutomationSettings,
@@ -32,8 +32,8 @@ from .automation_config import AutomationSettings, AutomationSettingsManager
 class AutomatedPrinter(CameraCalibrationMixin, AutofocusMixin, BasePrinterController):
     """Extended printer controller with automation capabilities"""
     AUTOMATION_CONFIG_SUBDIR = ""
-    def __init__(self, forgeConfig: ForgeSettings, camera):
-        super().__init__(forgeConfig)
+    def __init__(self, fieldweaveConfig: FieldWeaveSettings, camera):
+        super().__init__(fieldweaveConfig)
 
         AutomationSettingsManager.scope_dir(self.AUTOMATION_CONFIG_SUBDIR)
         self.automation_settings: AutomationSettings = AutomationSettingsManager.load(self.AUTOMATION_CONFIG_SUBDIR)

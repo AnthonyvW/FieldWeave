@@ -556,7 +556,7 @@ class BaseCamera(ABC):
         
         # Add software information
         from app_context import get_app_context
-        exif[base_tags['Software']] = f"Forge - v{get_app_context().settings.version}"
+        exif[base_tags['Software']] = f"FieldWeave - v{get_app_context().settings.version}"
         
         # Add timestamp
         timestamp = metadata.get("timestamp", datetime.now().isoformat())
@@ -621,7 +621,7 @@ class BaseCamera(ABC):
         
         # Add software information
         from app_context import get_app_context
-        exif[base_tags['Software']] = f"Forge - v{get_app_context().settings.version}"
+        exif[base_tags['Software']] = f"FieldWeave - v{get_app_context().settings.version}"
         
         # Add timestamp
         timestamp = metadata.get("timestamp", datetime.now().isoformat())
@@ -678,7 +678,7 @@ class BaseCamera(ABC):
         
         # Add software info
         from app_context import get_app_context
-        pnginfo.add_text("Software", f"Forge - v{get_app_context().settings.version}")
+        pnginfo.add_text("Software", f"FieldWeave - v{get_app_context().settings.version}")
         pnginfo.add_text("Metadata", json.dumps(metadata, indent=2))
         
         # Add individual camera settings as separate chunks

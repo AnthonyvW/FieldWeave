@@ -15,8 +15,8 @@ from .printerConfig import (
     PrinterSettings,
     PrinterSettingsManager
 )
-from forgeConfig import (
-    ForgeSettings,
+from fieldweaveConfig import (
+    FieldWeaveSettings,
 )
 
 def _probe_port(port_device, baud, indicators, request=b"M115\r\n", read_window_s=10, min_lines=3):
@@ -98,7 +98,7 @@ class command:
 class BasePrinterController:
     CONFIG_SUBDIR = "Ender3"
     """Base class for 3D printer control"""
-    def __init__(self, forgeConfig: ForgeSettings):
+    def __init__(self, fieldweaveConfig: FieldWeaveSettings):
         self.config = PrinterSettings()
         PrinterSettingsManager.scope_dir(self.CONFIG_SUBDIR)
         self.config = PrinterSettingsManager.load(self.CONFIG_SUBDIR)
@@ -127,13 +127,13 @@ class BasePrinterController:
 
 
         # Initialize serial connection
-        self._initialize_printer(forgeConfig)
+        self._initialize_printer(fieldweaveConfig)
         
         # Start command processing thread
         self._processing_thread = threading.Thread(target=self._process_commands, daemon=True)
         self._processing_thread.start()
 
-    def _initialize_printer(self, forgeConfig):
+    def _initialize_printer(self, fieldweaveConfig):
         """Initialize printer serial connection"""
         baud = self.config.baud_rate
         indicators = getattr(self.config, "valid_response_indicators", None) or [
@@ -146,7 +146,7 @@ class BasePrinterController:
             raise RuntimeError("No serial ports found. Is the printer connected?")
 
         preferred = []
-        cfg_port = getattr(forgeConfig, "serial_port", None)
+        cfg_port = getattr(fieldweaveConfig, "serial_port", None)
         if cfg_port:
             preferred = [cfg_port]
         remaining = [p for p in detected if p not in set(preferred)]

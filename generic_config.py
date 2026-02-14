@@ -32,7 +32,7 @@ class ConfigManager(Generic[S], ABC):
     
     All config files include metadata fields:
         - config_type: Identifies which config loader to use
-        - config_version: The Forge version that created/last modified this config
+        - config_version: The FieldWeave version that created/last modified this config
     
     Directory structure:
         root_dir/
@@ -87,7 +87,7 @@ class ConfigManager(Generic[S], ABC):
         Initialize the config manager.
         
         Args:
-            config_type: Identifier for this config type (e.g., "camera_settings", "forge_settings")
+            config_type: Identifier for this config type (e.g., "camera_settings", "fieldweave_settings")
             root_dir: Directory for config files (settings, defaults, backups)
             default_filename: Name for the defaults file
             backup_dirname: Name for the backups subdirectory
@@ -171,17 +171,17 @@ class ConfigManager(Generic[S], ABC):
         Args:
             data: Dictionary containing the config data (without metadata fields)
             from_version: Version the config was created with
-            to_version: Current Forge version
+            to_version: Current FieldWeave version
         
         Returns:
             Migrated dictionary (or original if no migration needed)
         """
         return data
     
-    def get_forge_version(self) -> str:
-        """Get the current Forge version."""
-        from app_context import FORGE_VERSION
-        return FORGE_VERSION
+    def get_fieldweave_version(self) -> str:
+        """Get the current FieldWeave version."""
+        from app_context import FIELDWEAVE_VERSION
+        return FIELDWEAVE_VERSION
     
     def active_path(self) -> Path:
         """Return path to the active settings file."""
@@ -209,7 +209,7 @@ class ConfigManager(Generic[S], ABC):
         """
         return {
             "config_type": self.config_type,
-            "config_version": self.get_forge_version(),
+            "config_version": self.get_fieldweave_version(),
             **data,
         }
     
@@ -240,7 +240,7 @@ class ConfigManager(Generic[S], ABC):
         
         # Handle migration if version mismatch
         if config_version is not None:
-            current_version = self.get_forge_version()
+            current_version = self.get_fieldweave_version()
             
             if config_version != current_version and current_version != "unknown":
                 info(

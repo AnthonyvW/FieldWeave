@@ -24,6 +24,7 @@ from .pages.camera_settings import camera_page
 from .pages.automation_settings import automation_page
 from .pages.machine_vision_settings import machine_vision_page
 from .pages.navigation_settings import navigation_page
+from .pages.about_settings import about_page
 
 class SettingsButton(QToolButton):
     def __init__(self, tooltip: str = "Settings", parent: QWidget | None = None)-> None:
@@ -111,6 +112,7 @@ class SettingsDialog(QDialog):
         self._add_page("Navigation", navigation_page())
         self._add_page("Automation", automation_page())
         self._add_page("Machine Vision", machine_vision_page())
+        self._add_page("About FieldWeave", about_page())
 
         self.sidebar.itemClicked.connect(self._on_tree_item_clicked)
         

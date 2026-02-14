@@ -21,7 +21,7 @@ if __name__ == "__main__":
     
     # Initialize app context (this will load camera SDK and config)
     ctx = get_app_context()
-    info("Forge application starting")
+    info("FieldWeave application starting")
     
     win = MainWindow()
     win.show()
@@ -29,7 +29,7 @@ if __name__ == "__main__":
     exit_code = app.exec()
     
     # Cleanup
-    info("Forge application shutting down")
+    info("FieldWeave application shutting down")
     ctx.cleanup()
     
     sys.exit(exit_code)

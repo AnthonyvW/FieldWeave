@@ -34,9 +34,9 @@ class MainWindow(QMainWindow):
         self.app_context.register_main_window(self)
         
         # Set window title with version
-        self.setWindowTitle(f"Forge - v{self.app_context.current_version}")
+        self.setWindowTitle(f"FieldWeave - v{self.app_context.current_version}")
         self.resize(1920, 1080)
-
+        self.move(500,200) # Move window to a more convenient position. 
         self._state = State()
         
         # Create and register settings dialog

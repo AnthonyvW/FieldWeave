@@ -30,7 +30,7 @@ class AppLogger:
             return
         
         self._log_callbacks: list[Callable[[str, str], None]] = []
-        self._logger = logging.getLogger('ForgeApp')
+        self._logger = logging.getLogger('FieldWeaveApp')
         self._logger.setLevel(logging.DEBUG)
         
         # Default log directory
@@ -48,7 +48,7 @@ class AppLogger:
     def _setup_file_handler(self):
         """Setup rotating file handler"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = self._log_dir / f"Forge_{timestamp}.log"
+        log_file = self._log_dir / f"FieldWeave_{timestamp}.log"
         
         # Store current log file path
         self._current_log_file = log_file
@@ -83,7 +83,7 @@ class AppLogger:
         try:
             # Get all base log files (without .1, .2, etc extensions)
             log_files = sorted(
-                [f for f in self._log_dir.glob("Forge_*.log") 
+                [f for f in self._log_dir.glob("FieldWeave_*.log") 
                  if not f.stem.split('.')[-1].isdigit()],
                 key=lambda x: x.stat().st_mtime,
                 reverse=True

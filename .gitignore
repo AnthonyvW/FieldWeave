@@ -1,6 +1,9 @@
 ./input/
 output/
 
+misc/test_img/
+misc/input/
+
 config/cameras/amscope/backups/
 config/cameras/amscope/settings.yaml
 
@@ -10,8 +13,8 @@ config/printers/Ender3/settings.yaml
 config/automation/backups/
 config/automation/settings.yaml
 
-config/forge/backups/
-config/forge/settings.yaml
+config/fieldweave/backups/
+config/fieldweave/settings.yaml
 
 # Libraries
 focus-stack/
