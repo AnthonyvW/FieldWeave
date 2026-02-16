@@ -14,7 +14,7 @@ import threading
 import gc
 
 from camera.cameras.base_camera import BaseCamera, CameraResolution
-from logger import info, debug, error, exception, warning
+from common.logger import info, debug, error, exception, warning
 from camera.settings.amscope_settings import AmscopeSettings
 
 # Module-level reference to the loaded SDK

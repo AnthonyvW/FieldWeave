@@ -15,7 +15,7 @@ from .printerConfig import (
     PrinterSettings,
     PrinterSettingsManager
 )
-from fieldweaveConfig import (
+from common.fieldweaveConfig import (
     FieldWeaveSettings,
 )
 

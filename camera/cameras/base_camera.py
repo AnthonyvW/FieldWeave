@@ -14,7 +14,7 @@ from PIL.Image import Exif
 from PIL import PngImagePlugin
 import json
 
-from logger import info, debug, error, exception
+from common.logger import info, debug, error, exception
 from camera.settings.camera_settings import CameraSettings, CameraSettingsManager
 
 
@@ -555,7 +555,7 @@ class BaseCamera(ABC):
         exif = Exif()
         
         # Add software information
-        from app_context import get_app_context
+        from common.app_context import get_app_context
         exif[base_tags['Software']] = f"FieldWeave - v{get_app_context().settings.version}"
         
         # Add timestamp
@@ -620,7 +620,7 @@ class BaseCamera(ABC):
         exif = Exif()
         
         # Add software information
-        from app_context import get_app_context
+        from common.app_context import get_app_context
         exif[base_tags['Software']] = f"FieldWeave - v{get_app_context().settings.version}"
         
         # Add timestamp
@@ -677,7 +677,7 @@ class BaseCamera(ABC):
         pnginfo = PngImagePlugin.PngInfo()
         
         # Add software info
-        from app_context import get_app_context
+        from common.app_context import get_app_context
         pnginfo.add_text("Software", f"FieldWeave - v{get_app_context().settings.version}")
         pnginfo.add_text("Metadata", json.dumps(metadata, indent=2))
         

@@ -11,7 +11,7 @@ from camera.settings.camera_settings import (
     RGBALevel,
     FileFormat,
 )
-from logger import info, error, exception, debug, warning
+from common.logger import info, error, exception, debug, warning
 
 if TYPE_CHECKING:
     from camera.cameras.base_camera import BaseCamera, CameraResolution

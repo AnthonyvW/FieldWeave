@@ -19,7 +19,7 @@ from camera.camera_enumerator import (
     AmscopeEnumerator,
     GenericUSBEnumerator
 )
-from logger import info, error, warning, exception, debug
+from common.logger import info, error, warning, exception, debug
 
 
 class CameraManager(QObject):

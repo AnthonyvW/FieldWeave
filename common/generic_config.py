@@ -9,7 +9,7 @@ import shutil
 import time
 import yaml
 
-from logger import info, debug, error, warning
+from common.logger import info, debug, error, warning
 
 # File/dir names are generic—usable for ANY config
 ACTIVE_FILENAME = "settings.yaml"
@@ -180,7 +180,7 @@ class ConfigManager(Generic[S], ABC):
     
     def get_fieldweave_version(self) -> str:
         """Get the current FieldWeave version."""
-        from app_context import FIELDWEAVE_VERSION
+        from common.app_context import FIELDWEAVE_VERSION
         return FIELDWEAVE_VERSION
     
     def active_path(self) -> Path:

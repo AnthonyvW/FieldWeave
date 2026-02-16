@@ -14,7 +14,7 @@ from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.camera_controls_widget import CameraControlsWidget
 from UI.widgets.navigation_widget import NavigationWidget
 
-from app_context import open_settings
+from common.app_context import open_settings
 
 class NavigateTab(CameraWithSidebarPage):
     def __init__(self, parent: QWidget | None = None) -> None:

@@ -20,7 +20,7 @@ from .tabs.logs_tab import LogsTab
 from .state import State
 from .settings.settings_main import SettingsButton, SettingsDialog
 
-from app_context import get_app_context
+from common.app_context import get_app_context
 
 
 class MainWindow(QMainWindow):

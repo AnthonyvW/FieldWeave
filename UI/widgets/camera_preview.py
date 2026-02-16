@@ -8,8 +8,8 @@ from PySide6.QtWidgets import (
     QPushButton, QHBoxLayout
 )
 
-from app_context import get_app_context
-from logger import info, error, warning
+from common.app_context import get_app_context
+from common.logger import info, error, warning
 
 
 class OverlayLabel(QLabel):

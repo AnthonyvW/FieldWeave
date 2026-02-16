@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
 )
 
-from logger import get_logger
+from common.logger import get_logger
 
 
 class LogsTab(QWidget):

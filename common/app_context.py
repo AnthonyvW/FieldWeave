@@ -8,8 +8,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from camera.camera_manager import CameraManager
 from camera.cameras.base_camera import BaseCamera
-from logger import info, error, warning, debug
-from fieldweaveConfig import FieldWeaveSettingsManager, FieldWeaveSettings
+from common.logger import info, error, warning, debug
+from common.fieldweaveConfig import FieldWeaveSettingsManager, FieldWeaveSettings
 
 if TYPE_CHECKING:
     from UI.settings.settings_main import SettingsDialog

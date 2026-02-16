@@ -16,7 +16,7 @@ import importlib.util
 from pathlib import Path
 from typing import Optional
 
-from logger import get_logger
+from common.logger import get_logger
 
 class AmscopeSdkLoader:
     """

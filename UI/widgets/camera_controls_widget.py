@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (
     QPushButton, QLineEdit, QLabel, QFileDialog, QMessageBox, QComboBox
 )
 from PySide6.QtCore import Slot, Signal
-from logger import info, error, warning, debug
-from app_context import get_app_context
+from common.logger import info, error, warning, debug
+from common.app_context import get_app_context
 
 
 class CameraControlsWidget(QWidget):

@@ -6,8 +6,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple, TYPE_CHECKING
 
-from generic_config import ConfigManager
-from logger import info, debug, exception, error
+from common.generic_config import ConfigManager
+from common.logger import info, debug, exception, error
 
 from common.setting_types import FileFormat, RGBALevel, SettingType, SettingMetadata
 

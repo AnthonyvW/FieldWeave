@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from generic_config import ConfigManager, DEFAULT_FILENAME, ACTIVE_FILENAME
+from common.generic_config import ConfigManager, DEFAULT_FILENAME, ACTIVE_FILENAME
 
 @dataclass
 class AutomationSettings:

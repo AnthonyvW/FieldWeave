@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
-from logger import error, exception, debug
+from common.logger import error, exception, debug
 
 from camera.cameras.amscope_camera import AmscopeCamera
 

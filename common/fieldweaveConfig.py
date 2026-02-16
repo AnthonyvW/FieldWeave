@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Union
 
-from generic_config import ConfigManager
-from logger import info
+from common.generic_config import ConfigManager
+from common.logger import info
 
 @dataclass
 class FieldWeaveSettings:

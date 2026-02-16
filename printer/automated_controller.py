@@ -14,7 +14,7 @@ from UI.input.button import Button
 from UI.input.toggle_button import ToggleButton
 from UI.input.text_field import TextField
 
-from fieldweaveConfig import (
+from common.fieldweaveConfig import (
     FieldWeaveSettings,
 )
 from .automation_config import (

@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
 
-from app_context import get_app_context
-from logger import info, error, warning, debug
+from common.app_context import get_app_context
+from common.logger import info, error, warning, debug
 from common.setting_types import SettingMetadata
 
 # Interval (ms) between live-value polls for hardware-controlled fields.

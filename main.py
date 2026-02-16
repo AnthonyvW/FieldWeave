@@ -8,8 +8,8 @@ from UI.main_window import MainWindow
 from UI.style import apply_style
 
 # Initialize app context early
-from app_context import get_app_context
-from logger import info
+from common.app_context import get_app_context
+from common.logger import info
 
 
 if __name__ == "__main__":
@@ -19,7 +19,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     apply_style(app)
     
-    # Initialize app context (this will load camera SDK and config)
     ctx = get_app_context()
     info("FieldWeave application starting")
     
