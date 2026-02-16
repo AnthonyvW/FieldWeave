@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -205,23 +206,55 @@ class SettingsDialog(QDialog):
     
     def _on_close_clicked(self) -> None:
         """Handle close button click with confirmation if settings modified"""
+        if self._handle_close_with_unsaved_changes():
+            self.reject()
+    
+    def _handle_close_with_unsaved_changes(self) -> bool:
+        """Handle closing with unsaved changes. Returns True if close should proceed."""
         # Check if camera page has unsaved changes
         camera_widget = self._page_widgets.get("Camera")
         if camera_widget and hasattr(camera_widget, 'has_unsaved_changes') and camera_widget.has_unsaved_changes():
-            reply = QMessageBox.question(
-                self,
-                "Unsaved Changes",
-                "You have unsaved camera settings. Do you want to save them?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
-            )
+            # Create custom message box with Yes, Reset to Defaults, No, Cancel buttons
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Unsaved Changes")
+            msg_box.setText("You have unsaved camera settings.")
+            msg_box.setInformativeText("Would you like to save your settings?")
+            msg_box.setIcon(QMessageBox.Icon.Question)
             
-            if reply == QMessageBox.StandardButton.Cancel:
-                return  # Don't close
-            elif reply == QMessageBox.StandardButton.Yes:
+            # Add custom buttons
+            yes_btn = msg_box.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+            reset_btn = msg_box.addButton("Reset to Defaults", QMessageBox.ButtonRole.DestructiveRole)
+            no_btn = msg_box.addButton("No", QMessageBox.ButtonRole.NoRole)
+            cancel_btn = msg_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            
+            msg_box.setDefaultButton(cancel_btn)
+            
+            msg_box.exec()
+            clicked = msg_box.clickedButton()
+            
+            if clicked == cancel_btn:
+                return False  # Don't close
+            elif clicked == yes_btn:
                 # Save settings before closing
                 self.save_camera_settings.emit()
+                return True
+            elif clicked == reset_btn:
+                # Reset to defaults
+                if hasattr(camera_widget, '_reset_settings'):
+                    camera_widget._reset_settings()
+                return True
+            elif clicked == no_btn:
+                # Don't save, just close
+                return True
         
-        self.reject()
+        return True  # No unsaved changes, proceed with close
+    
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Handle window close event (X button)"""
+        if self._handle_close_with_unsaved_changes():
+            event.accept()
+        else:
+            event.ignore()
 
     def _add_page(self, name: str, page: QWidget) -> None:
         """Add a page and create tree items for it and its groups"""

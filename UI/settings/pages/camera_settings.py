@@ -46,6 +46,7 @@ class CameraSettingsWidget(QWidget):
         self._updating_from_camera = False
         self._modified_settings: set[str] = set()  # Track which settings have been modified
         self._saved_values: dict[str, any] = {}  # Store saved values for comparison
+        self._default_values: dict[str, any] = {}  # Store default values for reset
         self._group_names: list[str] = []  # Track group names in order
         self._group_widgets: dict[str, QGroupBox] = {}  # Map group names to widgets
 
@@ -269,12 +270,16 @@ class CameraSettingsWidget(QWidget):
             settings = camera.settings
             metadata_list = settings.get_metadata()
             
-            # Store current values as "saved" baseline
+            # Store current values as "saved" baseline and also as defaults
             self._saved_values.clear()
+            self._default_values.clear()
             self._modified_settings.clear()
             for meta in metadata_list:
                 current_value = getattr(settings, meta.name, None)
                 self._saved_values[meta.name] = current_value
+                # Only set default values if not already set (preserve first load)
+                if meta.name not in self._default_values:
+                    self._default_values[meta.name] = current_value
 
             # Build controlled-field index from metadata
             for meta in metadata_list:
@@ -1371,6 +1376,12 @@ class CameraSettingsWidget(QWidget):
             warning("No camera to reset settings on")
             return
         
+        # Check if we have default values stored
+        if not self._default_values:
+            warning("No default values stored - cannot reset")
+            self.ctx.toast.warning("No default values available to reset to", duration=3000)
+            return
+        
         # Confirm reset with user
         reply = QMessageBox.question(
             self,
@@ -1384,11 +1395,47 @@ class CameraSettingsWidget(QWidget):
             return
         
         try:
-            # Refresh from camera hardware (gets defaults)
             settings = camera.settings
-            settings.refresh_from_camera(camera.underlying_camera)
+            metadata_list = settings.get_metadata()
+            
+            # Create a lookup dict for metadata
+            meta_dict = {meta.name: meta for meta in metadata_list}
+            
+            # Reset each setting to its default value
+            for field_name, default_value in self._default_values.items():
+                if default_value is None:
+                    continue
+                    
+                meta = meta_dict.get(field_name)
+                if not meta:
+                    continue
+                
+                try:
+                    setter_name = f"set_{field_name}"
+                    if hasattr(settings, setter_name):
+                        setter = getattr(settings, setter_name)
+                        
+                        # Convert enum to string value if needed
+                        type_str = meta.setting_type.value if hasattr(meta.setting_type, 'value') else str(meta.setting_type)
+                        
+                        # Handle dropdown settings that need index and value
+                        if type_str == "dropdown" and hasattr(meta, 'choices') and meta.choices:
+                            # Find the index of the default value
+                            try:
+                                default_index = meta.choices.index(default_value)
+                                setter(index=default_index, value=default_value)
+                            except (ValueError, AttributeError):
+                                setter(default_value)
+                        else:
+                            setter(default_value)
+                        debug(f"Reset {field_name} to default: {default_value}")
+                except Exception as e:
+                    warning(f"Could not reset {field_name}: {e}")
             
             info("Camera settings reset to defaults")
+            
+            # Clear modification markers
+            self._clear_all_modifications()
             
             # Refresh the display
             self._refresh_settings_display()
@@ -1396,7 +1443,7 @@ class CameraSettingsWidget(QWidget):
             self.ctx.toast.info("Settings reset to defaults", duration=2000)
         except Exception as e:
             error(f"Error resetting camera settings: {e}")
-            self.ctx.toast.info(f"Error resetting settings: {e}", duration=3000)
+            self.ctx.toast.error(f"Error resetting settings: {e}", duration=3000)
 
 
 def camera_page(parent_dialog=None) -> QWidget:
