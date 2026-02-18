@@ -17,7 +17,7 @@ from .tabs.project_tab import ProjectTab
 from .tabs.calibration_tab import CalibrationTab
 from .tabs.logs_tab import LogsTab
 
-from .state import State
+from common.state import State
 from .settings.settings_main import SettingsButton, SettingsDialog
 
 from common.app_context import get_app_context
@@ -138,7 +138,7 @@ class MainWindow(QMainWindow):
             percent = int(round(100.0 * self._state.progress_current / max(1, self._state.progress_total)))
             self.progress.setValue(max(0, min(100, percent)))
 
-        self.status_bar.setProperty("kind", self._state.status_type())
+        self.status_bar.setProperty("kind", self._state.automation_state)
         self.status_bar.style().unpolish(self.status_bar)
         self.status_bar.style().polish(self.status_bar)
 

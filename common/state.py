@@ -1,11 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+
+class MachineState(str, Enum):
+    DISCONNECTED: str = "Disconnected"
+    CONNECTED: str = "Connected"
+
+    def __str__(self) -> str:
+        return self.value
+
+class AutomationState(str, Enum):
+    IDLE: str = "Idle"
+    COMPLETE: str = "Completed"
+    RUNNING: str = "Running"
+    PAUSED: str = "Paused"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 
 @dataclass(frozen=True)
 class State:
-    machine_state: str = "Disconnected"
-    automation_state: str = "Idle"
+    machine_state: str = MachineState.DISCONNECTED
+    automation_state: str = AutomationState.IDLE
+    camera_state: str = ""
 
     activity: str = "-"
     job_name: str = "-"
@@ -22,11 +42,3 @@ class State:
         if self.progress_total > 0:
             parts.append(f"{self.progress_current}/{self.progress_total}")
         return "  |  ".join(parts)
-    
-    def status_type(self) -> str:
-        a = self.automation_state.strip().lower()
-        if a in ("finished", "done", "complete", "completed"):
-            return "done"
-        if a in ("running", "busy", "capturing", "moving", "scanning", "paused"):
-            return "active"
-        return "idle"
