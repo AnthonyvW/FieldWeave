@@ -6,6 +6,7 @@ from enum import Enum
 class MachineState(str, Enum):
     DISCONNECTED: str = "Disconnected"
     CONNECTED: str = "Connected"
+    CONNECTING: str = "Connecting"
 
     def __str__(self) -> str:
         return self.value

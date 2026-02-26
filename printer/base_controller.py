@@ -1,8 +1,9 @@
+from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
 from queue import Queue
-from typing import Optional, Callable, List, Dict, Iterable
+from typing import Callable, Iterable
 import serial
 import serial.tools.list_ports
 import time
@@ -11,13 +12,14 @@ import threading
 import re
 
 from .models import Position
-from .printerConfig import (
-    PrinterSettings,
-    PrinterSettingsManager
+from .motion_config import (
+    MotionSystemSettings,
+    MotionSystemSettingsManager,
 )
-from common.fieldweaveConfig import (
-    FieldWeaveSettings,
-)
+
+# 1 mm expressed in nanometres — mirrors the constant in models.py
+_NM_PER_MM = 1_000_000
+
 
 def _probe_port(port_device, baud, indicators, request=b"M115\r\n", read_window_s=10, min_lines=3):
     """
@@ -32,14 +34,14 @@ def _probe_port(port_device, baud, indicators, request=b"M115\r\n", read_window_
         ser = serial.Serial(
             port_device,
             baudrate=baud,
-            timeout=0.25,       # slightly less chatty spin
+            timeout=0.25,
             write_timeout=1
         )
 
         # Some controllers reset on open due to DTR; give them a brief window to chatter.
         start = time.time()
         quiet_since = start
-        while time.time() - start < 2.0:   # ~2s settle (exits earlier if quiet)
+        while time.time() - start < 2.0:
             while ser.in_waiting:
                 line = ser.readline().decode("utf-8", errors="ignore").strip()
                 if line:
@@ -53,7 +55,6 @@ def _probe_port(port_device, baud, indicators, request=b"M115\r\n", read_window_
         ser.reset_input_buffer()
         ser.write(request)
 
-        # Read with a firm window
         start = time.time()
         while time.time() - start < read_window_s:
             if ser.in_waiting:
@@ -63,7 +64,6 @@ def _probe_port(port_device, baud, indicators, request=b"M115\r\n", read_window_
                     if any(ind in line for ind in indicators):
                         success = True
                         break
-                    # Heuristic: enough lines + a few seconds → likely the right device
                     if len(responses) >= min_lines and time.time() - start > 3:
                         success = True
                         break
@@ -71,13 +71,12 @@ def _probe_port(port_device, baud, indicators, request=b"M115\r\n", read_window_
                 time.sleep(0.05)
 
         if success:
-            return ser, responses  # leave open
+            return ser, responses
         else:
             return None, responses
     except Exception:
         return None, responses
     finally:
-        # Only close when NOT successful
         if ser is not None and ser.is_open and not success:
             try:
                 ser.close()
@@ -89,75 +88,91 @@ class PrinterFault(Exception): pass
 class PrinterTimeout(Exception): pass
 
 @dataclass
-class command:
-    kind: str 
-    value: any
-    message: Optional[str] = None   
+class Command:
+    kind: str
+    value: object
+    message: str | None = None
     log: bool = False
 
 class BasePrinterController:
-    CONFIG_SUBDIR = "Ender3"
-    """Base class for 3D printer control"""
-    def __init__(self, fieldweaveConfig: FieldWeaveSettings):
-        self.config = PrinterSettings()
-        PrinterSettingsManager.scope_dir(self.CONFIG_SUBDIR)
-        self.config = PrinterSettingsManager.load(self.CONFIG_SUBDIR)
+    """Base class for 3D printer / motion-system control."""
 
-        self.position = Position(0, 0, 0) # Current position
-        self.speed = self.config.step_size  # Current Speed
-        self.paused = False
-        self.stop_requested = False
+    def __init__(self) -> None:
+        # Load motion system config via its manager (mirrors FieldWeaveSettingsManager pattern)
+        self._config_manager = MotionSystemSettingsManager()
+        self.config: MotionSystemSettings = self._config_manager.load()
+
+        # All positions stored in nanometres for sub-micron Z precision.
+        self.position = Position(0, 0, 0)
+
+        # Current jog step size in nanometres (initialised from config).
+        self.speed: int = self.config.step_size
+
         self.faulted = False
 
-        self.command_queue: Queue[command] = Queue()
+        # _running: set means the worker is free to process commands.
+        self._running = threading.Event()
+        self._running.set()
+
+        # _stop_requested: set means the current automation should abort.
+        self._stop_requested = threading.Event()
+
+        # _ready: set once _initialize_printer succeeds on the worker thread.
+        self._ready = threading.Event()
+        self._init_error: Exception | None = None
+
+        self.command_queue: Queue[Command] = Queue()
 
         # Buffer for macros when paused.
-        self._front_buffer: List[command] = []
+        self._front_buffer: list[Command] = []
         self._front_lock = threading.Lock()
-        
+
         # Callbacks
-        self._message_listeners: List[Callable[[str, bool, command], None]] = []
-        self._handlers: Dict[str, Callable[[command], None]] = {}
-        
-        # register built-ins
+        self._message_listeners: list[Callable[[str, bool, Command], None]] = []
+        self._handlers: dict[str, Callable[[Command], None]] = {}
+
+        # Register built-in handlers
         self.register_handler("PRINTER", self._handle_printer)
         self.register_handler("MACRO", self._handle_macro)
         self.register_handler("MACRO_WAIT", self._handle_macro)
         self.register_handler("STATUS", self._handle_status)
 
-
-        # Initialize serial connection
-        self._initialize_printer(fieldweaveConfig)
-        
-        # Start command processing thread
-        self._processing_thread = threading.Thread(target=self._process_commands, daemon=True)
+        # Start worker thread — it will call _initialize_printer itself, then
+        # set _ready (or store the error) before entering the command loop.
+        self._processing_thread = threading.Thread(
+            target=self._worker, daemon=True
+        )
         self._processing_thread.start()
 
-    def _initialize_printer(self, fieldweaveConfig):
-        """Initialize printer serial connection"""
-        baud = self.config.baud_rate
-        indicators = getattr(self.config, "valid_response_indicators", None) or [
-            "FIRMWARE_NAME", "Marlin", "Ender", "TF init", "echo:"
-        ]
+    def is_ready(self) -> bool:
+        """Return True once the printer has been found and homed."""
+        return self._ready.is_set()
 
-        # Ports list: configured (first) then all others (no duplicates)
+    def wait_until_ready(self, timeout: float | None = None) -> bool:
+        """
+        Block until the printer is ready (or timeout seconds have elapsed).
+        Returns True if ready, False if timed out.
+        Raises the initialisation exception if connection failed.
+        """
+        ready = self._ready.wait(timeout)
+        if self._init_error is not None:
+            raise self._init_error
+        return ready
+
+    def _initialize_printer(self) -> None:
+        """Initialize printer serial connection."""
+        baud = self.config.baud_rate
+        indicators = [self.config.FIRMWARE_NAME, self.config.MACHINE_TYPE, "TF init", "echo:"]
+
         detected = [p.device for p in serial.tools.list_ports.comports()]
         if not detected:
             raise RuntimeError("No serial ports found. Is the printer connected?")
 
-        preferred = []
-        cfg_port = getattr(fieldweaveConfig, "serial_port", None)
-        if cfg_port:
-            preferred = [cfg_port]
-        remaining = [p for p in detected if p not in set(preferred)]
-        ports_to_try = preferred + remaining
+        print(f"Available ports: {detected}")
 
-        print(f"Available ports (preferred first): {ports_to_try}")
-
-        for dev in ports_to_try:
+        for dev in detected:
             try:
-                label = "(configured)" if preferred and dev == preferred[0] else ""
-                print(f"Trying port {dev} {label}".strip())
+                print(f"Trying port {dev}")
                 ser, lines = _probe_port(
                     port_device=dev,
                     baud=baud,
@@ -167,9 +182,8 @@ class BasePrinterController:
                     min_lines=3,
                 )
                 if ser is not None:
-                    self.printer_serial = ser  # keep open
+                    self.printer_serial = ser
                     print(f"Printer found on port: {dev}")
-                    # show last few lines like old version
                     for ln in lines[-10:]:
                         print(f"[{dev}] {ln}")
                     return
@@ -178,33 +192,49 @@ class BasePrinterController:
             except Exception as e:
                 print(f"Port {dev} failed: {e}")
 
-        raise RuntimeError(f"Printer not found on any available serial port. Tried: {ports_to_try}")
+        raise RuntimeError(f"Printer not found on any available serial port. Tried: {detected}")
 
-    def _process_commands(self):
-        time.sleep(1)
+    def _worker(self) -> None:
+        """
+        Worker thread entry point.  Initialises the serial connection, homes
+        the printer, signals readiness, then drives the command loop.
+        """
+        try:
+            self._initialize_printer()
+        except Exception as exc:
+            self._init_error = exc
+            self._ready.set()
+            return
+
         self.home()
+        self._ready.set()
+        self._process_commands()
+
+    def _process_commands(self) -> None:
         while True:
-            if self.paused:
-                time.sleep(0.05)
-                continue
+            self._running.wait()
+
             try:
-                cmd = None
+                cmd: Command | None = None
                 with self._front_lock:
                     if self._front_buffer:
                         cmd = self._front_buffer.pop(0)
                 if cmd is None:
-                    cmd = self.command_queue.get()
+                    try:
+                        cmd = self.command_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
 
                 if cmd.message:
                     self._emit_message(cmd.message, cmd.log, cmd)
                 (self._handlers.get(cmd.kind) or self._handle_unknown)(cmd)
 
             except (PrinterFault, PrinterTimeout) as e:
-                self.halt(f"Printer error: {e}")
+                self.force_stop(f"Printer error: {e}")
             except Exception as e:
-                self.halt(f"Unhandled error: {e}")
+                self.force_stop(f"Unhandled error: {e}")
 
-    def _push_front(self, cmd: command) -> None:
+    def _push_front(self, cmd: Command) -> None:
         with self._front_lock:
             self._front_buffer.insert(0, cmd)
 
@@ -212,8 +242,8 @@ class BasePrinterController:
         self,
         gc: str,
         *,
-        wait: bool = False,                 # add M400 after sending (ensures motion complete)
-        update_position: bool | None = None, # auto: update for G*; override if needed
+        wait: bool = False,
+        update_position: bool | None = None,
         message: str | None = None,
         log: bool = False,
     ) -> None:
@@ -227,33 +257,22 @@ class BasePrinterController:
         if update_position:
             self._update_position(gc_stripped)
 
-        # send primary command
         self._send_and_wait(gc_stripped)
 
-        # optionally ensure the move fully finishes at firmware level
         if wait and gc_stripped.upper() != "M400":
             self._send_and_wait("M400")
 
-    def _parse_kv(self, s: str) -> dict[str, str]:
-        out = {}
-        for tok in s.split():
-            if "=" in tok:
-                k, v = tok.split("=", 1)
-                out[k] = v
-        return out
-
-    def register_handler(self, kind: str, fn: Callable[[command], None]) -> None:
+    def register_handler(self, kind: str, fn: Callable[[Command], None]) -> None:
         self._handlers[kind] = fn
 
-    def _handle_printer(self, cmd):    # default
+    def _handle_printer(self, cmd: Command) -> None:
         self._exec_gcode(cmd.value, wait=False, message=None, log=False)
 
-    def _handle_unknown(self, cmd):    
+    def _handle_unknown(self, cmd: Command) -> None:
         self._emit_message(f"Unknown kind: {cmd.kind}", True, cmd)
 
-
     def _send_and_wait(self, command: str) -> None:
-        """Send command and wait for OK response"""
+        """Send command and wait for OK response."""
         self._send_command(command)
         self._wait_for_ok()
 
@@ -266,7 +285,6 @@ class BasePrinterController:
 
             response = self.printer_serial.readline().decode("utf-8", errors="ignore").strip()
             if not response:
-                # Nothing arrived during the serial timeout window; don't print a blank line.
                 time.sleep(0.02)
                 continue
 
@@ -275,101 +293,124 @@ class BasePrinterController:
                 break
             if response.startswith("error"):
                 raise PrinterFault(f"Printer reported error: {response}")
-            print(response)  # only non-empty, informative lines
+            print(response)
 
     def _update_position(self, command: str) -> None:
-        """Update internal position tracking based on G-code command"""
-        # Handle full homing
-        if command.strip().upper() == "G28":
+        """
+        Update internal position tracking based on G-code movement commands.
+
+        G-code coordinates are in millimetres; position is stored in nanometres.
+        """
+        upper = command.strip().upper()
+
+        if upper == "G28":
             self.position = Position(x=0, y=0, z=0)
             return
 
-        updates = {}
-        for axis, pattern in [('x', r'X([\d\.]+)'), ('y', r'Y([\d\.]+)'), ('z', r'Z([\d\.]+)')]:
-            match = re.search(pattern, command)
+        move_code = upper.split()[0] if upper else ""
+        if move_code not in ("G0", "G1"):
+            return
+
+        updates: dict[str, int] = {}
+        for axis, pattern in [('x', r'X([\d.]+)'), ('y', r'Y([\d.]+)'), ('z', r'Z([\d.]+)')]:
+            match = re.search(pattern, command, re.IGNORECASE)
             if match:
-                updates[axis] = int(float(match.group(1)) * 100)
-        
+                mm = float(match.group(1))
+                updates[axis] = round(mm * _NM_PER_MM)
+
         if updates:
             self.position = Position(
                 x=updates.get('x', self.position.x),
                 y=updates.get('y', self.position.y),
-                z=updates.get('z', self.position.z)
+                z=updates.get('z', self.position.z),
             )
 
     def _send_command(self, command: str) -> None:
-        """Send command to printer"""
+        """Send command to printer."""
         self.printer_serial.write(f"{command}\n".encode())
 
     def get_position(self) -> Position:
-        """Get current position as tuple"""
+        """Get current position (coordinates in nanometres)."""
         return self.position
 
-    def get_bed_size(self)-> Position:
-        return Position(self.config.max_x, self.config.max_y, self.config.max_z)
-    
-    def get_max_x(self)-> int:
-        return self.config.max_x // 100
-    
-    def get_max_y(self)-> int:
-        return self.config.max_y // 100
-    
-    def get_max_z(self)-> int:
-        return self.config.max_z // 100
+    def get_bed_size(self) -> Position:
+        """Return the machine's maximum extents as a Position (nanometres)."""
+        return Position.from_mm(self.config.max_x, self.config.max_y, self.config.max_z)
+
+    def get_max_x(self) -> int:
+        """Maximum X travel in millimetres."""
+        return self.config.max_x
+
+    def get_max_y(self) -> int:
+        """Maximum Y travel in millimetres."""
+        return self.config.max_y
+
+    def get_max_z(self) -> int:
+        """Maximum Z travel in millimetres."""
+        return self.config.max_z
 
     def move_to_position(self, position: Position) -> None:
-        """Move to specified position"""
+        """Move to specified position (coordinates in nanometres)."""
         self.enqueue_printer(f"G0 {position.to_gcode()}", message=f"Moving to {position}", log=False)
 
-    def move_axis(self, axis: str, direction: int) -> None:
-        """Move specified axis by current speed * direction"""
-        current_value = getattr(self.position, axis)
-        new_value = current_value + (self.speed * direction)
+    def move_axis(self, axis: str, direction: int) -> bool:
+        """
+        Jog the given axis by one step in the specified direction.
 
-        max_value = getattr(self.config, f"max_{axis}")
-        if 0 <= new_value <= max_value:
-            self.enqueue_printer(f"G1 {axis.upper()}{new_value / 100}", log=False)
+        The step size (self.speed) is in nanometres.  Axis limits (config.max_*)
+        are in millimetres and are converted to nanometres for comparison.
 
-    def force_stop(self, reason="fault"):
+        Returns False if the resulting position would be out of bounds.
+        """
+        current_nm: int = getattr(self.position, axis)
+        new_nm = current_nm + (self.speed * direction)
+
+        max_mm: int = getattr(self.config, f"max_{axis}")
+        max_nm = max_mm * _NM_PER_MM
+
+        if 0 <= new_nm <= max_nm:
+            mm_value = new_nm / _NM_PER_MM
+            self.enqueue_printer(f"G1 {axis.upper()}{mm_value:.6f}", log=False)
+            return True
+        return False
+
+    def force_stop(self, reason: str = "fault") -> None:
         self.faulted = True
-        self.stop_requested = True
-        self.paused = True
+        self._stop_requested.set()
+        self._running.clear()
         self._flush_pipeline()
         self._emit_message(f"[FORCE STOP] {reason}", True, None)
 
-    def reset_force_stop(self):
+    def reset_fault(self) -> None:
+        """Clear all state after a hard (force) stop."""
         self.faulted = False
-        self.stop_requested = False
-        self.paused = False
+        self._stop_requested.clear()
+        self._running.set()
 
     def home(self) -> None:
-        
-        self.enqueue_printer("G90", "Set all Axis to Absolute Positioning")
-        self.enqueue_printer("G28", "Homing Printer. . .")
-            
+        self.enqueue_printer("G90", "Set all axes to absolute positioning")
+        self.enqueue_printer("G28", "Homing printer...")
+
     def flush_moves(self) -> None:
         self._exec_gcode("M400", wait=True, update_position=False, message="Waiting for moves...", log=True)
 
 
-
-
-
     # Command Queuer
-    def enqueue_cmd(self, cmd: command) -> None:
+
+    def enqueue_cmd(self, cmd: Command) -> None:
         """Enqueue any command by kind."""
         if self.faulted:
-            self._emit_message("Ignored: controller faulted; call reset()", True, cmd)
+            self._emit_message("Ignored: controller faulted; call reset_fault()", True, cmd)
             return
         self.command_queue.put(cmd)
 
-    def create_cmd(self, kind: str, value: str, message: str = "", log: bool = False) -> None:
-        # Creates a command with the arguments
-        return command(kind, value, message or None, log)
+    def create_cmd(self, kind: str, value: str, message: str = "", log: bool = False) -> Command:
+        return Command(kind, value, message or None, log)
 
     def enqueue_printer(self, gc: str, message: str = "", log: bool = True) -> None:
         self.enqueue_cmd(self.printer_cmd(gc, message, log))
 
-    def printer_cmd(self, gc: str, message: str = "", log: bool = False) -> command:
+    def printer_cmd(self, gc: str, message: str = "", log: bool = False) -> Command:
         """
         Create a PRINTER command.
 
@@ -397,9 +438,9 @@ class BasePrinterController:
             home_and_move = self.macro_cmd(steps, wait_printer=True)
             self.enqueue_cmd(home_and_move)
         """
-        return command(kind="PRINTER", value=gc, message = message or None, log=log)
+        return Command(kind="PRINTER", value=gc, message=message or None, log=log)
 
-    def _flush_pipeline(self):
+    def _flush_pipeline(self) -> None:
         with self._front_lock:
             self._front_buffer.clear()
         try:
@@ -410,55 +451,56 @@ class BasePrinterController:
 
 
     # Automation
-    def stop(self, reason="user"):
-        # Soft stop: pause, mark stop, nuke anything pending/resumable
-        self.stop_requested = True
-        self.paused = True
+
+    def stop(self, reason: str = "user") -> None:
+        self._stop_requested.set()
+        self._running.clear()
         self._emit_message("Stopped", True, None)
         self._flush_pipeline()
-    
-    def reset_after_stop(self):
-        # Clearing stop lets new commands run; nothing old will resume
-        self.stop_requested = False
-        self.paused = False
+
+    def resume(self) -> None:
+        """Clear a soft stop so new commands can run."""
+        self._stop_requested.clear()
+        self._running.set()
 
     def toggle_pause(self) -> None:
-        """Toggle pause state"""
-        self.paused = not self.paused
-        self._emit_message("Unpaused" if not self.paused else "Paused", True, None)
+        """Toggle pause state."""
+        if self._running.is_set():
+            self._running.clear()
+            self._emit_message("Paused", True, None)
+        else:
+            self._running.set()
+            self._emit_message("Unpaused", True, None)
 
-    def status_cmd(self, message: str, log: bool = True):
-        return command(kind="STATUS", value=message, message = message, log=log)
+    def status_cmd(self, message: str, log: bool = True) -> Command:
+        return Command(kind="STATUS", value=message, message=message, log=log)
 
-    def _handle_status(self, cmd: command, emit = False):
-        if(emit):
+    def _handle_status(self, cmd: Command, emit: bool = False) -> None:
+        if emit:
             self._emit_message(cmd.message, cmd.log, cmd)
-        elif(cmd.log):
+        elif cmd.log:
             print("[Status]", cmd.message)
 
 
     # Macro Handling
-    def _handle_macro(self, cmd: command) -> None:
+
+    def _handle_macro(self, cmd: Command) -> None:
         steps = list(cmd.value or [])
         wait_printer = (cmd.kind.upper() == "MACRO_WAIT")
 
         for i, sub in enumerate(steps):
-            if self.stop_requested:
-                # Abort immediately; do NOT requeue the remainder.
+            if self._stop_requested.is_set():
                 return
 
-            if self.paused:
-                # Only resume later if not stopping.
+            if not self._running.is_set():
                 remaining = steps[i:]
-                if remaining and not self.stop_requested:
-                    self._push_front(command(cmd.kind, remaining, None, cmd.log))
+                if remaining and not self._stop_requested.is_set():
+                    self._push_front(Command(cmd.kind, remaining, None, cmd.log))
                 return
 
-            # cooperative pause/stop point between sub-steps
             if self.pause_point():
-                return  # stop requested; do not requeue
+                return
 
-            # Execute one atomic sub-step
             if sub.kind == "PRINTER":
                 self._exec_gcode(
                     sub.value,
@@ -469,115 +511,107 @@ class BasePrinterController:
             else:
                 (self._handlers.get(sub.kind) or self._handle_unknown)(sub)
 
-    def macro_cmd(self, items: Iterable[command], *, wait_printer: bool = False, message: str | None = None, log: bool = False) -> command:
+    def macro_cmd(
+        self,
+        items: Iterable[Command],
+        *,
+        wait_printer: bool = False,
+        message: str | None = None,
+        log: bool = False,
+    ) -> Command:
         """
         Create a MACRO command (a batch of commands executed atomically).
 
-        Macros are useful for grouping a sequence of commands into one logical
-        unit. When enqueued, the macro will expand and run its steps in order.
-
         Args:
-            steps: Iterable of `command` objects (e.g. from printer_cmd, camera_cmd, etc.)
+            items: Iterable of Command objects.
             wait_printer: If True, each PRINTER move waits (M400) before the next.
             message: Optional message displayed when the macro begins.
             log: If True, also print messages to stdout.
-
-        Example:
-            # Build a square-move macro
-            steps = [
-                self.printer_cmd("G28", message="Homing...", log=True),
-                self.printer_cmd("G0 X0 Y0", message="Start corner"),
-                self.printer_cmd("G0 X10 Y0", message="Move right"),
-                self.printer_cmd("G0 X10 Y10", message="Move up"),
-                self.printer_cmd("G0 X0 Y10", message="Move left"),
-                self.printer_cmd("G0 X0 Y0", message="Back to start"),
-            ]
-
-            square_macro = self.macro_cmd(
-                steps,
-                wait_printer=True,
-                message="Square pattern macro",
-                log=True,
-            )
-
-            # Enqueue like any other command
-            self.enqueue_cmd(square_macro)
         """
-        return command(
+        return Command(
             kind="MACRO_WAIT" if wait_printer else "MACRO",
             value=items,
             message=message,
             log=log,
         )
 
-    def pause_point(self):
-        """Pause points that can be inserted into automation to pause it"""
-        while self.paused and not self.stop_requested:
-            time.sleep(0.05)
-        return self.stop_requested
+    def pause_point(self) -> bool:
+        """
+        Cooperative pause/stop point for automation loops.
+        Blocks (without spinning) for as long as the controller is paused.
+        Returns True if a stop has been requested, False otherwise.
+        """
+        self._running.wait()
+        return self._stop_requested.is_set()
 
 
     # Message Listener Hooks
-    def add_message_listener(self, listener: Callable[[str, bool, command], None]) -> None:
+
+    def add_message_listener(self, listener: Callable[[str, bool, Command], None]) -> None:
         """Subscribe to command messages. Signature: (text, log, cmd) -> None"""
         if not callable(listener):
             raise TypeError("listener must be callable")
         self._message_listeners.append(listener)
 
-    def remove_message_listener(self, listener: Callable[[str, bool, command], None]) -> None:
+    def remove_message_listener(self, listener: Callable[[str, bool, Command], None]) -> None:
         try:
             self._message_listeners.remove(listener)
         except ValueError:
-            pass  # already removed / never added
+            pass
 
-    def _emit_message(self, text: str, log: bool, cmd: Optional[command] = None) -> None:
-        # Console logging only when requested
+    def _emit_message(self, text: str, log: bool, cmd: Command | None = None) -> None:
         if log and text:
             print(text)
-
-        # Notify listeners (e.g., UI)
         if text:
             for listener in list(self._message_listeners):
                 try:
                     listener(text, log, cmd)
                 except Exception as e:
-                    # Keep the pipeline resilient if a listener explodes
                     print(f"[warn] message listener raised: {e}")
 
 
-    # Convenience methods for movement
-    def move_z_up(self): 
-        self.reset_after_stop()
+    # Convenience methods for movement via the GUI
+
+    def move_z_up(self) -> None:
+        self.resume()
         self.move_axis('z', 1)
 
-    def move_z_down(self): 
-        self.reset_after_stop()
+    def move_z_down(self) -> None:
+        self.resume()
         self.move_axis('z', -1)
 
-    def move_x_left(self): 
-        self.reset_after_stop()
+    def move_x_left(self) -> None:
+        self.resume()
         self.move_axis('x', 1)
 
-    def move_x_right(self): 
-        self.reset_after_stop()
+    def move_x_right(self) -> None:
+        self.resume()
         self.move_axis('x', -1)
 
-    def move_y_backward(self): 
-        self.reset_after_stop()
+    def move_y_backward(self) -> None:
+        self.resume()
         self.move_axis('y', 1)
 
-    def move_y_forward(self): 
-        self.reset_after_stop()
+    def move_y_forward(self) -> None:
+        self.resume()
         self.move_axis('y', -1)
 
 
-    # Methods for speed
-    def adjust_speed(self, amount: int) -> None:
-        """Adjust movement speed"""
-        self.speed = max(self.config.step_size, self.speed + amount)  # Prevent negative speed
-        print("Current Speed", self.speed / 100)
+    # Speed controls
 
-    def increase_speed(self): self.adjust_speed(self.config.step_size)
-    def decrease_speed(self): self.adjust_speed(-self.config.step_size)
-    def increase_speed_fast(self): self.adjust_speed(self.config.step_size * 25)
-    def decrease_speed_fast(self): self.adjust_speed(-self.config.step_size * 25)
+    def adjust_speed(self, amount: int) -> None:
+        """Adjust the jog step size by the given amount (nanometres)."""
+        self.speed = max(self.config.step_size, self.speed + amount)
+        print(f"Current step size: {self.speed / _NM_PER_MM:.6f} mm ({self.speed} nm)")
+
+    def increase_speed(self) -> None:
+        self.adjust_speed(self.config.step_size)
+
+    def decrease_speed(self) -> None:
+        self.adjust_speed(-self.config.step_size)
+
+    def increase_speed_fast(self) -> None:
+        self.adjust_speed(self.config.step_size * 25)
+
+    def decrease_speed_fast(self) -> None:
+        self.adjust_speed(-self.config.step_size * 25)

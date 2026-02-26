@@ -7,10 +7,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QLabel,
-    QFrame,
 )
-from PySide6.QtGui import QPainter, QColor, QFont, QPen, QPainterPath, QTransform, QRegion, QPolygon
-from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtGui import QPainter, QColor, QPen
+from PySide6.QtCore import Qt, QRectF, QTimer
+
+from common.app_context import get_app_context
+from common.logger import warning
+from motion.motion_controller_manager import MotionState
 
 def clamp(v: int, lo: int = 0, hi: int = 255) -> int:
     return max(lo, min(hi, v))
@@ -171,16 +174,30 @@ class DiamondButton(QPushButton):
 class NavigationWidget(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        
-        # Mock position data
-        self._x_pos = 123.45
-        self._y_pos = 678.90
-        self._z_pos = 42.00
-        
-        # Step size in mm
+
+        # Step size in mm — kept as mm to match the existing button labels
         self._step_size = 0.4  # Default to 0.4mm
-        
+
         self._setup_ui()
+
+        # Overlay is created lazily in showEvent once the widget has a parent,
+        # so we can reparent it to the grandparent and cover its layout margins.
+        self._overlay: QWidget | None = None
+        self._overlay_label: QLabel | None = None
+        self._motion_available: bool = False
+
+        # Poll until the controller is ready, then switch to a position-refresh timer
+        self._ready_timer = QTimer(self)
+        self._ready_timer.setInterval(500)
+        self._ready_timer.timeout.connect(self._check_motion_ready)
+        self._ready_timer.start()
+
+        self._position_timer = QTimer(self)
+        self._position_timer.setInterval(200)
+        self._position_timer.timeout.connect(self._update_position_display)
+
+        # Start in the unavailable state
+        self._set_motion_available(False)
 
     def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -191,7 +208,6 @@ class NavigationWidget(QWidget):
         self.setStyleSheet("""
             NavigationWidget {
                 background: white;
-                border-radius: 8px;
             }
         """)
 
@@ -204,6 +220,117 @@ class NavigationWidget(QWidget):
         main_layout.addWidget(jog_controls)
 
         main_layout.addStretch(1)
+
+    def _ensure_overlay(self) -> None:
+        """
+        Create the overlay the first time we are shown with a real parent.
+        Parenting to self.parent() (the CollapsibleSection content widget) means
+        Qt will not clip the overlay to NavigationWidget's own bounds, so we can
+        expand it to cover the layout margins that surround us.
+        """
+        if self._overlay is not None:
+            return
+        overlay_parent = self.parent()
+        if overlay_parent is None:
+            return  # Not yet placed in a hierarchy — try again on next showEvent
+
+        self._overlay = QWidget(overlay_parent)
+        self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+        self._overlay.show()
+
+        self._overlay_label = QLabel("Motion System Not Connected", self._overlay)
+        self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._overlay_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-style: italic;
+                background: transparent;
+            }
+        """)
+
+        # Apply whatever state we already decided on
+        self._set_motion_available(self._motion_available)
+
+    def _reposition_overlay(self) -> None:
+        """
+        Position the overlay in its parent's coordinate space so it covers
+        NavigationWidget plus the layout margins the parent applies around it.
+        """
+        if self._overlay is None:
+            return
+        overlay_parent = self._overlay.parent()
+        if overlay_parent is None:
+            return
+
+        # Where does NavigationWidget sit inside overlay_parent?
+        origin = self.mapTo(overlay_parent, self.rect().topLeft())
+        x, y = origin.x(), origin.y()
+        w, h = self.width(), self.height()
+
+        # Expand outward by the margins the parent layout adds around us
+        parent = self.parent()
+        if parent is not None:
+            layout = parent.layout()
+            if layout is not None:
+                left, top, right, bottom = layout.getContentsMargins()
+                x -= left
+                y -= top
+                w += left + right
+                h += top + bottom
+
+        self._overlay.setGeometry(x, y, w, h)
+        self._overlay_label.setGeometry(0, 0, self._overlay.width(), self._overlay.height())
+        self._overlay.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reposition_overlay()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._ensure_overlay()
+        self._reposition_overlay()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._reposition_overlay()
+
+    def _check_motion_ready(self) -> None:
+        """Poll every 500 ms until the controller is ready or has reached a terminal state."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            return
+        state = ctx.motion.get_state()
+        if state == MotionState.READY:
+            self._ready_timer.stop()
+            self._set_motion_available(True)
+            self._position_timer.start()
+        elif state in (MotionState.FAILED, MotionState.FAULTED):
+            self._ready_timer.stop()  # Terminal failure — stay overlaid
+
+    def _set_motion_available(self, available: bool) -> None:
+        """Show or hide the tinted overlay without touching button enabled state.
+
+        Interaction is blocked by raising an opaque overlay that absorbs all
+        mouse events, so the buttons retain their normal appearance at all times.
+        """
+        self._motion_available = available
+        if self._overlay is None:
+            return
+        if available:
+            # Let mouse events fall through to the buttons beneath
+            self._overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+            self._overlay_label.hide()
+            self._overlay.lower()
+        else:
+            # Overlay sits on top and absorbs all input — buttons stay visually unchanged
+            self._overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 100);")
+            self._overlay_label.show()
+            self._overlay.raise_()
+            self.position_label.setText("X: --  Y: --  Z: -- mm")
 
     def _create_step_size_controls(self) -> QWidget:
         """Create step size selection buttons with position display"""
@@ -228,7 +355,16 @@ class NavigationWidget(QWidget):
             btn = QPushButton(f"{size}mm")
             btn.setFixedHeight(30)
             btn.setCheckable(True)
-            btn.setStyleSheet("padding: 0px;")  # Smaller padding
+            btn.setStyleSheet("""
+                QPushButton {
+                    padding: 0px;
+                }
+                QPushButton:checked {
+                    background-color: rgb(140, 143, 146);
+                    color: white;
+                    border: 1px solid rgb(100, 103, 106);
+                }
+            """)
             btn.clicked.connect(lambda checked, s=size: self._set_step_size(s))
             buttons_layout.addWidget(btn)
             self.step_buttons.append((btn, size))
@@ -255,12 +391,14 @@ class NavigationWidget(QWidget):
     def _set_step_size(self, size: float) -> None:
         """Set the step size and update button states"""
         self._step_size = size
-        
+
         # Update button checked states
         for btn, btn_size in self.step_buttons:
             btn.setChecked(btn_size == size)
-        
-        print(f"Step size set to {size}mm")
+
+        ctx = get_app_context()
+        if ctx.motion is not None:
+            ctx.motion.set_speed(round(size * 1_000_000))
 
     def _create_jog_controls(self) -> QWidget:
         """Create combined jog controls with diamond navigation and Z-axis"""
@@ -493,52 +631,75 @@ class NavigationWidget(QWidget):
         return container
 
     def _update_position_display(self) -> None:
-        """Update the position display label"""
+        """Update the position display label from the live controller position."""
+        ctx = get_app_context()
+        if ctx.motion is None or not ctx.motion.is_ready():
+            return
+        x_mm, y_mm, z_mm = ctx.motion.get_position().to_mm()
         self.position_label.setText(
-            f"X: {self._x_pos:.2f}  Y: {self._y_pos:.2f}  Z: {self._z_pos:.2f} mm"
+            f"X: {x_mm:.2f}  Y: {y_mm:.2f}  Z: {z_mm:.2f} mm"
         )
 
     # Placeholder movement functions
     def _move_up(self) -> None:
         """Move stage up (positive Y)"""
-        print(f"Moving up (Y+) by {self._step_size}mm")
-        self._y_pos += self._step_size
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        ctx.motion.move_axis("y", 1)
         self._update_position_display()
 
     def _move_down(self) -> None:
         """Move stage down (negative Y)"""
-        print(f"Moving down (Y-) by {self._step_size}mm")
-        self._y_pos -= self._step_size
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        ctx.motion.move_axis("y", -1)
         self._update_position_display()
 
     def _move_left(self) -> None:
         """Move stage left (negative X)"""
-        print(f"Moving left (X-) by {self._step_size}mm")
-        self._x_pos -= self._step_size
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        ctx.motion.move_axis("x", -1)
         self._update_position_display()
 
     def _move_right(self) -> None:
         """Move stage right (positive X)"""
-        print(f"Moving right (X+) by {self._step_size}mm")
-        self._x_pos += self._step_size
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        ctx.motion.move_axis("x", 1)
         self._update_position_display()
 
     def _go_home(self) -> None:
         """Return stage to home position"""
-        print("Going to home position")
-        self._x_pos = 0.0
-        self._y_pos = 0.0
-        self._z_pos = 0.0
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        ctx.motion.home()
         self._update_position_display()
 
     def _z_increase(self) -> None:
         """Increase Z height"""
-        print(f"Increasing Z height by {self._step_size}mm")
-        self._z_pos += self._step_size
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        ctx.motion.move_axis("z", 1)
         self._update_position_display()
 
     def _z_decrease(self) -> None:
         """Decrease Z height"""
-        print(f"Decreasing Z height by {self._step_size}mm")
-        self._z_pos -= self._step_size
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        ctx.motion.move_axis("z", -1)
         self._update_position_display()
