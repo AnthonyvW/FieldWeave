@@ -223,6 +223,14 @@ class AmscopeSettings(CameraSettings):
                 runtime_changeable=True,
             ),
             SettingMetadata(
+                name="awb_once",
+                display_name="Auto White Balance",
+                setting_type=SettingType.BUTTON,
+                description="Perform a one-shot automatic white balance",
+                group="White Balance",
+                runtime_changeable=True,
+            ),
+            SettingMetadata(
                 name="hue",
                 display_name="Hue",
                 setting_type=SettingType.RANGE,
@@ -388,6 +396,15 @@ class AmscopeSettings(CameraSettings):
         if self._camera and hasattr(self._camera, '_hcam'):
             self._camera._hcam.put_TempTint(temp, tint)
     
+    def set_awb_once(self) -> None:
+        """Trigger a one-shot automatic white balance (Temp/Tint mode)."""
+        if self._camera and hasattr(self._camera, '_hcam'):
+            try:
+                self._camera._hcam.AwbOnce()
+                debug("Auto white balance triggered")
+            except Exception as e:
+                error(f"Failed to trigger auto white balance: {e}")
+
     def set_hue(self, value: int) -> None:
         self._validate_range("hue", value)
         self.hue = value
