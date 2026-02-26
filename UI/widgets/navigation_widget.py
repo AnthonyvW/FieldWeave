@@ -172,11 +172,22 @@ class DiamondButton(QPushButton):
 
 
 class NavigationWidget(QWidget):
+    # Shared step size across all instances
+    _shared_step_size: float = 0.4
+    _instances: list[NavigationWidget] = []
+
+    @property
+    def _step_size(self) -> float:
+        return NavigationWidget._shared_step_size
+
+    @_step_size.setter
+    def _step_size(self, value: float) -> None:
+        NavigationWidget._shared_step_size = value
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-
-        # Step size in mm — kept as mm to match the existing button labels
-        self._step_size = 0.4  # Default to 0.4mm
+        NavigationWidget._instances.append(self)
+        self.destroyed.connect(lambda: NavigationWidget._instances.remove(self))
 
         self._setup_ui()
 
@@ -369,8 +380,8 @@ class NavigationWidget(QWidget):
             buttons_layout.addWidget(btn)
             self.step_buttons.append((btn, size))
         
-        # Set default button as checked (0.4mm)
-        self.step_buttons[1][0].setChecked(True)
+        # Reflect the current shared step size
+        self._sync_step_size_buttons()
         
         group_layout.addWidget(buttons_row)
         
@@ -389,16 +400,21 @@ class NavigationWidget(QWidget):
         return group
 
     def _set_step_size(self, size: float) -> None:
-        """Set the step size and update button states"""
-        self._step_size = size
+        """Set the step size on all instances and update button states"""
+        NavigationWidget._shared_step_size = size
 
-        # Update button checked states
-        for btn, btn_size in self.step_buttons:
-            btn.setChecked(btn_size == size)
+        for instance in NavigationWidget._instances:
+            instance._sync_step_size_buttons()
 
         ctx = get_app_context()
         if ctx.motion is not None:
             ctx.motion.set_speed(round(size * 1_000_000))
+
+    def _sync_step_size_buttons(self) -> None:
+        """Update button checked states to reflect the current shared step size."""
+        size = NavigationWidget._shared_step_size
+        for btn, btn_size in self.step_buttons:
+            btn.setChecked(btn_size == size)
 
     def _create_jog_controls(self) -> QWidget:
         """Create combined jog controls with diamond navigation and Z-axis"""
