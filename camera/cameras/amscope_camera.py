@@ -386,7 +386,6 @@ class AmscopeCamera(BaseCamera):
             return False
         
         amcam = self._get_sdk()
-        
         try:
             # Allocate buffer for still image
             width, height = self._hcam.get_StillResolution(resolution_index)

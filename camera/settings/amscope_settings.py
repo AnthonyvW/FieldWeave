@@ -380,13 +380,19 @@ class AmscopeSettings(CameraSettings):
         self._validate_range("temp", value)
         self.temp = value
         if self._camera and hasattr(self._camera, '_hcam'):
+            debug(f"put_TempTint(temp={value}, tint={self.tint})")
             self._camera._hcam.put_TempTint(value, self.tint)
+            temp, tint = self._camera._hcam.get_TempTint()
+            debug(f"Hardware temp/tint after put: temp={temp}, tint={tint}")
     
     def set_tint(self, value: int) -> None:
         self._validate_range("tint", value)
         self.tint = value
         if self._camera and hasattr(self._camera, '_hcam'):
+            debug(f"put_TempTint(temp={self.temp}, tint={value})")
             self._camera._hcam.put_TempTint(self.temp, value)
+            temp, tint = self._camera._hcam.get_TempTint()
+            debug(f"Hardware temp/tint after put: temp={temp}, tint={tint}")
     
     def set_temp_tint(self, temp: int, tint: int) -> None:
         self._validate_range("temp", temp)
@@ -829,6 +835,10 @@ class AmscopeSettings(CameraSettings):
         info(f"Applying settings to camera {camera.model}")
         
         try:
+            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_COLORMATIX, 1)
+            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_WBGAIN, 1)
+            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_LINEAR, 0)
+            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_CURVE, 2)
             if self.preview_resolution:
                 self.set_preview_resolution(self.preview_resolution)
             if self.still_resolution:
@@ -878,7 +888,11 @@ class AmscopeSettings(CameraSettings):
             
             self.set_dfc_quantity(self.dfc_quantity)
             self.set_dfc_enable(self.dfc_enable)
-            
+
+            debug(f"COLORMATIX={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_COLORMATIX)}")
+            debug(f"WBGAIN={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_WBGAIN)}")
+            debug(f"CURVE={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_CURVE)}")
+            debug(f"LINEAR={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_LINEAR)}")
             debug("Successfully applied all settings to camera")
         except Exception as e:
             exception(f"Failed to apply settings to camera: {e}")

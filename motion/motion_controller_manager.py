@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import threading
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 from .motion_controller import MotionController, MotionState
 from .models import Position
+
+if TYPE_CHECKING:
+    from motion.routines.automation_routine import AutomationRoutine
 
 
 class MotionControllerManager:
@@ -17,18 +20,30 @@ class MotionControllerManager:
     without needing to hold a direct reference to the controller, and makes
     it straightforward to swap or restart the controller if needed.
 
+    It also owns the currently active :class:`AutomationRoutine`, ensuring
+    only one routine runs at a time and exposing pause / resume / stop
+    controls.
+
     Typical usage
     -------------
     manager = MotionControllerManager()
     manager.wait_until_ready()           # blocks until homed
     manager.move_axis("x", 1)
     manager.set_speed(80_000)            # 0.08 mm steps
+
+    routine = ZStackScan(manager, ...)
+    manager.start_routine(routine)
+    manager.pause_routine()
+    manager.resume_routine()
+    manager.stop_routine()
+
     manager.shutdown()
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._controller: MotionController | None = None
+        self._active_routine: AutomationRoutine | None = None
         self._start()
 
     # ------------------------------------------------------------------
@@ -56,7 +71,8 @@ class MotionControllerManager:
         return ctrl is not None and ctrl.is_ready()
 
     def shutdown(self) -> None:
-        """Cleanly shut down the controller and release the serial port."""
+        """Cleanly shut down any running routine, the controller, and release the serial port."""
+        self.stop_routine()
         with self._lock:
             if self._controller is not None:
                 self._controller.shutdown()
@@ -66,6 +82,59 @@ class MotionControllerManager:
         """Shut down any existing controller and start a fresh one."""
         self.shutdown()
         self._start()
+
+    # ------------------------------------------------------------------
+    # Automation routine management
+    # ------------------------------------------------------------------
+
+    @property
+    def active_routine(self) -> AutomationRoutine | None:
+        """The currently active routine, or None."""
+        return self._active_routine
+
+    @property
+    def routine_running(self) -> bool:
+        """True if a routine is currently executing (including while paused)."""
+        return self._active_routine is not None and self._active_routine.is_running
+
+    @property
+    def routine_paused(self) -> bool:
+        """True if the active routine is currently paused."""
+        return self._active_routine is not None and self._active_routine.is_paused
+
+    def start_routine(self, routine: AutomationRoutine) -> None:
+        """
+        Start *routine*, replacing any previously finished routine.
+
+        Raises :class:`RuntimeError` if a routine is already running.
+        """
+        if self.routine_running:
+            raise RuntimeError(
+                "A routine is already running. Call stop_routine() first."
+            )
+        self._active_routine = routine
+        routine.start()
+
+    def pause_routine(self) -> None:
+        """Pause the active routine (no-op if none is running)."""
+        if self._active_routine is not None:
+            self._active_routine.pause()
+
+    def resume_routine(self) -> None:
+        """Resume a paused routine (no-op if none is running)."""
+        if self._active_routine is not None:
+            self._active_routine.resume()
+
+    def stop_routine(self) -> None:
+        """
+        Stop the active routine and wait for its thread to exit.
+
+        Blocks for up to 10 seconds for a clean shutdown.
+        """
+        if self._active_routine is not None:
+            self._active_routine.stop()
+            self._active_routine.wait(timeout=10)
+            self._active_routine = None
 
     # ------------------------------------------------------------------
     # Delegation helpers
