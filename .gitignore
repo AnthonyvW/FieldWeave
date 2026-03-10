@@ -3,6 +3,10 @@ output/
 
 misc/test_img/
 misc/input/
+misc/stats/samples/
+misc/stats/output/
+
+*.pth
 
 config/cameras/amscope/backups/
 config/cameras/amscope/settings.yaml
