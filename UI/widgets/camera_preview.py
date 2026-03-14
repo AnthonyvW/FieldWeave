@@ -4,8 +4,8 @@ import numpy as np
 from PySide6.QtCore import Qt, Slot, QRect
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
-    QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy, 
-    QPushButton, QHBoxLayout
+    QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy,
+    QPushButton, QHBoxLayout, QCheckBox
 )
 
 from common.app_context import get_app_context
@@ -112,6 +112,12 @@ class CameraPreview(QFrame):
         self._current_width = 0
         self._current_height = 0
         
+        # Channel filter state
+        self._show_red = True
+        self._show_green = True
+        self._show_blue = True
+        self._show_grayscale = False
+        
         # UI elements - use custom overlay label
         self._video_label = OverlayLabel()
         self._video_label.setObjectName("VideoLabel")
@@ -176,6 +182,77 @@ class CameraPreview(QFrame):
         
         self._focus_button.raise_()  # Ensure it's on top
         
+        # Create channel filter button (venn diagram: 3 overlapping circles)
+        self._channel_button = QPushButton(self)
+        self._channel_button.setObjectName("ChannelButton")
+        self._channel_button.setCheckable(True)
+        self._channel_button.setFixedSize(30, 30)
+        self._channel_button.setToolTip("Channel Filters")
+        self._channel_button.clicked.connect(self._toggle_channel_menu)
+        self._channel_button.move(10, 115)  # Position below focus button (80 + 30 + 5)
+        self._channel_button.setProperty("ChannelFiltered", False)
+        
+        # Three overlapping circles for venn diagram icon
+        venn_top_left = QLabel("○", self._channel_button)
+        venn_top_left.setObjectName("VennOverlayLabel")
+        venn_top_left.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        venn_top_left.setGeometry(-5, -4, 30, 30)
+        venn_top_left.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        venn_top_right = QLabel("○", self._channel_button)
+        venn_top_right.setObjectName("VennOverlayLabel")
+        venn_top_right.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        venn_top_right.setGeometry(5, -4, 30, 30)
+        venn_top_right.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        venn_bottom = QLabel("○", self._channel_button)
+        venn_bottom.setObjectName("VennOverlayLabel")
+        venn_bottom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        venn_bottom.setGeometry(0, 4, 30, 30)
+        venn_bottom.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        self._channel_button.raise_()
+        
+        # Channel filter flyout menu (hidden by default)
+        self._channel_menu = QFrame(self)
+        self._channel_menu.setObjectName("ChannelMenu")
+        self._channel_menu.setFixedWidth(110)
+        self._channel_menu.setAutoFillBackground(True)
+        self._channel_menu.setFrameShape(QFrame.Shape.StyledPanel)
+        self._channel_menu.setFrameShadow(QFrame.Shadow.Raised)
+        self._channel_menu.hide()
+        
+        channel_layout = QVBoxLayout(self._channel_menu)
+        channel_layout.setContentsMargins(6, 6, 6, 6)
+        channel_layout.setSpacing(4)
+        
+        self._cb_red = QCheckBox("Red", self._channel_menu)
+        self._cb_red.setObjectName("ChannelCheckRed")
+        self._cb_red.setChecked(True)
+        self._cb_red.toggled.connect(self._on_channel_changed)
+        
+        self._cb_green = QCheckBox("Green", self._channel_menu)
+        self._cb_green.setObjectName("ChannelCheckGreen")
+        self._cb_green.setChecked(True)
+        self._cb_green.toggled.connect(self._on_channel_changed)
+        
+        self._cb_blue = QCheckBox("Blue", self._channel_menu)
+        self._cb_blue.setObjectName("ChannelCheckBlue")
+        self._cb_blue.setChecked(True)
+        self._cb_blue.toggled.connect(self._on_channel_changed)
+        
+        self._cb_gray = QCheckBox("Grayscale", self._channel_menu)
+        self._cb_gray.setObjectName("ChannelCheckGray")
+        self._cb_gray.setChecked(False)
+        self._cb_gray.toggled.connect(self._on_channel_changed)
+        
+        channel_layout.addWidget(self._cb_red)
+        channel_layout.addWidget(self._cb_green)
+        channel_layout.addWidget(self._cb_blue)
+        channel_layout.addWidget(self._cb_gray)
+        self._channel_menu.adjustSize()
+        self._channel_menu.raise_()
+        
         # Connect to camera manager signals
         self._connect_to_camera_manager()
     
@@ -224,6 +301,53 @@ class CameraPreview(QFrame):
         """Toggle focus overlay"""
         info(f"Focus Overlay Toggled {'on' if checked else 'off'}")
     
+    @Slot(bool)
+    def _toggle_channel_menu(self, checked: bool):
+        """Show or hide the channel filter flyout menu"""
+        if checked:
+            # Position the menu to the right of the channel button
+            btn_pos = self._channel_button.pos()
+            self._channel_menu.move(btn_pos.x() + 35, btn_pos.y())
+            self._channel_menu.show()
+            self._channel_menu.raise_()
+        else:
+            self._channel_menu.hide()
+            # Restore highlight state based purely on filter activity
+            self._update_channel_button_highlight()
+    
+    @Slot()
+    def _on_channel_changed(self):
+        """Handle channel filter checkbox changes"""
+        self._show_red = self._cb_red.isChecked()
+        self._show_green = self._cb_green.isChecked()
+        self._show_blue = self._cb_blue.isChecked()
+        self._show_grayscale = self._cb_gray.isChecked()
+        info(
+            f"Preview: Channels R={self._show_red} G={self._show_green} "
+            f"B={self._show_blue} Gray={self._show_grayscale}"
+        )
+        # Only update the highlight when the menu is closed; while open the
+        # button's checked state already provides visual feedback.
+        if not self._channel_menu.isVisible():
+            self._update_channel_button_highlight()
+    
+    def _filters_are_default(self) -> bool:
+        """Return True when all channel filters are at their default values."""
+        return (
+            self._show_red
+            and self._show_green
+            and self._show_blue
+            and not self._show_grayscale
+        )
+    
+    def _update_channel_button_highlight(self) -> None:
+        """Set the ChannelFiltered property so stylesheets can highlight the button."""
+        active = not self._filters_are_default()
+        self._channel_button.setProperty("ChannelFiltered", active)
+        # Force the style to re-evaluate the dynamic property
+        self._channel_button.style().unpolish(self._channel_button)
+        self._channel_button.style().polish(self._channel_button)
+    
     @Slot(int, int)
     def _on_frame_ready(self, width: int, height: int):
         """Handle new frame available from camera manager"""
@@ -262,6 +386,16 @@ class CameraPreview(QFrame):
             # Make a deep copy for display
             image = image.copy()
             
+            # Apply channel filters if any are disabled or grayscale is on
+            needs_filter = (
+                self._show_grayscale
+                or not self._show_red
+                or not self._show_green
+                or not self._show_blue
+            )
+            if needs_filter:
+                image = self._apply_channel_filter(image)
+            
             # Scale to fit label while maintaining aspect ratio
             if self._video_label.width() > 0 and self._video_label.height() > 0:
                 scaled_image = image.scaled(
@@ -274,6 +408,57 @@ class CameraPreview(QFrame):
                 
         except Exception as e:
             error(f"Preview: Error displaying frame: {e}")
+    
+    def _apply_channel_filter(self, image: QImage) -> QImage:
+        """Return a new QImage with channel filters applied.
+        
+        Channel masking is applied first, then grayscale conversion operates
+        only on the surviving channels so it acts as a modifier rather than
+        overriding the channel selection.
+        """
+        width = image.width()
+        height = image.height()
+        
+        # Convert QImage to numpy array (RGB888 = 3 bytes per pixel)
+        ptr = image.bits()
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 3)).copy()
+        
+        # Step 1: zero out disabled channels
+        if not self._show_red:
+            arr[:, :, 0] = 0
+        if not self._show_green:
+            arr[:, :, 1] = 0
+        if not self._show_blue:
+            arr[:, :, 2] = 0
+        
+        # Step 2: if grayscale, compute luminance from the surviving channels
+        # and write it to all three output channels unconditionally so the
+        # result is always a neutral grey image.  The channel mask above only
+        # controls which channels contribute to the luminance calculation.
+        if self._show_grayscale:
+            r_w = 0.299 if self._show_red else 0.0
+            g_w = 0.587 if self._show_green else 0.0
+            b_w = 0.114 if self._show_blue else 0.0
+            total = r_w + g_w + b_w
+            if total > 0:
+                r_w, g_w, b_w = r_w / total, g_w / total, b_w / total
+            gray = (
+                r_w * arr[:, :, 0].astype(np.float32)
+                + g_w * arr[:, :, 1].astype(np.float32)
+                + b_w * arr[:, :, 2].astype(np.float32)
+            ).astype(np.uint8)
+            arr[:, :, 0] = gray
+            arr[:, :, 1] = gray
+            arr[:, :, 2] = gray
+        
+        filtered = QImage(
+            arr.tobytes(),
+            width,
+            height,
+            width * 3,
+            QImage.Format.Format_RGB888,
+        )
+        return filtered.copy()
     
     @Slot(int, int)
     def _on_streaming_started(self, width: int, height: int):

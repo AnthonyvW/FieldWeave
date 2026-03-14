@@ -23,7 +23,7 @@ with serial.Serial(port, baudrate, timeout=timeout) as ser:
                     break
 
     # Set steps/mm for Z axis to 800
-    send("M92 Z3109")
+    #send("M92 Z3109")
 
     # Save settings to EEPROM
     #send("M500")
@@ -33,6 +33,6 @@ with serial.Serial(port, baudrate, timeout=timeout) as ser:
     #send("M203 Z2")
     #send("M201 Z20")
     #send("M201 X1000 Y1000")
-    send("M500")
+    #send("M500")
 
 print("Z steps/mm set to 800 and saved to EEPROM.")
