@@ -1,11 +1,11 @@
-# Forge - Low Cost Gigapixel Scanner
+# FieldWeave - Low Cost Gigapixel Imaging Machine
 
 [![Windows](https://custom-icon-badges.demolab.com/badge/Windows-0078D6?logo=windows11&logoColor=white)](#)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](#)
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
 
 
-Forge is an opensource, gigapixel imaging system designed to scan tree core samples with high precision. Built upon a modified off the shelf 3D printer, it automates the imaging of multiple samples, producing high resolution images suitable for dendrochronology and related research. 
+FieldWeave is an opensource, gigapixel imaging system designed to scan tree core samples with high precision. Built upon a modified off the shelf 3D printer, it automates the imaging of multiple samples, producing high resolution images suitable for dendrochronology and related research. 
 
 
 
@@ -24,7 +24,7 @@ Forge is an opensource, gigapixel imaging system designed to scan tree core samp
   <tr>
     <td width="37%">
       <a href="media/DeveloperForge.jpg">
-        <img src="media/DeveloperForge.jpg" width="100%" alt="A picture of Forge using a heavily moddeed Ender 3 3D printer.">
+        <img src="media/DeveloperForge.jpg" width="100%" alt="A picture of FieldWeave using a heavily moddeed Ender 3 3D printer.">
       </a>
     </td>
     <td width="50%">
@@ -34,31 +34,31 @@ Forge is an opensource, gigapixel imaging system designed to scan tree core samp
     </td>
   </tr>
 	<tr>
-    <th>Forge on a heavily modded Ender 3 3D printer.</th>
-    <th>Forge's GUI</th>
+    <th>FieldWeave on a heavily modded Ender 3 3D printer.</th>
+    <th>FieldWeave's GUI</th>
 	</tr>
   <tr>
     <td width="37%">
       <a href="media/WoodExample.jpg">
-        <img src="media/WoodExample.jpg" width="100%" alt="An example of a single image taken using Forge">
+        <img src="media/WoodExample.jpg" width="100%" alt="An example of a single image taken using FieldWeave">
       </a>
     </td>
     <td width="50%">
       <a href="media/M2HeatsetInsert.jpeg">
-        <img src="media/M2HeatsetInsert.jpeg" width="100%" alt="A M2 Heatset insert tip imaged using Forge and then stitched using an external program.">
+        <img src="media/M2HeatsetInsert.jpeg" width="100%" alt="A M2 Heatset insert tip imaged using FieldWeave and then stitched using an external program.">
       </a>
     </td>
   </tr>
 	<tr>
     <th>The end of a tree core sample taken using a MU1000 HS camera</th>
-    <th>A M2 Heatset Insert Tip taken using a MU500 Camera. Typical Forge outputs for tree core samples are significantly larger. Click to view full resolution</th>
+    <th>A M2 Heatset Insert Tip taken using a MU500 Camera. Typical FieldWeave outputs for tree core samples are significantly larger. Click to view full resolution</th>
 	</tr>
 </table>
 
-## Forge for Reflected Light Microscopy
+## FieldWeave for Reflected Light Microscopy
 > **Reflected Light Microscopy (alternate lens configuration)**  
-   These images were captured using Forge with a different lens and illumination setup. The same capture pipeline was used, with image stacking and stitching currently performed using external tools.  
-   Forge does not officially support high magnification imaging yet, but it is being worked on. See github issue [#45](https://github.com/AnthonyvW/FORGE/issues/45)
+   These images were captured using FieldWeave with a different lens and illumination setup. The same capture pipeline was used, with image stacking and stitching currently performed using external tools.  
+   FieldWeave does not officially support high magnification imaging yet, but it is being worked on. See github issue [#45](https://github.com/AnthonyvW/FORGE/issues/45)
 <table>
   <tr>
     <td width="50%">
@@ -87,7 +87,7 @@ Forge is an opensource, gigapixel imaging system designed to scan tree core samp
   <tr>
     <td width="50%">
       <a href="media/TreeCoreMagnified.jpg">
-        <img src="media/TreeCoreMagnified.jpg" width="100%" alt="Picture of the full width of a tree core sample taken using Forge and a 10x microscope objective.">
+        <img src="media/TreeCoreMagnified.jpg" width="100%" alt="Picture of the full width of a tree core sample taken using FieldWeave and a 10x microscope objective.">
       </a>
     </td>
   </tr>
@@ -109,7 +109,7 @@ Forge is an opensource, gigapixel imaging system designed to scan tree core samp
 
 ## Printer Modification
 
-Before using Forge, your 3D printer must be modified to mount the camera system in place of the print head.
+Before using FieldWeave, your 3D printer must be modified to mount the camera system in place of the print head.
 
 ### Required Printed Parts
 
@@ -151,7 +151,7 @@ Before modifying your printer, you must 3D print the following components:
    - Screw on the imaging lens securely.  
    
 7. **Install Light**  
-   Install the light you will be using with Forge. 
+   Install the light you will be using with FieldWeave. 
    > If using the Amscope ring light, place the light pads onto the metal tips of the screws that hold the light in place before putting the light on the lens.
 
 8. **Plug Everything in**  
@@ -187,7 +187,7 @@ Prerequisites\. Ensure you have the latest version of python installed, and you 
 
 3\.2\. Move the downloaded zipped folder into 3rd_party_imports
 
-4\. Configure the camera settings using `amscope_camera_configuration.yaml`. For now, you can copy settings from TRIM until I get around to properly implementing this functionality into Forge.
+4\. Configure the camera settings using `amscope_camera_configuration.yaml`. For now, you can copy settings from TRIM until I get around to properly implementing this functionality into FieldWeave.
 
 5\. Run the main application:
   
@@ -197,7 +197,7 @@ Prerequisites\. Ensure you have the latest version of python installed, and you 
 
 ---
 ## Confirmed Compatible Cameras
-Forge supports USB cameras through a modular driver architecture.
+FieldWeave supports USB cameras through a modular driver architecture.
 
 | Camera Model            | Notes                       |
 |-------------------------|-----------------------------|
@@ -211,7 +211,7 @@ Forge supports USB cameras through a modular driver architecture.
 
 ### Adding Support for New Cameras
 
-Users are encouraged to contribute new camera interfaces by implementing the Forge camera interface and submitting them as pull requests.
+Users are encouraged to contribute new camera interfaces by implementing the FieldWeave camera interface and submitting them as pull requests.
 
 If your camera is not currently supported or you would like to contribute an interfaces, please open an issue or submit a pull request.
 
@@ -222,9 +222,9 @@ Alternatively, contributions of driver implementations with thorough documentati
 
 ## 3D Printer Compatibility
 
-Forge is designed to run on 3D printers using **Marlin firmware**, which supports standard G-code over USB serial. Compatibility with other firmware types varies and may require additional configuration or is not currently supported.
+FieldWeave is designed to run on 3D printers using **Marlin firmware**, which supports standard G-code over USB serial. Compatibility with other firmware types varies and may require additional configuration or is not currently supported.
 
-> Not sure if your 3D printer will work? Plug your printer into your computer via USB, and then start Forge. If the printer homes then it is compatible with Forge.
+> Not sure if your 3D printer will work? Plug your printer into your computer via USB, and then start FieldWeave. If the printer homes then it is compatible with FieldWeave.
 
 ## Confirmed Compatible Printers
 
@@ -240,10 +240,10 @@ Forge is designed to run on 3D printers using **Marlin firmware**, which support
 | Printer / Firmware                | Status        | Reason                                                                 |
 |----------------------------------|---------------|------------------------------------------------------------------------|
 | **Klipper-based printers**       | ❓ Unverified  | Serial responses (e.g., `ok`, `M400`) may differ. Needs testing.       |
-| **RepRapFirmware (e.g., Duet)**  | ❌ Incompatible | Different G-code syntax; not supported by Forge                        |
+| **RepRapFirmware (e.g., Duet)**  | ❌ Incompatible | Different G-code syntax; not supported by FieldWeave                        |
 | **Sailfish Firmware (e.g., FlashForge)** | ❌ Incompatible | Proprietary, non-standard G-code                                       |
 | **Proprietary OEM firmware**     | ❌ Incompatible | Often locked or limited (e.g., XYZprinting); lacks serial G-code input |
-| **Non-G-code motion platforms**  | ❌ Incompatible | Forge requires G-code over USB for motion control                      |
+| **Non-G-code motion platforms**  | ❌ Incompatible | FieldWeave requires G-code over USB for motion control                      |
 
 > Want to help verify compatibility with other printers, firmware, or cameras?  
 > [Open an issue](https://github.com/AnthonyvW/FORGE/issues) with your setup details and test results!
