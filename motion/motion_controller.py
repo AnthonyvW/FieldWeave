@@ -355,15 +355,19 @@ class MotionController:
             message=f"Moving to {position}",
         )
 
-    def move_axis(self, axis: str, direction: int) -> bool:
+    def move(self, axis: str, amount_nm: int, *, is_relative: bool = True) -> bool:
         """
-        Jog *axis* by one speed-step in *direction* (+1 or -1).
+        Move *axis* by *amount_nm* nanometres.
+
+        When *is_relative* is True (the default) *amount_nm* is treated as a
+        delta from the current position.  When False it is treated as an
+        absolute target position in nanometres.
 
         Returns False (and does not enqueue) if the resulting position would
         exceed the configured axis limits.
         """
         current_nm: int = getattr(self.position, axis)
-        new_nm = current_nm + self.speed * direction
+        new_nm = current_nm + amount_nm if is_relative else amount_nm
 
         max_nm = getattr(self.config, f"max_{axis}") * _NM_PER_MM
         if not 0 <= new_nm <= max_nm:
@@ -372,6 +376,15 @@ class MotionController:
         mm = new_nm / _NM_PER_MM
         self._enqueue(f"G1 {axis.upper()}{mm:.6f}")
         return True
+
+    def move_axis(self, axis: str, direction: int) -> bool:
+        """
+        Jog *axis* by one speed-step in *direction* (+1 or -1).
+
+        Returns False (and does not enqueue) if the resulting position would
+        exceed the configured axis limits.
+        """
+        return self.move(axis, self.speed * direction)
 
     def home(self) -> None:
         """Enqueue a homing sequence (G90 + G28)."""

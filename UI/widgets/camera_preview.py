@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt, Slot, QRect
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
+from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent
 from PySide6.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy,
 )
@@ -266,6 +266,24 @@ class CameraPreview(QFrame):
             ctx = get_app_context()
             if not ctx.camera_manager.is_streaming:
                 self._video_label.setText("Camera ready - not streaming")
+
+    _SCROLL_STEP_NM: int = 40_000  # 0.04 mm in nanometres
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("CameraPreview: scroll Z ignored — motion controller not ready")
+            event.accept()
+            return
+
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.accept()
+            return
+
+        direction = 1 if delta > 0 else -1
+        ctx.motion.move("z", self._SCROLL_STEP_NM * direction)
+        event.accept()
 
     def cleanup(self) -> None:
         info("Preview: cleanup starting...")

@@ -158,6 +158,18 @@ class MotionControllerManager:
         """
         return self._get_controller().move_axis(axis, direction)
 
+    def move(self, axis: str, amount_nm: int, *, is_relative: bool = True) -> bool:
+        """
+        Move *axis* by *amount_nm* nanometres.
+
+        When *is_relative* is True (the default) *amount_nm* is a delta from
+        the current position.  When False it is an absolute target in
+        nanometres.
+
+        Returns False if the move would exceed axis limits.
+        """
+        return self._get_controller().move(axis, amount_nm, is_relative=is_relative)
+
     def move_to_position(self, position: Position) -> None:
         """Enqueue an absolute move to *position* (coordinates in nanometres)."""
         self._get_controller().move_to_position(position)
