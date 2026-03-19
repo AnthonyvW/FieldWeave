@@ -58,6 +58,11 @@ class AmscopeCamera(BaseCamera):
 
         self._frame_buffer = None
         self._dfc_completion_callback = None  # Callback for DFC completion
+
+        # Histogram state
+        self._histogram_enabled: bool = False
+        self._preview_histogram: np.ndarray | None = None  # Most recent preview histogram
+        self._still_histogram: np.ndarray | None = None    # Most recent still histogram
     
     def _get_settings_class(self):
         """
@@ -217,6 +222,9 @@ class AmscopeCamera(BaseCamera):
         self._callback = None
         self._callback_context = None
         self._frame_buffer = None
+        self._histogram_enabled = False
+        self._preview_histogram = None
+        self._still_histogram = None
     
     def _reallocate_frame_buffer(self):
         """Reallocate frame buffer based on current resolution."""
@@ -319,6 +327,158 @@ class AmscopeCamera(BaseCamera):
         """Get available still image resolutions"""
         return self.settings.get_still_resolutions()
 
+
+    # -------------------------
+    # Histogram
+    # -------------------------
+
+    def supports_histogram(self) -> bool:
+        """Amscope cameras support histogram retrieval via the SDK."""
+        return True
+
+    def set_histogram_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable automatic histogram capture on each frame.
+
+        When enabled, a histogram is requested from the SDK after every preview
+        frame (EVENT_IMAGE) and after every still frame (EVENT_STILLIMAGE).
+        Each result is stored internally and can be retrieved instantly via
+        ``get_preview_histogram()`` / ``get_still_histogram()`` without any
+        round-trip to the camera.
+
+        Uses AMCAM_OPTION_HISTOGRAM to put the SDK in continuous mode (1) or
+        one-shot mode (0).  In continuous mode the SDK keeps delivering
+        histograms; we re-arm the callback after each delivery so the cadence
+        stays in step with the frame rate.
+
+        Args:
+            enabled: True to start accumulating histograms, False to stop.
+
+        Returns:
+            True if the SDK option was set successfully, False otherwise.
+        """
+        if not self._hcam:
+            error("Cannot set histogram mode: camera not open")
+            return False
+
+        amcam = self._get_sdk()
+        try:
+            self._hcam.put_Option(amcam.AMCAM_OPTION_HISTOGRAM, 1 if enabled else 0)
+            self._histogram_enabled = enabled
+            if not enabled:
+                self._preview_histogram = None
+                self._still_histogram = None
+            debug(f"Histogram {'enabled' if enabled else 'disabled'}")
+            return True
+        except amcam.HRESULTException as e:
+            error(f"Failed to set histogram mode: {e}")
+            return False
+
+    @property
+    def histogram_enabled(self) -> bool:
+        """True if automatic per-frame histogram capture is active."""
+        return self._histogram_enabled
+
+    def get_preview_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured preview histogram, or None if
+        histogram capture is disabled or no frame has arrived yet.
+
+        The array contains float64 values in the range [0, 1] (normalised bin
+        counts).  Layout depends on bit-depth and colour mode:
+
+        * 8-bit  RGB  → shape (3, 256)   — rows are R, G, B
+        * 8-bit  mono → shape (1, 256)
+        * 16-bit RGB  → shape (3, 65536)
+        * 16-bit mono → shape (1, 65536)
+
+        The returned array is a copy and is safe to read from any thread.
+        """
+        return self._preview_histogram.copy() if self._preview_histogram is not None else None
+
+    def get_still_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured still histogram, or None if no still
+        has been taken with histogram capture enabled.
+
+        Same shape / dtype convention as ``get_preview_histogram()``.
+
+        The returned array is a copy and is safe to read from any thread.
+        """
+        return self._still_histogram.copy() if self._still_histogram is not None else None
+
+    def _request_histogram(self, is_still: bool) -> None:
+        """
+        Submit a single histogram request to the SDK.
+
+        We call Amcam_GetHistogramV2 directly rather than through the SDK's
+        GetHistogram wrapper because the wrapper drops nFlag before forwarding
+        to our callback, making it impossible to know the array size.  By going
+        directly we receive (aHist: c_void_p, nFlag: c_uint) and can reconstruct
+        the typed pointer ourselves.
+
+        A closure is used so that ``self`` and ``is_still`` are both available
+        inside the raw ctypes callback without relying on the ctx py_object
+        (which the SDK passes through but we don't need for routing).
+
+        Args:
+            is_still: True to tag this request as belonging to a still capture,
+                      False for a preview frame.
+        """
+        if not self._hcam:
+            return
+        amcam = self._get_sdk()
+
+        # Capture self and is_still in a closure so the raw callback can route
+        # back to the instance method.
+        instance = self
+
+        def _cb(aHist: int, nFlag: int, ctx: object) -> None:
+            instance._on_histogram(aHist, nFlag, is_still)
+
+        try:
+            # Keep a strong reference on self so the callback is not GC'd
+            # before the SDK fires it.
+            self._histogram_callback = amcam.Amcam._Amcam__HISTOGRAM_CALLBACK(_cb)
+            amcam.Amcam._Amcam__lib.Amcam_GetHistogramV2(
+                self._hcam._Amcam__h,
+                self._histogram_callback,
+                ctypes.py_object(None),
+            )
+        except Exception as e:
+            error(f"Failed to request histogram: {e}")
+
+    def _on_histogram(self, aHist: int, nFlag: int, is_still: bool) -> None:
+        """
+        Process a raw histogram delivered by Amcam_GetHistogramV2.
+
+        Args:
+            aHist:    Raw pointer address (int) to the histogram float array.
+            nFlag:    SDK flag encoding bit-depth and channel count.
+            is_still: True if triggered by a still capture, False for preview.
+        """
+        try:
+            bins     = 1 << (nFlag & 0x0F)          # e.g. 256 or 65536
+            channels = 1 if (nFlag & 0x8000) else 3
+
+            # Cast the void pointer to a typed float array of the correct length
+            total_bins = bins * channels
+            arr_type = ctypes.c_float * total_bins
+            arr = arr_type.from_address(aHist)
+            raw = np.ctypeslib.as_array(arr).astype(np.float64).reshape(channels, bins)
+
+            # Normalise each channel independently
+            totals = raw.sum(axis=1, keepdims=True)
+            histogram = np.where(totals > 0, raw / totals, raw)
+
+            if is_still:
+                self._still_histogram = histogram
+            else:
+                self._preview_histogram = histogram
+
+            debug(f"{'Still' if is_still else 'Preview'} histogram updated, shape={histogram.shape}")
+        except Exception:
+            exception("Failed to process histogram callback")
 
     def pull_still_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24) -> tuple[bool, int, int]:
         """
@@ -550,6 +710,13 @@ class AmscopeCamera(BaseCamera):
                 debug("Frame captured and pulled to buffer")
             except:
                 pass
+            # Request a fresh preview histogram for this frame
+            if self._histogram_enabled:
+                self._request_histogram(is_still=False)
+        elif event == self.EVENT_STILLIMAGE:
+            # Request a still histogram to pair with the just-captured still frame
+            if self._histogram_enabled:
+                self._request_histogram(is_still=True)
         elif event == amcam.AMCAM_EVENT_DFC:
             # DFC event received - call completion callback if registered
             debug("DFC event received")

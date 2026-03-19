@@ -457,6 +457,93 @@ class BaseCamera(ABC):
     def calculate_stride(width: int, bits_per_pixel: int) -> int:
         pass
 
+    # -------------------------
+    # Histogram Support
+    # -------------------------
+
+    def supports_histogram(self) -> bool:
+        """
+        Check if this camera supports histogram retrieval.
+
+        Subclasses that support histograms should override this to return True.
+
+        Returns:
+            True if the camera supports histogram retrieval, False otherwise
+        """
+        return False
+
+    def set_histogram_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable automatic per-frame histogram capture.
+
+        When enabled, implementations should capture a histogram alongside each
+        preview frame and each still frame, storing the results so they can be
+        retrieved instantly via ``get_preview_histogram()`` /
+        ``get_still_histogram()`` without any further round-trip to the camera.
+
+        Only valid if ``supports_histogram()`` returns True.  Subclasses that
+        support histograms must override this method.
+
+        Args:
+            enabled: True to enable histogram capture, False to disable.
+
+        Returns:
+            True if the operation succeeded, False otherwise.
+
+        Raises:
+            NotImplementedError: If this camera does not support histograms.
+        """
+        if not self.supports_histogram():
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support histogram control"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement set_histogram_enabled()"
+        )
+
+    def get_preview_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured preview-frame histogram, or None if
+        histogram capture is disabled or no frame has arrived yet.
+
+        Implementations store a histogram with each incoming preview frame so
+        this method returns immediately without any camera round-trip.
+
+        Returns:
+            A copy of the latest histogram as a float64 numpy array with shape
+            ``(channels, bins)`` and values normalised to [0, 1], or None.
+
+        Raises:
+            NotImplementedError: If this camera does not support histograms.
+        """
+        if not self.supports_histogram():
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support histograms"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement get_preview_histogram()"
+        )
+
+    def get_still_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured still-image histogram, or None if no
+        still has been taken with histogram capture enabled.
+
+        Returns:
+            A copy of the latest still histogram as a float64 numpy array with
+            shape ``(channels, bins)`` and values normalised to [0, 1], or None.
+
+        Raises:
+            NotImplementedError: If this camera does not support histograms.
+        """
+        if not self.supports_histogram():
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support histograms"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement get_still_histogram()"
+        )
+
     def save_image(
         self,
         image_data: np.ndarray,
