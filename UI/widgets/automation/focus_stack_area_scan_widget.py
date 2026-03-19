@@ -29,6 +29,8 @@ from motion.routines.z_stack_area_scan import ZStackAreaScan
 # Confirmation dialog
 # ---------------------------------------------------------------------------
 
+TIME_PER_IMAGE = 1.5 # Actual time it takes is 1.3, but it takes 0.2 seconds to settle
+
 class _ConfirmAreaScanDialog(QDialog):
     """Modal dialog summarising the area scan parameters before starting."""
 
@@ -65,8 +67,8 @@ class _ConfirmAreaScanDialog(QDialog):
         total_stacks = n_x * n_y
         total_images = total_stacks * n_z
 
-        # Rough estimate: ~3.15 s/image + 1 s XY travel per stack
-        total_seconds = math.ceil(total_images * 3.15 + total_stacks * 1.0)
+        # Rough estimate of how long it'll take
+        total_seconds = math.ceil(total_images * TIME_PER_IMAGE + total_stacks * 1.0)
         hours, remainder = divmod(total_seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         if hours:
@@ -520,7 +522,7 @@ class ZStackAreaScanWidget(QWidget):
         total_stacks = n_x * n_y
         total_images = total_stacks * n_z
 
-        total_seconds = math.ceil(total_images * 3.15 + total_stacks * 1.0)
+        total_seconds = math.ceil(total_images * TIME_PER_IMAGE + total_stacks * 1.0)
         hours, remainder = divmod(total_seconds, 3600)
         minutes, secs = divmod(remainder, 60)
         if hours:

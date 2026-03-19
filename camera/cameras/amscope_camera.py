@@ -12,6 +12,7 @@ import ctypes
 import numpy as np
 import threading
 import gc
+import time
 
 from camera.cameras.base_camera import BaseCamera, CameraResolution
 from common.logger import info, debug, error, exception, warning
@@ -475,8 +476,6 @@ class AmscopeCamera(BaseCamera):
                 self._still_histogram = histogram
             else:
                 self._preview_histogram = histogram
-
-            debug(f"{'Still' if is_still else 'Preview'} histogram updated, shape={histogram.shape}")
         except Exception:
             exception("Failed to process histogram callback")
 
@@ -538,94 +537,195 @@ class AmscopeCamera(BaseCamera):
         filepath: Path,
         resolution_index: int = 0,
         additional_metadata: dict[str, Any] | None = None,
-        timeout_ms: int = 5000
+        timeout_ms: int = 5000,
+        on_captured: Callable[[], None] | None = None,
+        on_complete: Callable[[bool], None] | None = None,
     ) -> bool:
-        """Capture a still image and save it with metadata."""
+        """
+        Capture a still image and save it with metadata.
+
+        The method blocks only until the camera hardware has finished exposing
+        and the raw pixel data has been pulled from the SDK.  As soon as that
+        is done it:
+
+        1. Calls ``on_captured()`` (if provided) so that the caller (e.g. the
+           automation stage-mover) can continue to the next position immediately.
+        2. Spawns a lightweight daemon thread that converts the raw buffer to a
+           numpy array, saves the file, and calls ``on_complete(success)`` when
+           finished.
+
+        Timing information is written to the debug log at each phase:
+        - how long the hardware snap/pull took
+        - how long numpy conversion took
+        - how long the file save took
+        - total elapsed time
+
+        Args:
+            filepath:            Destination path for the saved image.
+            resolution_index:    Still-resolution index (0 = highest).
+            additional_metadata: Extra key/value pairs embedded in the file.
+            timeout_ms:          Maximum time to wait for the camera to deliver
+                                 the still frame (milliseconds).
+            on_captured:         Optional zero-argument callback fired on the
+                                 camera thread as soon as the raw frame has been
+                                 pulled from the SDK.  Use this to unblock the
+                                 automation pipeline.
+            on_complete:         Optional callback ``(success: bool) -> None``
+                                 fired on the background save thread once the
+                                 file has been written (or the save failed).
+
+        Returns:
+            True if the snap and pull succeeded (i.e. the image was captured).
+            Note: a True return does *not* mean the file has been saved yet —
+            saving happens asynchronously after this method returns.
+            Returns False if the camera is not open, snap fails, or times out.
+        """
         if not self._hcam:
             error("Camera not open")
             return False
-        
+
         amcam = self._get_sdk()
         try:
+
+            t_start = time.perf_counter()
+
             # Allocate buffer for still image
             width, height = self._hcam.get_StillResolution(resolution_index)
             buffer_size = amcam.TDIBWIDTHBYTES(width * 24) * height
             pData = bytes(buffer_size)
-            
-            # Setup threading for still capture
+
+            # Threading primitives for snap phase
             still_ready = threading.Event()
-            capture_success = {'success': False, 'width': 0, 'height': 0}
-            
-            # Save original callback
+            capture_success: dict[str, Any] = {
+                'success': False,
+                'width': 0,
+                'height': 0,
+            }
+
+            # Save original callback so we can restore it afterwards
             original_callback = self._callback
             original_context = self._callback_context
-            
-            def still_callback(event, ctx):
+
+            def still_callback(event: int, ctx: Any) -> None:
                 if event == self.EVENT_STILLIMAGE:
-                    # Pull the still image
                     info_struct = amcam.AmcamFrameInfoV3()
                     try:
                         self._hcam.PullImageV3(pData, 1, 24, 0, info_struct)
                         capture_success['success'] = True
                         capture_success['width'] = info_struct.width
                         capture_success['height'] = info_struct.height
-                    except Exception as e:
-                        error(f"Failed to pull still image: {e}")
+                    except Exception as pull_err:
+                        error(f"Failed to pull still image: {pull_err}")
                         capture_success['success'] = False
                     still_ready.set()
-                
-                # Call original callback if exists
+
+                # Forward to the original callback so live preview keeps working
                 if original_callback:
                     original_callback(event, original_context)
-            
+
             # Temporarily replace callback
             self._callback = still_callback
             self._callback_context = None
-            
-            # Trigger still capture
+
+            # Trigger the hardware snap
             if not self.snap_image(resolution_index):
                 error("Failed to trigger still capture")
                 self._callback = original_callback
                 self._callback_context = original_context
                 return False
-            
-            # Wait for still image
+
+            # Block until the SDK delivers the still frame (or we time out)
             if not still_ready.wait(timeout_ms / 1000.0):
                 error(f"Still capture timed out after {timeout_ms}ms")
                 self._callback = original_callback
                 self._callback_context = original_context
                 return False
-            
+
             # Restore original callback
             self._callback = original_callback
             self._callback_context = original_context
-            
+
             if not capture_success['success']:
                 error("Failed to pull still image")
                 return False
-            
-            # Convert to numpy array
-            w = capture_success['width']
-            h = capture_success['height']
-            stride = amcam.TDIBWIDTHBYTES(w * 24)
-            image_data = np.frombuffer(pData, dtype=np.uint8).reshape((h, stride))[:, :w*3].reshape((h, w, 3)).copy()
-            
-            del pData
-            
-            # Save with metadata
-            success = self.save_image(image_data, filepath, additional_metadata)
-            
-            del image_data
-            gc.collect()
-            
-            if success:
-                info(f"Still image captured and saved: {filepath}")
-            else:
-                error(f"Failed to save still image: {filepath}")
-            
-            return success
-            
-        except Exception as e:
+
+            t_captured = time.perf_counter()
+            snap_ms = (t_captured - t_start) * 1000
+            debug(f"Still capture (snap + pull): {snap_ms:.1f} ms")
+
+            # Notify caller that the hardware is free — automation can move now
+            if on_captured is not None:
+                try:
+                    on_captured()
+                except Exception as cb_err:
+                    exception(f"Error in on_captured callback: {cb_err}")
+
+            # Everything from here (numpy conversion + file save) runs in a
+            # daemon thread so this method returns immediately.
+            def _process_and_save() -> None:
+                nonlocal pData
+
+                t_proc_start = time.perf_counter()
+
+                try:
+                    w = capture_success['width']
+                    h = capture_success['height']
+                    stride = amcam.TDIBWIDTHBYTES(w * 24)
+                    image_data = (
+                        np.frombuffer(pData, dtype=np.uint8)
+                        .reshape((h, stride))[:, : w * 3]
+                        .reshape((h, w, 3))
+                        .copy()
+                    )
+                    del pData
+
+                    t_processed = time.perf_counter()
+                    process_ms = (t_processed - t_proc_start) * 1000
+                    debug(f"Still image processing (numpy): {process_ms:.1f} ms")
+
+                    save_ok = self.save_image(image_data, filepath, additional_metadata)
+
+                    t_saved = time.perf_counter()
+                    save_ms = (t_saved - t_processed) * 1000
+                    total_ms = (t_saved - t_start) * 1000
+                    debug(
+                        f"Still image save: {save_ms:.1f} ms | "
+                        f"Total (snap={snap_ms:.1f} ms, "
+                        f"process={process_ms:.1f} ms, "
+                        f"save={save_ms:.1f} ms, "
+                        f"total={total_ms:.1f} ms): {filepath.name}"
+                    )
+
+                    del image_data
+                    gc.collect()
+
+                    if save_ok:
+                        info(f"Still image captured and saved: {filepath}")
+                    else:
+                        error(f"Failed to save still image: {filepath}")
+
+                except Exception:
+                    save_ok = False
+                    exception(f"Failed to process/save still image: {filepath}")
+
+                if on_complete is not None:
+                    try:
+                        on_complete(save_ok)
+                    except Exception as cb_err:
+                        exception(f"Error in on_complete callback: {cb_err}")
+
+            save_thread = threading.Thread(
+                target=_process_and_save,
+                daemon=True,
+                name="CameraStillSave",
+            )
+            save_thread.start()
+
+            # Return True immediately — the image was captured successfully.
+            # Saving is in progress on the background thread.
+            return True
+
+        except Exception:
             exception(f"Failed to capture and save still image: {filepath}")
             return False
     

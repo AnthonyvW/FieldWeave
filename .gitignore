@@ -7,6 +7,9 @@ misc/stats/samples/
 misc/stats/output/
 
 *.pth
+.vs/
+
+*.log.*
 
 config/cameras/amscope/backups/
 config/cameras/amscope/settings.yaml

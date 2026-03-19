@@ -124,21 +124,25 @@ class HistogramWidget(QWidget):
             peak   = float(values.max())
             if peak < 1e-9:
                 continue
-
             # Build a step-function path: each bucket is a rectangle whose top
             # edge is at the bucket height.  We walk left-to-right along the
             # top of the histogram so the filled shape has no internal spikes.
             path = QPainterPath()
-            path.moveTo(pad, h - pad - label_h)          # bottom-left
+            baseline_y = h - pad - label_h
+            path.moveTo(pad, baseline_y)          # bottom-left
 
+            info(str(values) + ", "+  str(peak) + ", " + str(n))
+            prev_y = baseline_y
             for i in range(n):
                 x_left  = pad + draw_w * i       / n
                 x_right = pad + draw_w * (i + 1) / n
-                y = h - pad - label_h - draw_h * float(values[i]) / peak
+                y = baseline_y - draw_h * float(values[i]) / peak
+                path.lineTo(x_left,  prev_y)  # vertical drop/rise to this bucket's level
                 path.lineTo(x_left,  y)
                 path.lineTo(x_right, y)
+                prev_y = y
 
-            path.lineTo(pad + draw_w, h - pad - label_h)  # bottom-right
+            path.lineTo(pad + draw_w, baseline_y)  # bottom-right
             path.closeSubpath()
 
             if channels == 1:
@@ -235,8 +239,9 @@ class CameraControlsWidget(QWidget):
         self._histogram_timer.setInterval(33)  # ~30 fps
         self._histogram_timer.timeout.connect(self._poll_histogram)
 
+        # Histogram is temporarily removed until rendering issues are fixed
         # Show histogram group only if the camera supports it
-        self._refresh_histogram_visibility()
+        #self._refresh_histogram_visibility()
         
     def _setup_ui(self):
         """Setup the user interface"""
@@ -248,10 +253,13 @@ class CameraControlsWidget(QWidget):
         capture_group = self._create_capture_group()
         layout.addWidget(capture_group)
 
+        """
+        # Temporarily removing histogram until rendering issues are fixed
         # Histogram group (hidden if unsupported)
         self._histogram_group = self._create_histogram_group()
         layout.addWidget(self._histogram_group)
-
+        """
+        
         layout.addStretch()
         
     def _create_histogram_group(self) -> QGroupBox:
@@ -299,11 +307,13 @@ class CameraControlsWidget(QWidget):
 
         layout.addLayout(toggle_layout)
 
+        """
+        # Temporarily removing Histogram until rendering issues are fixed
         # Histogram canvas
         self._histogram_canvas = HistogramWidget()
         self._histogram_canvas.hide()
         layout.addWidget(self._histogram_canvas)
-
+        """
         # Still overlay label
         self._still_label = QLabel("Still overlay shown after capture")
         self._still_label.setStyleSheet("color: #888; font-size: 10px;")

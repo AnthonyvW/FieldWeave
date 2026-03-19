@@ -253,6 +253,9 @@ class ZStackAreaScan(AutomationRoutine):
             if self._check_stop():
                 break
 
+            # Allow the motion system to settle before starting the Z-stack.
+            time.sleep(0.2)
+
             yield  # pause/stop point: XY settled
 
             # ----------------------------------------------------------
