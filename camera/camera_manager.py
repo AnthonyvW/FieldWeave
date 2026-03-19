@@ -25,12 +25,13 @@ from common.logger import info, error, warning, exception, debug
 class CameraManager(QObject):
     """
     Manages camera enumeration, selection, lifecycle, and frame acquisition.
-    
+
     Signals:
         camera_list_changed: Emitted when available cameras change
         active_camera_changed: Emitted when active camera changes (camera_info or None)
         enumeration_complete: Emitted when camera enumeration completes (camera_count)
-        frame_ready: Emitted when a new frame is available (width, height)
+        preview_frame_ready: Emitted when a new *preview* frame is available (width, height)
+        still_frame_ready: Emitted when a new *still* frame is available (width, height)
         streaming_started: Emitted when camera streaming starts (width, height)
         streaming_stopped: Emitted when camera streaming stops
         camera_error: Emitted when a camera error occurs
@@ -40,7 +41,8 @@ class CameraManager(QObject):
     camera_list_changed = Signal()
     active_camera_changed = Signal(object)  # CameraInfo or None
     enumeration_complete = Signal(int)  # count
-    frame_ready = Signal(int, int)  # width, height
+    preview_frame_ready = Signal(int, int)       # preview: width, height
+    still_frame_ready = Signal(int, int) # still:   width, height
     streaming_started = Signal(int, int)  # width, height
     streaming_stopped = Signal()
     camera_error = Signal()
@@ -67,10 +69,18 @@ class CameraManager(QObject):
         self._active_camera_info: CameraInfo | None = None
         self._camera_thread_started = False
         
-        # Frame management
+        # Preview frame state
         self._current_frame_buffer: bytes | None = None
         self._frame_width = 0
         self._frame_height = 0
+        self._preview_frame_seq: int = 0
+
+        # Still frame state
+        self._current_still_buffer: bytes | None = None
+        self._still_frame_width: int = 0
+        self._still_frame_height: int = 0
+        self._still_frame_seq: int = 0
+
         self._is_streaming = False
         
         # Connect internal camera event signal
@@ -105,8 +115,35 @@ class CameraManager(QObject):
     
     @property
     def frame_dimensions(self) -> tuple[int, int]:
-        """Get current frame dimensions (width, height)"""
+        """Get current preview frame dimensions (width, height)"""
         return (self._frame_width, self._frame_height)
+
+    @property
+    def still_frame_dimensions(self) -> tuple[int, int]:
+        """Get current still frame dimensions (width, height)"""
+        return (self._still_frame_width, self._still_frame_height)
+
+    @property
+    def preview_frame_seq(self) -> int:
+        """
+        Monotonically increasing counter incremented on every preview frame.
+
+        Compare with ``still_frame_seq`` to determine which type is more
+        recent: the higher value was updated last.  Both counters start at 0
+        and are reset to 0 when streaming stops or the camera is closed.
+        """
+        return self._preview_frame_seq
+
+    @property
+    def still_frame_seq(self) -> int:
+        """
+        Monotonically increasing counter incremented on every still frame.
+
+        Compare with ``preview_frame_seq`` to determine which type is more
+        recent: the higher value was updated last.  Both counters start at 0
+        and are reset to 0 when streaming stops or the camera is closed.
+        """
+        return self._still_frame_seq
     
     def enumerate_cameras(self) -> list[CameraInfo]:
         """
@@ -290,16 +327,9 @@ class CameraManager(QObject):
                 res_index, width, height = base_camera.get_current_resolution()
             
             # Use final (post-rotation) dimensions for buffer.
-            # For 90/270-degree rotations the SDK transposes width and height
-            # before delivering frames; get_output_dimensions() reflects this.
             width, height = self._active_camera.settings.get_output_dimensions()
             self._frame_width = width
             self._frame_height = height
-            
-            # Calculate buffer size using base camera class method
-            base_camera_class = type(base_camera)
-            buffer_size = base_camera_class.calculate_buffer_size(width, height, 24)
-            self._current_frame_buffer = bytes(buffer_size)
             
             # Start capture - use underlying camera directly
             success = base_camera.start_capture(
@@ -340,6 +370,11 @@ class CameraManager(QObject):
             
             self._is_streaming = False
             self._current_frame_buffer = None
+            self._preview_frame_seq = 0
+            self._current_still_buffer = None
+            self._still_frame_width = 0
+            self._still_frame_height = 0
+            self._still_frame_seq = 0
             info("Streaming stopped")
             self.streaming_stopped.emit()
             return True
@@ -350,16 +385,20 @@ class CameraManager(QObject):
     
     def get_current_frame(self) -> bytes | None:
         """
-        Get the current frame buffer.
+        Get the current preview frame buffer.
         
         Returns:
-            Frame buffer as bytes, or None if no frame is available
+            Frame buffer as bytes, or None if no preview frame is available
         """
         return self._current_frame_buffer
+
+    def get_current_still_frame(self) -> bytes | None:
+        """ Get the most recently captured still frame buffer. """
+        return self._current_still_buffer
     
     def copy_current_frame_to_numpy(self) -> np.ndarray | None:
         """
-        Copy the current frame to a numpy array.
+        Copy the current preview frame to a numpy array.
         
         Returns:
             Frame as numpy array (height, width, 3) or None if no frame available
@@ -394,6 +433,47 @@ class CameraManager(QObject):
         except Exception as e:
             error(f"Error converting frame to numpy: {e}")
             return None
+
+    def copy_current_still_frame_to_numpy(self) -> np.ndarray | None:
+        """
+        Copy the most recently captured still frame to a numpy array.
+
+        Still frames may have different (typically larger) dimensions than
+        preview frames, so this method uses ``_still_frame_width/height``
+        rather than the preview dimensions.
+
+        Returns:
+            Still frame as numpy array (height, width, 3), or None if no still
+            has been captured since streaming started.
+        """
+        if (
+            not self._current_still_buffer
+            or self._still_frame_width == 0
+            or self._still_frame_height == 0
+        ):
+            return None
+
+        try:
+            base_camera = self._active_camera.underlying_camera
+            base_camera_class = type(base_camera)
+            stride = base_camera_class.calculate_stride(self._still_frame_width, 24)
+
+            arr = np.frombuffer(self._current_still_buffer, dtype=np.uint8)
+
+            bytes_per_pixel = 3
+            if stride == self._still_frame_width * bytes_per_pixel:
+                return arr.reshape(
+                    (self._still_frame_height, self._still_frame_width, bytes_per_pixel)
+                ).copy()
+            else:
+                arr_2d = arr.reshape((self._still_frame_height, stride))
+                return arr_2d[:, : self._still_frame_width * bytes_per_pixel].reshape(
+                    (self._still_frame_height, self._still_frame_width, bytes_per_pixel)
+                ).copy()
+
+        except Exception as e:
+            error(f"Error converting still frame to numpy: {e}")
+            return None
     
     @staticmethod
     def _camera_callback(event: int, context: Any):
@@ -423,39 +503,66 @@ class CameraManager(QObject):
         
         if event == events.IMAGE:
             self._handle_image_event()
+        elif event == events.STILLIMAGE:
+            self._handle_still_image_event()
         elif event == events.ERROR:
             self._handle_error()
         elif event == events.DISCONNECTED:
             self._handle_disconnected()
     
     def _handle_image_event(self):
-        """Handle new image from camera"""
-        if not self._active_camera or not self._current_frame_buffer:
+        """Handle new preview image from camera."""
+        if not self._active_camera:
             return
-        
+
         try:
-            # Check if resolution has changed (use final post-rotation dimensions)
             base_camera = self._active_camera.underlying_camera
-            current_width, current_height = self._active_camera.settings.get_output_dimensions()
-            
-            # If resolution changed, update buffer
+
+            result = base_camera.get_frame_buffer()
+            if result is None:
+                debug("Preview image event received but frame buffer not yet allocated")
+                return
+
+            frame_buf, current_width, current_height = result
+
             if current_width != self._frame_width or current_height != self._frame_height:
-                info(f"Resolution changed from {self._frame_width}x{self._frame_height} to {current_width}x{current_height}")
+                info(f"Preview resolution changed from {self._frame_width}x{self._frame_height} to {current_width}x{current_height}")
                 self._frame_width = current_width
                 self._frame_height = current_height
-                
-                # Recalculate buffer size
-                base_camera_class = type(base_camera)
-                buffer_size = base_camera_class.calculate_buffer_size(current_width, current_height, 24)
-                self._current_frame_buffer = bytes(buffer_size)
-            
-            # Pull image into buffer from underlying camera
-            if base_camera.pull_image(self._current_frame_buffer, 24):
-                # Emit signal that frame is ready
-                self.frame_ready.emit(self._frame_width, self._frame_height)
-            
+
+            self._current_frame_buffer = bytes(frame_buf)
+            self._preview_frame_seq += 1
+            self.preview_frame_ready.emit(self._frame_width, self._frame_height)
+
         except Exception as e:
-            error(f"Error handling image: {e}")
+            error(f"Error handling preview image event: {e}")
+
+    def _handle_still_image_event(self):
+        """Handle a still image event from the camera."""
+        if not self._active_camera:
+            return
+
+        try:
+            base_camera = self._active_camera.underlying_camera
+
+            result = base_camera.get_still_buffer()
+            if result is None:
+                debug("Still image event received but still buffer not yet allocated")
+                return
+
+            still_buf, still_w, still_h = result
+
+            if still_w != self._still_frame_width or still_h != self._still_frame_height:
+                info(f"Still resolution changed from {self._still_frame_width}x{self._still_frame_height} to {still_w}x{still_h}")
+                self._still_frame_width = still_w
+                self._still_frame_height = still_h
+
+            self._current_still_buffer = bytes(still_buf)
+            self._still_frame_seq += 1
+            self.still_frame_ready.emit(still_w, still_h)
+
+        except Exception as e:
+            error(f"Error handling still image event: {e}")
     
     def _handle_error(self):
         """Handle camera error"""

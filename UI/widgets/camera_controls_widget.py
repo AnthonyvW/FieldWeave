@@ -591,7 +591,6 @@ class CameraControlsWidget(QWidget):
             # This returns immediately - UI stays responsive!
             camera.capture_and_save_still(
                 filepath=filepath,
-                resolution_index=0,  # Highest resolution
                 additional_metadata={
                     "source": "still_capture"
                 },

@@ -728,6 +728,26 @@ class AmscopeSettings(CameraSettings):
         _, width, height = self.get_current_resolution()
         return (width, height)
     
+    def get_still_output_dimensions(self, resolution_index: int = 0) -> tuple[int, int]:
+        """
+        Return the final (width, height) of a still frame at the given resolution index,
+        accounting for any active rotation setting.
+
+        Mirrors ``get_output_dimensions()`` for the preview stream: raw sensor
+        dimensions are swapped when the camera is configured for a 90° or 270°
+        rotation, matching what PullImageV4 actually writes into the buffer.
+        """
+        if self._camera is None or not hasattr(self._camera, '_hcam'):
+            return (0, 0)
+        try:
+            raw_w, raw_h = self._camera._hcam.get_StillResolution(resolution_index)
+        except Exception as e:
+            error(f"Failed to get still resolution {resolution_index}: {e}")
+            return (0, 0)
+        if self.rotate in (90, 270):
+            return (raw_h, raw_w)
+        return (raw_w, raw_h)
+
     def set_preview_resolution(self, value: str, index: int | None = None) -> bool:
         """
         Set camera preview resolution. Requires camera restart.
@@ -801,6 +821,28 @@ class AmscopeSettings(CameraSettings):
         except Exception as e:
             error(f"Failed to set still resolution: {e}")
             return False
+
+    def get_still_resolution_index(self) -> int:
+        """
+        Return the SDK index that corresponds to the currently stored
+        ``still_resolution`` string (e.g. ``"2592x1944"``).
+
+        Returns 0 (the highest-resolution slot) when ``still_resolution`` is
+        empty, unrecognised, or the camera is not yet available — matching the
+        SDK default so callers never receive an out-of-range index.
+        """
+        if not self.still_resolution:
+            return 0
+        still_resolutions = self.get_still_resolutions()
+        choices = [f"{r.width}x{r.height}" for r in still_resolutions]
+        try:
+            return choices.index(self.still_resolution)
+        except ValueError:
+            warning(
+                f"still_resolution {self.still_resolution!r} not found in "
+                f"available choices {choices}; defaulting to index 0"
+            )
+            return 0
 
     def get_still_resolutions(self) -> list[CameraResolution]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):

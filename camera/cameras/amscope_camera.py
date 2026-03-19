@@ -57,7 +57,11 @@ class AmscopeCamera(BaseCamera):
         if not AmscopeCamera._sdk_loaded:
             AmscopeCamera.ensure_sdk_loaded()
 
-        self._frame_buffer = None
+        self._frame_buffer: ctypes.Array | None = None
+        self._still_buffer: ctypes.Array | None = None
+        self._still_buffer_width: int = 0
+        self._still_buffer_height: int = 0
+        self._pending_still_resolution_index: int = 0
         self._dfc_completion_callback = None  # Callback for DFC completion
 
         # Histogram state
@@ -223,6 +227,9 @@ class AmscopeCamera(BaseCamera):
         self._callback = None
         self._callback_context = None
         self._frame_buffer = None
+        self._still_buffer = None
+        self._still_buffer_width = 0
+        self._still_buffer_height = 0
         self._histogram_enabled = False
         self._preview_histogram = None
         self._still_histogram = None
@@ -232,7 +239,7 @@ class AmscopeCamera(BaseCamera):
         try:
             width, height = self._hcam.get_Size()
             buffer_size = self.calculate_buffer_size(width, height, 24)
-            self._frame_buffer = bytes(buffer_size)
+            self._frame_buffer = ctypes.create_string_buffer(buffer_size)
             info(f"Reallocated frame buffer: {width}x{height}, size={buffer_size}")
         except Exception as e:
             error(f"Failed to reallocate frame buffer: {e}")
@@ -244,12 +251,18 @@ class AmscopeCamera(BaseCamera):
         
         amcam = self._get_sdk()
         try:
-            # Get current resolution to allocate frame buffer
+            # Get current resolution to allocate preview frame buffer
             res_index, width, height = self.get_current_resolution()
-            
-            # Create persistent frame buffer
-            buffer_size = amcam.TDIBWIDTHBYTES(width * 24) * height
-            self._frame_buffer = bytearray(buffer_size)
+            # Allocate preview frame buffer using the post-rotation output size.
+            # get_FinalSize() accounts for AMCAM_OPTION_ROTATE so the buffer
+            # is correctly sized for 90/270° rotations where width and height
+            # are transposed relative to the raw sensor resolution.
+            try:
+                fw, fh = self._hcam.get_FinalSize()
+            except Exception:
+                _, fw, fh = self.get_current_resolution()
+            buffer_size = amcam.TDIBWIDTHBYTES(fw * 24) * fh
+            self._frame_buffer = ctypes.create_string_buffer(buffer_size)
             
             self._callback = callback
             self._callback_context = context
@@ -266,6 +279,27 @@ class AmscopeCamera(BaseCamera):
             except:
                 pass
     
+    def get_frame_buffer(self) -> tuple[ctypes.Array, int, int] | None:
+        """
+        Return the camera's internal preview frame buffer and its dimensions.
+
+        Populated by ``_event_callback_wrapper`` on every ``EVENT_IMAGE`` via
+        ``PullImageV4``.  The frame is already pulled by the time the manager's
+        event handler runs, so callers should read from this buffer rather than
+        calling ``pull_image`` / ``WaitImageV4`` which would block waiting for
+        a second pull on an already-drained frame.
+
+        Returns:
+            ``(buffer, width, height)`` if streaming has started, or ``None``
+            if the buffer has not been allocated yet.
+        """
+        if self._frame_buffer is None:
+            return None
+        width, height = self.settings.get_output_dimensions()
+        if width == 0 or height == 0:
+            return None
+        return self._frame_buffer, width, height
+
     def pull_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24, timeout_ms: int = 1000) -> bool:
         """
         Pull the latest image into buffer (expects ctypes.create_string_buffer)
@@ -297,9 +331,10 @@ class AmscopeCamera(BaseCamera):
         """Capture a still image at specified resolution"""
         if not self._hcam:
             return False
-        
+
         try:
             self._hcam.Snap(resolution_index)
+            self._pending_still_resolution_index = resolution_index
             return True
         except:
             return False
@@ -479,6 +514,19 @@ class AmscopeCamera(BaseCamera):
         except Exception:
             exception("Failed to process histogram callback")
 
+    def get_still_buffer(self) -> tuple[ctypes.Array, int, int] | None:
+        """
+        Return the camera's internal still frame buffer and its dimensions.
+
+        Returns:
+            ``(buffer, width, height)`` if a still has been captured since
+            streaming started, or ``None`` if the buffer has not been
+            allocated yet.
+        """
+        if self._still_buffer is None or self._still_buffer_width == 0 or self._still_buffer_height == 0:
+            return None
+        return self._still_buffer, self._still_buffer_width, self._still_buffer_height
+
     def pull_still_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24) -> tuple[bool, int, int]:
         """
         Pull a still image into buffer
@@ -535,7 +583,7 @@ class AmscopeCamera(BaseCamera):
     def capture_and_save_still(
         self,
         filepath: Path,
-        resolution_index: int = 0,
+        resolution_index: int | None = None,
         additional_metadata: dict[str, Any] | None = None,
         timeout_ms: int = 5000,
         on_captured: Callable[[], None] | None = None,
@@ -562,7 +610,7 @@ class AmscopeCamera(BaseCamera):
 
         Args:
             filepath:            Destination path for the saved image.
-            resolution_index:    Still-resolution index (0 = highest).
+            resolution_index:    Still-resolution index
             additional_metadata: Extra key/value pairs embedded in the file.
             timeout_ms:          Maximum time to wait for the camera to deliver
                                  the still frame (milliseconds).
@@ -584,6 +632,10 @@ class AmscopeCamera(BaseCamera):
             error("Camera not open")
             return False
 
+        if resolution_index is None:
+            resolution_index = self.settings.get_still_resolution_index()
+            debug(f"Still resolution index resolved from settings: {resolution_index} ({self.settings.still_resolution})")
+
         amcam = self._get_sdk()
         try:
 
@@ -592,7 +644,7 @@ class AmscopeCamera(BaseCamera):
             # Allocate buffer for still image
             width, height = self._hcam.get_StillResolution(resolution_index)
             buffer_size = amcam.TDIBWIDTHBYTES(width * 24) * height
-            pData = bytes(buffer_size)
+            pData = bytearray(buffer_size)
 
             # Threading primitives for snap phase
             still_ready = threading.Event()
@@ -608,14 +660,18 @@ class AmscopeCamera(BaseCamera):
 
             def still_callback(event: int, ctx: Any) -> None:
                 if event == self.EVENT_STILLIMAGE:
-                    info_struct = amcam.AmcamFrameInfoV3()
-                    try:
-                        self._hcam.PullImageV3(pData, 1, 24, 0, info_struct)
-                        capture_success['success'] = True
-                        capture_success['width'] = info_struct.width
-                        capture_success['height'] = info_struct.height
-                    except Exception as pull_err:
-                        error(f"Failed to pull still image: {pull_err}")
+                    if self._still_buffer is not None and self._still_buffer_width > 0:
+                        try:
+                            n = min(len(pData), len(self._still_buffer))
+                            pData[:n] = self._still_buffer[:n]
+                            capture_success['success'] = True
+                            capture_success['width'] = self._still_buffer_width
+                            capture_success['height'] = self._still_buffer_height
+                        except Exception as copy_err:
+                            error(f"Failed to copy still buffer: {copy_err}")
+                            capture_success['success'] = False
+                    else:
+                        error("Still buffer not yet populated; cannot capture still")
                         capture_success['success'] = False
                     still_ready.set()
 
@@ -807,14 +863,41 @@ class AmscopeCamera(BaseCamera):
         if event == self.EVENT_IMAGE and hasattr(self, '_frame_buffer') and self._frame_buffer is not None:
             try:
                 self._hcam.PullImageV4(self._frame_buffer, 0, 24, 0, None)
-                debug("Frame captured and pulled to buffer")
             except:
                 pass
             # Request a fresh preview histogram for this frame
             if self._histogram_enabled:
                 self._request_histogram(is_still=False)
         elif event == self.EVENT_STILLIMAGE:
-            # Request a still histogram to pair with the just-captured still frame
+            try:
+                # Determine the raw sensor dimensions for the snapped resolution.
+                still_resolutions = self.settings.get_still_resolutions()
+                idx = self._pending_still_resolution_index
+                if still_resolutions and idx < len(still_resolutions):
+                    raw_w = still_resolutions[idx].width
+                    raw_h = still_resolutions[idx].height
+                else:
+                    raw_w, raw_h = self._hcam.get_Size()
+
+                # Apply the same rotation swap the SDK applies to the pixel data
+                # so that width/height match the actual layout in the buffer.
+                rotate = self.settings.rotate if self.settings else 0
+                if rotate in (90, 270):
+                    sw, sh = raw_h, raw_w
+                else:
+                    sw, sh = raw_w, raw_h
+
+                required = amcam.TDIBWIDTHBYTES(sw * 24) * sh
+                if self._still_buffer is None or len(self._still_buffer) < required:
+                    debug(f"Still buffer reallocated: {sw}x{sh}")
+                    self._still_buffer = ctypes.create_string_buffer(required)
+
+                self._hcam.PullImageV4(self._still_buffer, 1, 24, 0, None)
+                self._still_buffer_width = sw
+                self._still_buffer_height = sh
+                debug(f"Still frame pulled: {sw}x{sh}")
+            except Exception as e:
+                error(f"Failed to pull still frame into still buffer: {e}")
             if self._histogram_enabled:
                 self._request_histogram(is_still=True)
         elif event == amcam.AMCAM_EVENT_DFC:

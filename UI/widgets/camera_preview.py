@@ -80,6 +80,12 @@ class OverlayLabel(QLabel):
 class CameraPreview(QFrame):
     """
     Camera preview widget that displays frames from the camera manager.
+
+    Whichever frame type has the higher sequence number (``preview_frame_seq``
+    vs ``still_frame_seq`` on the camera manager) is considered more recent
+    and is shown on screen.  This means the display keeps updating from still
+    frames during automation even when the live preview stream is paused.
+
     This widget only handles display - it does not manage camera lifecycle.
     """
 
@@ -88,8 +94,15 @@ class CameraPreview(QFrame):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setObjectName("CameraPreview")
 
-        self._current_width = 0
-        self._current_height = 0
+        self._preview_buf: bytearray = bytearray()
+        self._preview_width: int = 0
+        self._preview_height: int = 0
+        self._preview_seq: int = 0
+
+        self._still_buf: bytearray = bytearray()
+        self._still_width: int = 0
+        self._still_height: int = 0
+        self._still_seq: int = 0
 
         self._video_label = OverlayLabel()
         self._video_label.setObjectName("VideoLabel")
@@ -145,7 +158,8 @@ class CameraPreview(QFrame):
         ctx = get_app_context()
         camera_manager = ctx.camera_manager
 
-        camera_manager.frame_ready.connect(self._on_frame_ready)
+        camera_manager.preview_frame_ready.connect(self._on_frame_ready)
+        camera_manager.still_frame_ready.connect(self._on_still_frame_ready)
         camera_manager.streaming_started.connect(self._on_streaming_started)
         camera_manager.streaming_stopped.connect(self._on_streaming_stopped)
         camera_manager.camera_error.connect(self._on_camera_error)
@@ -173,77 +187,163 @@ class CameraPreview(QFrame):
         self._channel_overlay.show_blue = show_blue
         self._channel_overlay.show_grayscale = show_grayscale
 
+    # ------------------------------------------------------------------
+    # Frame slots
+    # ------------------------------------------------------------------
+
     @Slot(int, int)
     def _on_frame_ready(self, width: int, height: int) -> None:
+        """Receive a new preview frame from the camera manager."""
         ctx = get_app_context()
         camera_manager = ctx.camera_manager
 
-        frame_buffer = camera_manager.get_current_frame()
-        if not frame_buffer:
+        src = camera_manager.get_current_frame()
+        if not src:
             return
 
         try:
-            if width != self._current_width or height != self._current_height:
-                self._current_width = width
-                self._current_height = height
-
             camera = camera_manager.active_camera
             if not camera:
                 return
 
-            base_camera_class = type(camera.underlying_camera)
-            stride = base_camera_class.calculate_stride(width, 24)
+            stride = type(camera.underlying_camera).calculate_stride(width, 24)
+            required = stride * height
 
-            image = QImage(
-                frame_buffer, width, height, stride, QImage.Format.Format_RGB888
-            ).copy()
+            # Reallocate only when dimensions change
+            if width != self._preview_width or height != self._preview_height:
+                self._preview_buf = bytearray(required)
+                self._preview_width = width
+                self._preview_height = height
+
+            # Copy into persistent buffer (avoids keeping a reference to the
+            # camera manager's buffer which may be replaced between frames)
+            self._preview_buf[:required] = src[:required]
+            self._preview_seq = camera_manager.preview_frame_seq
+
+            # Only render if this is the most recent frame type
+            if self._preview_seq >= self._still_seq:
+                self._render_display(self._preview_buf, width, height, stride)
+
+        except Exception as e:
+            error(f"Preview: error handling preview frame: {e}")
+
+    @Slot(int, int)
+    def _on_still_frame_ready(self, width: int, height: int) -> None:
+        """Receive a new still frame from the camera manager."""
+        ctx = get_app_context()
+        camera_manager = ctx.camera_manager
+        src = camera_manager.get_current_still_frame()
+        if not src:
+            return
+        try:
+            camera = camera_manager.active_camera
+            if not camera:
+                return
+
+            stride = type(camera.underlying_camera).calculate_stride(width, 24)
+            required = stride * height
+
+            # Reallocate only when dimensions change
+            if width != self._still_width or height != self._still_height:
+                self._still_buf = bytearray(required)
+                self._still_width = width
+                self._still_height = height
+
+            self._still_buf[:required] = src[:required]
+            self._still_seq = camera_manager.still_frame_seq
+
+            # Stills always take priority — they are only produced intentionally
+            self._render_display(self._still_buf, width, height, stride)
+
+        except Exception as e:
+            error(f"Preview: error handling still frame: {e}")
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _render_display(
+        self,
+        buf: bytearray,
+        width: int,
+        height: int,
+        stride: int,
+    ) -> None:
+        """
+        Convert *buf* to a QPixmap and push it to the video label.
+
+        The buffer is wrapped by QImage without copying (the bytearray stays
+        alive for the duration of this method).  A ``.copy()`` is taken only
+        if the channel overlay needs to modify pixel data; otherwise the image
+        is scaled directly from the original memory.
+
+        Args:
+            buf:    Raw RGB888 pixel data (may be stride-padded).
+            width:  Frame width in pixels.
+            height: Frame height in pixels.
+            stride: Row stride in bytes (>= width * 3).
+        """
+        try:
+            image = QImage(buf, width, height, stride, QImage.Format.Format_RGB888)
 
             if self._channel_overlay.needs_filter:
-                image = self._channel_overlay.apply(image)
+                image = self._channel_overlay.apply(image.copy())
 
-            # Notify overlays at full camera resolution before scaling.
+            # Notify overlays at full resolution
             ptr = image.bits()
-            full_arr = np.frombuffer(ptr, dtype=np.uint8).reshape(
-                (image.height(), image.bytesPerLine())
-            )[:, : image.width() * 3].reshape(
-                (image.height(), image.width(), 3)
-            ).copy()
+            full_arr = (
+                np.frombuffer(ptr, dtype=np.uint8)
+                .reshape((image.height(), image.bytesPerLine()))
+                [:, : image.width() * 3]
+                .reshape((image.height(), image.width(), 3))
+                .copy()
+            )
             self._video_label.notify_full(full_arr)
 
-            if self._video_label.width() > 0 and self._video_label.height() > 0:
+            lw = self._video_label.width()
+            lh = self._video_label.height()
+            if lw > 0 and lh > 0:
                 scaled = image.scaled(
-                    self._video_label.width(),
-                    self._video_label.height(),
+                    lw, lh,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.FastTransformation,
                 )
 
-                # Notify overlays at display resolution before setting the pixmap.
-                # QImage rows may be padded, so reshape using bytesPerLine() as
-                # the row stride then slice back to the actual pixel columns.
                 ptr = scaled.bits()
-                scaled_arr = np.frombuffer(ptr, dtype=np.uint8).reshape(
-                    (scaled.height(), scaled.bytesPerLine())
-                )[:, : scaled.width() * 3].reshape(
-                    (scaled.height(), scaled.width(), 3)
-                ).copy()
+                scaled_arr = (
+                    np.frombuffer(ptr, dtype=np.uint8)
+                    .reshape((scaled.height(), scaled.bytesPerLine()))
+                    [:, : scaled.width() * 3]
+                    .reshape((scaled.height(), scaled.width(), 3))
+                    .copy()
+                )
                 self._video_label.notify_scaled(scaled_arr)
-
                 self._video_label.setPixmap(QPixmap.fromImage(scaled))
 
         except Exception as e:
-            error(f"Preview: Error displaying frame: {e}")
+            error(f"Preview: error rendering frame: {e}")
+
+    # ------------------------------------------------------------------
+    # Camera manager state slots
+    # ------------------------------------------------------------------
 
     @Slot(int, int)
     def _on_streaming_started(self, width: int, height: int) -> None:
         info(f"Preview: Streaming started ({width}x{height})")
-        self._current_width = width
-        self._current_height = height
         self._video_label.setText("")
 
     @Slot()
     def _on_streaming_stopped(self) -> None:
         info("Preview: Streaming stopped")
+        # Discard buffered frames and reset sequence tracking
+        self._preview_buf = bytearray()
+        self._preview_width = 0
+        self._preview_height = 0
+        self._preview_seq = 0
+        self._still_buf = bytearray()
+        self._still_width = 0
+        self._still_height = 0
+        self._still_seq = 0
         self._video_label.setText("Camera stream stopped")
 
     @Slot()
@@ -291,7 +391,8 @@ class CameraPreview(QFrame):
             ctx = get_app_context()
             camera_manager = ctx.camera_manager
 
-            camera_manager.frame_ready.disconnect(self._on_frame_ready)
+            camera_manager.preview_frame_ready.disconnect(self._on_frame_ready)
+            camera_manager.still_frame_ready.disconnect(self._on_still_frame_ready)
             camera_manager.streaming_started.disconnect(self._on_streaming_started)
             camera_manager.streaming_stopped.disconnect(self._on_streaming_stopped)
             camera_manager.camera_error.disconnect(self._on_camera_error)

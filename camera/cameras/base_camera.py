@@ -411,7 +411,7 @@ class BaseCamera(ABC):
     def capture_and_save_still(
         self,
         filepath: Path,
-        resolution_index: int = 0,
+        resolution_index: int = None,
         additional_metadata: dict[str, Any] | None = None,
         timeout_ms: int = 5000
     ) -> bool:
