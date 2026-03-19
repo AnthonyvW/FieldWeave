@@ -63,11 +63,6 @@ class AmscopeCamera(BaseCamera):
         self._still_buffer_height: int = 0
         self._pending_still_resolution_index: int = 0
         self._dfc_completion_callback = None  # Callback for DFC completion
-
-        # Histogram state
-        self._histogram_enabled: bool = False
-        self._preview_histogram: np.ndarray | None = None  # Most recent preview histogram
-        self._still_histogram: np.ndarray | None = None    # Most recent still histogram
     
     def _get_settings_class(self):
         """
@@ -230,9 +225,10 @@ class AmscopeCamera(BaseCamera):
         self._still_buffer = None
         self._still_buffer_width = 0
         self._still_buffer_height = 0
-        self._histogram_enabled = False
-        self._preview_histogram = None
-        self._still_histogram = None
+        if self._settings is not None:
+            self._settings._histogram_enabled = False
+            self._settings._preview_histogram = None
+            self._settings._still_histogram = None
     
     def _reallocate_frame_buffer(self):
         """Reallocate frame buffer based on current resolution."""
@@ -252,7 +248,7 @@ class AmscopeCamera(BaseCamera):
         amcam = self._get_sdk()
         try:
             # Get current resolution to allocate preview frame buffer
-            res_index, width, height = self.get_current_resolution()
+            res_index, width, height = self.get_current_preview_resolution()
             # Allocate preview frame buffer using the post-rotation output size.
             # get_FinalSize() accounts for AMCAM_OPTION_ROTATE so the buffer
             # is correctly sized for 90/270° rotations where width and height
@@ -260,7 +256,7 @@ class AmscopeCamera(BaseCamera):
             try:
                 fw, fh = self._hcam.get_FinalSize()
             except Exception:
-                _, fw, fh = self.get_current_resolution()
+                _, fw, fh = self.get_current_preview_resolution()
             buffer_size = amcam.TDIBWIDTHBYTES(fw * 24) * fh
             self._frame_buffer = ctypes.create_string_buffer(buffer_size)
             
@@ -343,107 +339,21 @@ class AmscopeCamera(BaseCamera):
     # Resolution Management
     # -------------------------
     
-    def get_resolutions(self) -> list[CameraResolution]:
+    def get_preview_resolutions(self) -> list[CameraResolution]:
         """Get available preview resolutions"""
-        return self.settings.get_resolutions()
+        return self.settings.get_preview_resolutions()
 
-    def get_current_resolution(self) -> tuple[int, int, int]:
+    def get_current_preview_resolution(self) -> tuple[int, int, int]:
         """Get current resolution index, width, and height"""
-        return self.settings.get_current_resolution()
-
-    def set_resolution(self, resolution_index: int) -> bool:
-        """Set camera resolution"""
-        return self.settings.set_still_resolution(resolution_index)
-
-    def supports_still_capture(self) -> bool:
-        """Check if camera supports separate still image capture"""
-        return len(self.settings.get_still_resolutions()) > 0
+        return self.settings.get_current_preview_resolution()
 
     def get_still_resolutions(self) -> list[CameraResolution]:
         """Get available still image resolutions"""
         return self.settings.get_still_resolutions()
 
-
     # -------------------------
-    # Histogram
+    # Image Capture and Saving
     # -------------------------
-
-    def supports_histogram(self) -> bool:
-        """Amscope cameras support histogram retrieval via the SDK."""
-        return True
-
-    def set_histogram_enabled(self, enabled: bool) -> bool:
-        """
-        Enable or disable automatic histogram capture on each frame.
-
-        When enabled, a histogram is requested from the SDK after every preview
-        frame (EVENT_IMAGE) and after every still frame (EVENT_STILLIMAGE).
-        Each result is stored internally and can be retrieved instantly via
-        ``get_preview_histogram()`` / ``get_still_histogram()`` without any
-        round-trip to the camera.
-
-        Uses AMCAM_OPTION_HISTOGRAM to put the SDK in continuous mode (1) or
-        one-shot mode (0).  In continuous mode the SDK keeps delivering
-        histograms; we re-arm the callback after each delivery so the cadence
-        stays in step with the frame rate.
-
-        Args:
-            enabled: True to start accumulating histograms, False to stop.
-
-        Returns:
-            True if the SDK option was set successfully, False otherwise.
-        """
-        if not self._hcam:
-            error("Cannot set histogram mode: camera not open")
-            return False
-
-        amcam = self._get_sdk()
-        try:
-            self._hcam.put_Option(amcam.AMCAM_OPTION_HISTOGRAM, 1 if enabled else 0)
-            self._histogram_enabled = enabled
-            if not enabled:
-                self._preview_histogram = None
-                self._still_histogram = None
-            debug(f"Histogram {'enabled' if enabled else 'disabled'}")
-            return True
-        except amcam.HRESULTException as e:
-            error(f"Failed to set histogram mode: {e}")
-            return False
-
-    @property
-    def histogram_enabled(self) -> bool:
-        """True if automatic per-frame histogram capture is active."""
-        return self._histogram_enabled
-
-    def get_preview_histogram(self) -> np.ndarray | None:
-        """
-        Return the most recently captured preview histogram, or None if
-        histogram capture is disabled or no frame has arrived yet.
-
-        The array contains float64 values in the range [0, 1] (normalised bin
-        counts).  Layout depends on bit-depth and colour mode:
-
-        * 8-bit  RGB  → shape (3, 256)   — rows are R, G, B
-        * 8-bit  mono → shape (1, 256)
-        * 16-bit RGB  → shape (3, 65536)
-        * 16-bit mono → shape (1, 65536)
-
-        The returned array is a copy and is safe to read from any thread.
-        """
-        return self._preview_histogram.copy() if self._preview_histogram is not None else None
-
-    def get_still_histogram(self) -> np.ndarray | None:
-        """
-        Return the most recently captured still histogram, or None if no still
-        has been taken with histogram capture enabled.
-
-        Same shape / dtype convention as ``get_preview_histogram()``.
-
-        The returned array is a copy and is safe to read from any thread.
-        """
-        return self._still_histogram.copy() if self._still_histogram is not None else None
-
-    def _request_histogram(self, is_still: bool) -> None:
         """
         Submit a single histogram request to the SDK.
 
@@ -508,9 +418,9 @@ class AmscopeCamera(BaseCamera):
             histogram = np.where(totals > 0, raw / totals, raw)
 
             if is_still:
-                self._still_histogram = histogram
+                self.settings._still_histogram = histogram
             else:
-                self._preview_histogram = histogram
+                self.settings._preview_histogram = histogram
         except Exception:
             exception("Failed to process histogram callback")
 
@@ -550,31 +460,6 @@ class AmscopeCamera(BaseCamera):
             return True, w, h
         except amcam.HRESULTException:
             return False, 0, 0
-    
-    # -------------------------
-    # Metadata
-    # -------------------------
-    
-    def get_camera_metadata(self) -> dict[str, Any]:
-        """Get current camera metadata for image saving"""
-        metadata = {
-            'model': self.model,
-        }
-        
-        # Get metadata from settings if available
-        if self._settings is not None:
-            metadata['exposure_time_us'] = self._settings.get_exposure_time()
-            metadata['temperature'] = self._settings.temp
-            metadata['tint'] = self._settings.tint
-        
-        # Add serial number if available
-        try:
-            if self._hcam:
-                metadata['serial'] = self._hcam.get_SerialNumber()
-        except:
-            pass
-        
-        return metadata
     
     # -------------------------
     # Image Capture and Saving
@@ -801,7 +686,7 @@ class AmscopeCamera(BaseCamera):
         
         try:
             # Get current resolution
-            res_index, width, height = self.get_current_resolution()
+            res_index, width, height = self.get_current_preview_resolution()
             
             # Copy from frame buffer
             amcam = self._get_sdk()
@@ -866,7 +751,7 @@ class AmscopeCamera(BaseCamera):
             except:
                 pass
             # Request a fresh preview histogram for this frame
-            if self._histogram_enabled:
+            if self._settings is not None and self._settings._histogram_enabled:
                 self._request_histogram(is_still=False)
         elif event == self.EVENT_STILLIMAGE:
             try:
@@ -898,7 +783,7 @@ class AmscopeCamera(BaseCamera):
                 debug(f"Still frame pulled: {sw}x{sh}")
             except Exception as e:
                 error(f"Failed to pull still frame into still buffer: {e}")
-            if self._histogram_enabled:
+            if self._settings is not None and self._settings._histogram_enabled:
                 self._request_histogram(is_still=True)
         elif event == amcam.AMCAM_EVENT_DFC:
             # DFC event received - call completion callback if registered

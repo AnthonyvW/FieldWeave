@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, asdict, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple, TYPE_CHECKING
+
+import numpy as np
 
 from common.generic_config import ConfigManager
 from common.logger import info, debug, exception, error
@@ -196,11 +198,11 @@ class CameraSettings(ABC):
             raise ValueError(f"Invalid file format: {value}. Must be one of: png, tiff, jpeg") from e
     
     @abstractmethod
-    def get_resolutions(self) -> list['CameraResolution']:
+    def get_preview_resolutions(self) -> list['CameraResolution']:
         pass
     
     @abstractmethod
-    def get_current_resolution(self) -> tuple[int, int, int]:
+    def get_current_preview_resolution(self) -> tuple[int, int, int]:
         pass
     
     @abstractmethod
@@ -222,6 +224,126 @@ class CameraSettings(ABC):
     def set_exposure_time(self, time_us: int) -> bool:
         pass
     
+    @abstractmethod
+    def supports_still_capture(self) -> bool:
+        """
+        Check if the camera supports separate still image capture.
+
+        Returns:
+            True if supported, False otherwise.
+        """
+        pass
+
+    def get_camera_metadata(self) -> dict[str, Any]:
+        """
+        Get camera metadata for image saving.
+
+        Retrieves current settings to be embedded in saved images.
+
+        Returns:
+            Dictionary containing camera metadata including the model name
+            (if a camera is attached) and all serialisable settings fields.
+        """
+        metadata: dict[str, Any] = {}
+
+        if self._camera is not None:
+            metadata["model"] = self._camera.model
+
+        settings_dict = asdict(self)
+
+        settings_dict.pop("version", None)
+
+        for key, value in settings_dict.items():
+            if hasattr(value, "_asdict"):
+                settings_dict[key] = value._asdict()
+
+        metadata.update(settings_dict)
+
+        return metadata
+
+    def supports_histogram(self) -> bool:
+        """
+        Check if this camera supports histogram retrieval.
+
+        Subclasses that support histograms should override this to return True.
+
+        Returns:
+            True if histogram retrieval is supported, False otherwise.
+        """
+        return False
+
+    def set_histogram_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable automatic per-frame histogram capture.
+
+        When enabled, implementations should capture a histogram alongside each
+        preview frame and each still frame, storing the results so they can be
+        retrieved instantly via ``get_preview_histogram()`` /
+        ``get_still_histogram()`` without any further round-trip to the camera.
+
+        Only valid if ``supports_histogram()`` returns True.  Subclasses that
+        support histograms must override this method.
+
+        Args:
+            enabled: True to enable histogram capture, False to disable.
+
+        Returns:
+            True if the operation succeeded, False otherwise.
+
+        Raises:
+            NotImplementedError: If this camera does not support histograms.
+        """
+        if not self.supports_histogram():
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support histogram control"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement set_histogram_enabled()"
+        )
+
+    def get_preview_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured preview-frame histogram, or None if
+        histogram capture is disabled or no frame has arrived yet.
+
+        Implementations store a histogram with each incoming preview frame so
+        this method returns immediately without any camera round-trip.
+
+        Returns:
+            A copy of the latest histogram as a float64 numpy array with shape
+            ``(channels, bins)`` and values normalised to [0, 1], or None.
+
+        Raises:
+            NotImplementedError: If this camera does not support histograms.
+        """
+        if not self.supports_histogram():
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support histograms"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement get_preview_histogram()"
+        )
+
+    def get_still_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured still-image histogram, or None if no
+        still has been taken with histogram capture enabled.
+
+        Returns:
+            A copy of the latest still histogram as a float64 numpy array with
+            shape ``(channels, bins)`` and values normalised to [0, 1], or None.
+
+        Raises:
+            NotImplementedError: If this camera does not support histograms.
+        """
+        if not self.supports_histogram():
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support histograms"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement get_still_histogram()"
+        )
+
     @abstractmethod
     def refresh_from_camera(self, camera: BaseCamera) -> None:
         pass

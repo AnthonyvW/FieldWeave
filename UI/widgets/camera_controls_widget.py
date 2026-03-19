@@ -629,7 +629,7 @@ class CameraControlsWidget(QWidget):
             ctx2 = get_app_context()
             camera = getattr(ctx2, "camera", None)
             underlying = getattr(camera, "underlying_camera", None)
-            if underlying is not None and underlying.histogram_enabled:
-                self._histogram_canvas.update_still(underlying.get_still_histogram())
+            if underlying is not None and underlying.settings.histogram_enabled:
+                self._histogram_canvas.update_still(underlying.settings.get_still_histogram())
         else:
             toast.error("Unable to capture image from camera", title="Capture Failed")

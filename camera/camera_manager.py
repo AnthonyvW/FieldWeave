@@ -311,7 +311,7 @@ class CameraManager(QObject):
             base_camera = self._active_camera.underlying_camera
             
             # Get current resolution from underlying camera
-            res_index, width, height = base_camera.get_current_resolution()
+            res_index, width, height = base_camera.get_current_preview_resolution()
             
             # If no resolution set (0x0), set to first resolution
             if width == 0 or height == 0:
@@ -324,7 +324,7 @@ class CameraManager(QObject):
                     return False
                 
                 # Get resolution again after setting
-                res_index, width, height = base_camera.get_current_resolution()
+                res_index, width, height = base_camera.get_current_preview_resolution()
             
             # Use final (post-rotation) dimensions for buffer.
             width, height = self._active_camera.settings.get_output_dimensions()

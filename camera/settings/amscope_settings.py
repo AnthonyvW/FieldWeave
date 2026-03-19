@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
+
+import numpy as np
 
 from camera.settings.camera_settings import (
     CameraSettings,
@@ -48,6 +50,9 @@ class AmscopeSettings(CameraSettings):
     
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
     _ui_update_callback: callable | None = field(default=None, repr=False, compare=False)
+    _histogram_enabled: bool = field(default=False, repr=False, compare=False)
+    _preview_histogram: np.ndarray | None = field(default=None, repr=False, compare=False)
+    _still_histogram: np.ndarray | None = field(default=None, repr=False, compare=False)
     
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -57,7 +62,7 @@ class AmscopeSettings(CameraSettings):
         Get metadata for all settings with dynamically populated resolution choices.
         """
         # Get available resolutions from camera
-        resolutions = self.get_resolutions()
+        resolutions = self.get_preview_resolutions()
         resolution_choices = [f"{res.width}x{res.height}" for res in resolutions]
 
         still_resolutions = self.get_still_resolutions()
@@ -682,7 +687,115 @@ class AmscopeSettings(CameraSettings):
         self.dfc_quantity = value
         debug(f"Set DFC quantity to {value}")
 
-    def get_resolutions(self) -> list[CameraResolution]:
+    # ------------------------------------------------------------------
+    # Capability and metadata overrides
+    # ------------------------------------------------------------------
+
+    def supports_still_capture(self) -> bool:
+        """Amscope cameras support separate still image capture."""
+        return len(self.get_still_resolutions()) > 0
+
+    def get_camera_metadata(self) -> dict[str, Any]:
+        """Get current camera metadata for image saving."""
+        metadata: dict[str, Any] = {}
+
+        if self._camera is not None:
+            metadata['model'] = self._camera.model
+
+        metadata['exposure_time_us'] = self.get_exposure_time()
+        metadata['temperature'] = self.temp
+        metadata['tint'] = self.tint
+
+        try:
+            if self._camera is not None and hasattr(self._camera, '_hcam') and self._camera._hcam:
+                metadata['serial'] = self._camera._hcam.get_SerialNumber()
+        except Exception:
+            pass
+
+        return metadata
+
+    # ------------------------------------------------------------------
+    # Histogram
+    # ------------------------------------------------------------------
+
+    @property
+    def histogram_enabled(self) -> bool:
+        """True if automatic per-frame histogram capture is active."""
+        return self._histogram_enabled
+
+    def supports_histogram(self) -> bool:
+        """Amscope cameras support histogram retrieval via the SDK."""
+        return True
+
+    def set_histogram_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable automatic histogram capture on each frame.
+
+        When enabled, a histogram is requested from the SDK after every preview
+        frame (EVENT_IMAGE) and after every still frame (EVENT_STILLIMAGE).
+        Each result is stored internally and can be retrieved instantly via
+        ``get_preview_histogram()`` / ``get_still_histogram()`` without any
+        round-trip to the camera.
+
+        Uses AMCAM_OPTION_HISTOGRAM to put the SDK in continuous mode (1) or
+        one-shot mode (0).  In continuous mode the SDK keeps delivering
+        histograms; we re-arm the callback after each delivery so the cadence
+        stays in step with the frame rate.
+
+        Args:
+            enabled: True to start accumulating histograms, False to stop.
+
+        Returns:
+            True if the SDK option was set successfully, False otherwise.
+        """
+        if self._camera is None or not hasattr(self._camera, '_hcam') or not self._camera._hcam:
+            error("Cannot set histogram mode: camera not open")
+            return False
+
+        amcam = self._camera._get_sdk()
+        try:
+            self._camera._hcam.put_Option(amcam.AMCAM_OPTION_HISTOGRAM, 1 if enabled else 0)
+            self._histogram_enabled = enabled
+            if not enabled:
+                self._preview_histogram = None
+                self._still_histogram = None
+            debug(f"Histogram {'enabled' if enabled else 'disabled'}")
+            return True
+        except amcam.HRESULTException as e:
+            error(f"Failed to set histogram mode: {e}")
+            return False
+
+    def get_preview_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured preview histogram, or None if
+        histogram capture is disabled or no frame has arrived yet.
+
+        The array contains float64 values in the range [0, 1] (normalised bin
+        counts).  Layout depends on bit-depth and colour mode:
+
+        * 8-bit  RGB  → shape (3, 256)   — rows are R, G, B
+        * 8-bit  mono → shape (1, 256)
+        * 16-bit RGB  → shape (3, 65536)
+        * 16-bit mono → shape (1, 65536)
+
+        The returned array is a copy and is safe to read from any thread.
+        """
+        return self._preview_histogram.copy() if self._preview_histogram is not None else None
+
+    def get_still_histogram(self) -> np.ndarray | None:
+        """
+        Return the most recently captured still histogram, or None if no still
+        has been taken with histogram capture enabled.
+
+        Same shape / dtype convention as ``get_preview_histogram()``.
+
+        The returned array is a copy and is safe to read from any thread.
+        """
+        return self._still_histogram.copy() if self._still_histogram is not None else None
+
+    # ------------------------------------------------------------------
+
+    def get_preview_resolutions(self) -> list[CameraResolution]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
             return []
         
@@ -700,7 +813,7 @@ class AmscopeSettings(CameraSettings):
             error(f"Failed to get resolutions: {e}")
             return []
     
-    def get_current_resolution(self) -> tuple[int, int, int]:
+    def get_current_preview_resolution(self) -> tuple[int, int, int]:
         if self._camera is None or not hasattr(self._camera, '_hcam'):
             return (0, 0, 0)
         
@@ -725,7 +838,7 @@ class AmscopeSettings(CameraSettings):
         except Exception:
             pass
         # Fallback: raw sensor resolution (no rotation compensation)
-        _, width, height = self.get_current_resolution()
+        _, width, height = self.get_current_preview_resolution()
         return (width, height)
     
     def get_still_output_dimensions(self, resolution_index: int = 0) -> tuple[int, int]:
@@ -753,7 +866,7 @@ class AmscopeSettings(CameraSettings):
         Set camera preview resolution. Requires camera restart.
         """
         try:
-            resolutions = self.get_resolutions()
+            resolutions = self.get_preview_resolutions()
             choices = [f"{r.width}x{r.height}" for r in resolutions]
 
             if index is None:
@@ -970,7 +1083,7 @@ class AmscopeSettings(CameraSettings):
             self.level_range_high = RGBALevel(r=high[0], g=high[1], b=high[2], a=high[3])
             
             index = hcam.get_eSize()
-            resolutions = self.get_resolutions()
+            resolutions = self.get_preview_resolutions()
             if 0 <= index < len(resolutions):
                 r = resolutions[index]
                 self.preview_resolution = f"{r.width}x{r.height}"
