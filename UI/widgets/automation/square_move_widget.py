@@ -1,30 +1,11 @@
-"""
-Square move automation widget.
-
-Provides :class:`SquareMoveWidget`, a PySide6 widget for configuring and
-running :class:`~motion.routines.square_move.SquareMove`.
-
-The widget lets the operator set the side length, then prompts with a
-confirmation dialog before any motion begins.  Pause / resume / stop
-controls are shown while the routine is active.
-
-Usage::
-
-    from motion.widgets.square_move_widget import SquareMoveWidget
-
-    widget = SquareMoveWidget()
-    widget.show()
-"""
-
 from __future__ import annotations
-
-import threading
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -36,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from common.app_context import get_app_context
-from common.logger import error, warning
+from common.logger import error
 from motion.routines.square_move_routine import SquareMove
 
 
@@ -73,10 +54,11 @@ class _ConfirmSquareMoveDialog(QDialog):
         line.setStyleSheet("color: rgb(200, 200, 200);")
         layout.addWidget(line)
 
-        info_widget = QWidget()
-        info_layout = QVBoxLayout(info_widget)
-        info_layout.setContentsMargins(0, 0, 0, 0)
-        info_layout.setSpacing(6)
+        form = QFormLayout()
+        form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        label_style = "font-size: 13px; color: #555;"
+        value_style = "font-size: 13px; font-weight: bold;"
 
         rows: list[tuple[str, str]] = [
             ("Side length",    f"{side_mm:.4f} mm"),
@@ -87,24 +69,14 @@ class _ConfirmSquareMoveDialog(QDialog):
             ("Pattern",        "(+X) → (+Y) → (−X) → (−Y)"),
         ]
         for label_text, value_text in rows:
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(8)
-
             lbl = QLabel(label_text + ":")
-            lbl.setStyleSheet("font-size: 13px; color: #555;")
-            lbl.setFixedWidth(110)
-            row_layout.addWidget(lbl)
-
+            lbl.setStyleSheet(label_style)
             val = QLabel(value_text)
-            val.setStyleSheet("font-size: 13px; font-weight: bold;")
+            val.setStyleSheet(value_style)
             val.setWordWrap(True)
-            row_layout.addWidget(val, 1)
+            form.addRow(lbl, val)
 
-            info_layout.addWidget(row)
-
-        layout.addWidget(info_widget)
+        layout.addLayout(form)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -131,12 +103,7 @@ class SquareMoveWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        # Set when the routine is launched so we can poll it.
         self._routine: SquareMove | None = None
-        # Threading event used to pass the operator's confirm/cancel decision
-        # into the routine's background thread.
-        self._confirm_event: threading.Event = threading.Event()
-        self._confirm_result: bool = False
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -163,14 +130,6 @@ class SquareMoveWidget(QWidget):
                 padding: 0 3px;
             }
         """
-
-        # ---- Settings (side length + repeats) ---------------------------
-        settings_group = QGroupBox("Settings")
-        settings_group.setStyleSheet(group_style)
-        settings_layout = QVBoxLayout(settings_group)
-        settings_layout.setContentsMargins(10, 8, 10, 8)
-        settings_layout.setSpacing(8)
-
         spin_style = """
             QDoubleSpinBox, QSpinBox {
                 font-size: 13px;
@@ -180,16 +139,12 @@ class SquareMoveWidget(QWidget):
             }
         """
 
-        # Side length row
-        side_row = QWidget()
-        side_row_layout = QHBoxLayout(side_row)
-        side_row_layout.setContentsMargins(0, 0, 0, 0)
-        side_row_layout.setSpacing(8)
-
-        side_label = QLabel("Side length:")
-        side_label.setStyleSheet("font-size: 13px;")
-        side_label.setFixedWidth(90)
-        side_row_layout.addWidget(side_label)
+        # ---- Settings (side length + repeats) ---------------------------
+        settings_group = QGroupBox("Settings")
+        settings_group.setStyleSheet(group_style)
+        settings_form = QFormLayout(settings_group)
+        settings_form.setContentsMargins(10, 8, 10, 8)
+        settings_form.setSpacing(8)
 
         self._side_spin = QDoubleSpinBox()
         self._side_spin.setFixedHeight(30)
@@ -201,21 +156,7 @@ class SquareMoveWidget(QWidget):
         self._side_spin.setValue(self._DEFAULT_SIDE_MM)
         self._side_spin.setStyleSheet(spin_style)
         self._side_spin.valueChanged.connect(self._update_summary)
-        side_row_layout.addWidget(self._side_spin)
-        side_row_layout.addStretch(1)
-
-        settings_layout.addWidget(side_row)
-
-        # Repeats row
-        repeats_row = QWidget()
-        repeats_row_layout = QHBoxLayout(repeats_row)
-        repeats_row_layout.setContentsMargins(0, 0, 0, 0)
-        repeats_row_layout.setSpacing(8)
-
-        repeats_label = QLabel("Repeats:")
-        repeats_label.setStyleSheet("font-size: 13px;")
-        repeats_label.setFixedWidth(90)
-        repeats_row_layout.addWidget(repeats_label)
+        settings_form.addRow("Side length:", self._side_spin)
 
         self._repeats_spin = QSpinBox()
         self._repeats_spin.setFixedHeight(30)
@@ -224,10 +165,7 @@ class SquareMoveWidget(QWidget):
         self._repeats_spin.setValue(self._DEFAULT_REPEATS)
         self._repeats_spin.setStyleSheet(spin_style)
         self._repeats_spin.valueChanged.connect(self._update_summary)
-        repeats_row_layout.addWidget(self._repeats_spin)
-        repeats_row_layout.addStretch(1)
-
-        settings_layout.addWidget(repeats_row)
+        settings_form.addRow("Repeats:", self._repeats_spin)
 
         main_layout.addWidget(settings_group)
 
@@ -235,7 +173,6 @@ class SquareMoveWidget(QWidget):
         self._summary_label = QLabel("")
         self._summary_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._summary_label.setStyleSheet("font-size: 12px; color: #444; padding: 2px 0;")
-        self._summary_label.setWordWrap(True)
         main_layout.addWidget(self._summary_label)
 
         # ---- Start button ------------------------------------------------
@@ -250,7 +187,7 @@ class SquareMoveWidget(QWidget):
                 font-size: 13px;
                 font-weight: bold;
             }
-            QPushButton:hover  { background-color: #d97a20; }
+            QPushButton:hover   { background-color: #d97a20; }
             QPushButton:pressed { background-color: #bf6a18; }
             QPushButton:disabled {
                 background-color: rgb(208, 211, 214);
@@ -283,7 +220,7 @@ class SquareMoveWidget(QWidget):
                 border-radius: 0px;
                 font-size: 13px;
             }
-            QPushButton:hover  { background-color: rgb(180, 65, 55); }
+            QPushButton:hover   { background-color: rgb(180, 65, 55); }
             QPushButton:pressed { background-color: rgb(160, 55, 45); }
         """)
         self._stop_btn.clicked.connect(self._on_stop_clicked)
@@ -371,19 +308,10 @@ class SquareMoveWidget(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        # Prepare the confirmation event before creating the routine so
-        # the callback is ready the moment the background thread calls it.
-        self._confirm_event.clear()
-        self._confirm_result = True   # operator already confirmed via dialog
-
-        def _on_confirm(side: float) -> bool:  # noqa: ARG001
-            # The UI dialog already collected confirmation; just return it.
-            return self._confirm_result
-
         try:
             self._routine = SquareMove(
                 motion=motion,
-                on_confirm=_on_confirm,
+                on_confirm=lambda _side: True,
                 side_mm=side_mm,
                 repeats=repeats,
             )
@@ -439,12 +367,9 @@ class SquareMoveWidget(QWidget):
         if self._routine is None or not self._routine.is_running:
             self._exit_running_state()
             return
-
-        # Keep the pause/resume label in sync if state changed externally.
-        if self._routine.is_paused:
-            self._pause_resume_btn.setText("Resume")
-        else:
-            self._pause_resume_btn.setText("Pause")
+        self._pause_resume_btn.setText(
+            "Resume" if self._routine.is_paused else "Pause"
+        )
 
     # ------------------------------------------------------------------
     # Public accessors

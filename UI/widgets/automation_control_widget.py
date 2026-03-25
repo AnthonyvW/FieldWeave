@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt
 from UI.widgets.automation.focus_stack_widget import FocusStackWidget
 from UI.widgets.automation.focus_stack_area_scan_widget import ZStackAreaScanWidget
 from UI.widgets.automation.square_move_widget import SquareMoveWidget
-
+from UI.widgets.automation.tree_core_widget import TreeCoreWidget
 
 class _ArrowComboBox(QComboBox):
     """QComboBox that draws a ▼ character in the drop-down button area."""
@@ -41,32 +41,6 @@ class _ArrowComboBox(QComboBox):
         painter.setFont(font)
         painter.setPen(QColor(60, 60, 60))
         painter.drawText(panel_x, 0, arrow_w, self.height(), Qt.AlignmentFlag.AlignCenter, "▼")
-
-
-# ---------------------------------------------------------------------------
-# Placeholder widget for Tree Core Imaging
-# ---------------------------------------------------------------------------
-
-class TreeCoreImagingWidget(QWidget):
-    """Placeholder widget for the Tree Core Imaging automation."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 20, 10, 20)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        placeholder = QLabel("Tree Core Imaging\n\nComing soon.")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                color: #888;
-                font-style: italic;
-            }
-        """)
-        layout.addWidget(placeholder)
-
 
 # ---------------------------------------------------------------------------
 # Automation widget
@@ -171,7 +145,7 @@ class AutomationWidget(QWidget):
         self._stack = QStackedWidget()
         self._focus_stack_widget = FocusStackWidget()
         self._area_scan_widget = ZStackAreaScanWidget()
-        self._tree_core_widget = TreeCoreImagingWidget()
+        self._tree_core_widget = TreeCoreWidget()
         self._square_move_widget = SquareMoveWidget()
 
         self._stack.addWidget(self._focus_stack_widget)   # index 0 → Focus Stacking
@@ -260,5 +234,5 @@ class AutomationWidget(QWidget):
         return self._area_scan_widget
 
     @property
-    def tree_core_widget(self) -> TreeCoreImagingWidget:
+    def tree_core_widget(self) -> TreeCoreWidget:
         return self._tree_core_widget
