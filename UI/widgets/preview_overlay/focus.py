@@ -88,12 +88,8 @@ class FocusOverlay(Overlay):
         the worker thread boundary).
         """
         arr = result.heatmap_rgb
-
-        # Wrap the numpy array in a QImage without copying — we immediately
-        # call copy() to get an independent QPixmap before *arr* may be
-        # garbage-collected.
         image = QImage(
-            arr.data,
+            arr,
             result.source_width,
             result.source_height,
             result.source_width * 3,
@@ -102,14 +98,14 @@ class FocusOverlay(Overlay):
         self._result_pixmap = QPixmap.fromImage(image.copy())
 
         s = result.scores
-        ceiling = (
-            self._vision_manager.score_ceiling
-            if self._vision_manager is not None
-            else 0.0
-        )
-        ceiling_str = f"{ceiling:.1f}" if ceiling > 0.0 else "auto"
+        ceiling_str = "auto"
+        if self._vision_manager is not None:
+            active = self._vision_manager.settings.focus.active
+            if not active.auto_ceiling:
+                ceiling_str = f"{active.score_ceiling:.1f}"
         self._scores_text = (
-            f"Focus  whole={s.whole:.2f}  center={s.center:.2f}  peak={s.peak:.2f}"
+            f"Focus ({result.method})  "
+            f"whole={s.whole:.2f}  center={s.center:.2f}  peak={s.peak:.2f}"
             f"    raw max={result.raw_score_max:.1f}  ceiling={ceiling_str}"
         )
 

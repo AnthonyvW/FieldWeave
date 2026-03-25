@@ -3,14 +3,16 @@ machine_vision_settings.py
 
 Settings page for the machine-vision pipeline.
 
-Each vision algorithm gets its own QGroupBox section.  Currently only
-Focus Detection is implemented; future algorithms (edge detection, object
-detection, etc.) should each get their own _build_*_section() method and a
-corresponding group box added in _build_ui().
-
-Changes are applied to the manager immediately on every widget interaction
-(live preview).  The Save button persists them to disk via
-MachineVisionManager.save_settings().
+Design
+------
+- One QGroupBox per vision algorithm.  Currently: Focus Detection.
+- Within Focus Detection a method dropdown (Tenengrad / Laplacian) swaps
+  the visible parameter group so each method has its own tunable controls.
+- Modified fields turn orange exactly like CameraSettingsWidget does.
+- get_group_names() returns the top-level group names so SettingsDialog can
+  add them as sidebar sub-items.
+- Changes are applied to the manager live on every widget interaction.
+  The Save button persists them to disk.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
@@ -29,22 +32,274 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSlider,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from common.app_context import get_app_context
 from common.logger import info, error
-from machine_vision.machine_vision_config import FocusDetectionSettings, MachineVisionSettings
+from machine_vision.machine_vision_config import (
+    FocusDetectionSettings,
+    LaplacianSettings,
+    MachineVisionSettings,
+    TenengradSettings,
+    FOCUS_METHOD_TENENGRAD,
+    FOCUS_METHOD_LAPLACIAN,
+)
 
+_ORANGE = "#FFA500"
+_GREY = "#aaaaaa"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_float_row(
+    key: str,
+    widget_store: dict[str, QWidget],
+    min_val: float,
+    max_val: float,
+    decimals: int,
+    step: float,
+    tooltip: str,
+) -> tuple[QWidget, QDoubleSpinBox, QSlider]:
+    """
+    Build a slider + spinbox pair.
+
+    Registers '<key>' (spinbox) and '<key>_slider' (slider) in widget_store.
+    Returns (container, spinbox, slider).
+    """
+    container = QWidget()
+    row = QHBoxLayout(container)
+    row.setContentsMargins(0, 0, 0, 0)
+
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setMinimum(0)
+    slider.setMaximum(1000)
+    slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    slider.setToolTip(tooltip)
+
+    spin = QDoubleSpinBox()
+    spin.setMinimum(min_val)
+    spin.setMaximum(max_val)
+    spin.setDecimals(decimals)
+    spin.setSingleStep(step)
+    spin.setFixedWidth(90)
+    spin.setToolTip(tooltip)
+
+    span = max_val - min_val
+
+    def _to_slider(val: float) -> int:
+        return int((val - min_val) / span * 1000) if span > 0 else 0
+
+    def _to_spin(pos: int) -> float:
+        return min_val + (pos / 1000.0) * span
+
+    # Mutual sync — the change handlers supplied by the caller are connected
+    # after this function returns; these closures handle only the widget sync.
+    spin.valueChanged.connect(lambda v: (slider.blockSignals(True), slider.setValue(_to_slider(v)), slider.blockSignals(False)))
+    slider.valueChanged.connect(lambda p: (spin.blockSignals(True), spin.setValue(_to_spin(p)), spin.blockSignals(False)))
+
+    row.addWidget(slider)
+    row.addWidget(spin)
+
+    widget_store[key] = spin
+    widget_store[f"{key}_slider"] = slider
+    return container, spin, slider
+
+
+def _make_ceiling_row(
+    widget_store: dict[str, QWidget],
+    tooltip: str,
+) -> QWidget:
+    """
+    Build the score ceiling row: a spinbox, an 'Auto' checkbox, and a
+    'Reset' button.  When Auto is checked the spinbox is disabled.
+    """
+    container = QWidget()
+    row = QHBoxLayout(container)
+    row.setContentsMargins(0, 0, 0, 0)
+
+    spin = QDoubleSpinBox()
+    spin.setMinimum(0.0)
+    spin.setMaximum(1_000_000.0)
+    spin.setDecimals(1)
+    spin.setSingleStep(10.0)
+    spin.setFixedWidth(110)
+    spin.setToolTip(tooltip)
+
+    auto_check = QCheckBox("Auto")
+    auto_check.setToolTip("When checked, normalise each frame independently.")
+
+    reset_btn = QPushButton("Reset")
+    reset_btn.setMaximumWidth(70)
+    reset_btn.setToolTip("Reset ceiling to default (15.0).")
+    reset_btn.clicked.connect(lambda: spin.setValue(15.0))
+
+    auto_check.checkStateChanged.connect(
+        lambda s: spin.setEnabled(s != Qt.CheckState.Checked.value)
+    )
+
+    row.addWidget(spin)
+    row.addWidget(auto_check)
+    row.addWidget(reset_btn)
+    row.addStretch()
+
+    widget_store["score_ceiling"] = spin
+    widget_store["auto_ceiling"] = auto_check
+    return container
+
+
+# ---------------------------------------------------------------------------
+# Method-specific parameter panels
+# ---------------------------------------------------------------------------
+
+class _TenengradPanel(QWidget):
+    """Parameter controls for the Tenengrad method."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._w: dict[str, QWidget] = {}
+        self._build()
+
+    def _build(self) -> None:
+        form = QFormLayout(self)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # kernel_size — dropdown (only valid values)
+        kernel_combo = QComboBox()
+        for k in (1, 3, 5, 7):
+            kernel_combo.addItem(str(k), k)
+        kernel_combo.setFixedWidth(90)
+        kernel_combo.setToolTip(
+            "Sobel kernel size.  Larger kernels are less sensitive to noise "
+            "but reduce spatial resolution of the edge response."
+        )
+        form.addRow("Kernel size:", kernel_combo)
+        self._w["kernel_size"] = kernel_combo
+
+        # radius
+        container, spin, slider = _make_float_row(
+            "radius", self._w, 0.0, 32.0, 1, 0.5,
+            "Gaussian/box blur radius (px) applied after gradient magnitude.  0 = no blur.",
+        )
+        form.addRow("Blur radius:", container)
+
+        # threshold
+        container, spin, slider = _make_float_row(
+            "threshold", self._w, 0.0, 500.0, 1, 1.0,
+            "Gradient values below this level are zeroed out.  0 = disabled.",
+        )
+        form.addRow("Threshold:", container)
+
+        # overlay_alpha
+        container, spin, slider = _make_float_row(
+            "overlay_alpha", self._w, 0.0, 1.0, 2, 0.05,
+            "Heatmap blend weight over the camera image.  0 = image only; 1 = heatmap only.",
+        )
+        form.addRow("Overlay alpha:", container)
+
+        # score_ceiling
+        ceiling_container = _make_ceiling_row(
+            self._w,
+            "Fixed ceiling used to normalise the score map across frames.\n"
+            "Focus sharply, note the 'raw max' value, enter it here.\n"
+            "Check Auto to normalise each frame independently.",
+        )
+        form.addRow("Score ceiling:", ceiling_container)
+
+        # half_resolution
+        half_check = QCheckBox()
+        half_check.setToolTip("Process at half resolution for speed; result upscaled before display.")
+        form.addRow("Half resolution:", half_check)
+        self._w["half_resolution"] = half_check
+
+    @property
+    def widgets(self) -> dict[str, QWidget]:
+        return self._w
+
+
+class _LaplacianPanel(QWidget):
+    """Parameter controls for the Laplacian method."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._w: dict[str, QWidget] = {}
+        self._build()
+
+    def _build(self) -> None:
+        form = QFormLayout(self)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # window_size
+        window_spin = QSpinBox()
+        window_spin.setMinimum(3)
+        window_spin.setMaximum(101)
+        window_spin.setSingleStep(2)
+        window_spin.setFixedWidth(90)
+        window_spin.setToolTip(
+            "Side length (px) of the local variance window.  Must be odd.\n"
+            "Larger values integrate more context but reduce heatmap resolution."
+        )
+        form.addRow("Window size:", window_spin)
+        self._w["window_size"] = window_spin
+
+        # radius
+        container, spin, slider = _make_float_row(
+            "radius", self._w, 0.0, 32.0, 1, 0.5,
+            "Gaussian/box blur radius (px) applied after the variance step.  0 = no blur.",
+        )
+        form.addRow("Blur radius:", container)
+
+        # threshold
+        container, spin, slider = _make_float_row(
+            "threshold", self._w, 0.0, 500.0, 1, 1.0,
+            "Variance values below this level are zeroed out.  0 = disabled.",
+        )
+        form.addRow("Threshold:", container)
+
+        # overlay_alpha
+        container, spin, slider = _make_float_row(
+            "overlay_alpha", self._w, 0.0, 1.0, 2, 0.05,
+            "Heatmap blend weight over the camera image.  0 = image only; 1 = heatmap only.",
+        )
+        form.addRow("Overlay alpha:", container)
+
+        # score_ceiling
+        ceiling_container = _make_ceiling_row(
+            self._w,
+            "Fixed ceiling used to normalise the score map across frames.\n"
+            "Focus sharply, note the 'raw max' value, enter it here.\n"
+            "Check Auto to normalise each frame independently.",
+        )
+        form.addRow("Score ceiling:", ceiling_container)
+
+        # half_resolution
+        half_check = QCheckBox()
+        half_check.setToolTip("Process at half resolution for speed; result upscaled before display.")
+        form.addRow("Half resolution:", half_check)
+        self._w["half_resolution"] = half_check
+
+    @property
+    def widgets(self) -> dict[str, QWidget]:
+        return self._w
+
+
+# ---------------------------------------------------------------------------
+# Main settings widget
+# ---------------------------------------------------------------------------
 
 class MachineVisionSettingsWidget(QWidget):
     """
     Full settings page for all machine-vision algorithms.
 
-    Intended to be embedded in the application's settings dialog in the same
-    way as CameraSettingsWidget.
+    Embedded in the application settings dialog.
     """
+
+    # Group names exposed for SettingsDialog sidebar sub-items.
+    _GROUP_NAMES = ["Focus Detection"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -52,17 +307,22 @@ class MachineVisionSettingsWidget(QWidget):
         self._ctx = get_app_context()
         self._mv = self._ctx.machine_vision
 
-        # Track unsaved state so the Save button can be enabled/disabled.
         self._has_unsaved_changes: bool = False
 
-        # Widget references — populated in _build_focus_section().
-        self._focus_widgets: dict[str, QWidget] = {}
+        # Saved baseline values for orange-on-modify tracking.
+        # Key: "<section>.<field>"  e.g. "laplacian.radius"
+        self._saved_values: dict[str, object] = {}
+
+        # Registered group boxes for scroll-to support.
+        self._group_boxes: dict[str, QGroupBox] = {}
+
+        self._tenengrad_panel = _TenengradPanel()
+        self._laplacian_panel = _LaplacianPanel()
 
         self._build_ui()
         self._populate_from_settings(self._mv.settings)
+        self._connect_panel_signals()
 
-        # Reflect any live changes made by other code (e.g. from the overlay
-        # legend "set ceiling" button that may be added later).
         self._mv.settings_changed.connect(self._on_settings_changed_externally)
 
     # ------------------------------------------------------------------
@@ -81,22 +341,24 @@ class MachineVisionSettingsWidget(QWidget):
         content = QWidget()
         content.setObjectName("MachineVisionSettingsContent")
         content.setStyleSheet("QWidget#MachineVisionSettingsContent { background: white; }")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(10, 10, 10, 10)
-        content_layout.setSpacing(10)
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(10, 10, 10, 10)
+        cl.setSpacing(10)
 
         title = QLabel("Machine Vision")
         title.setStyleSheet("font-size: 24px; font-weight: bold; color: #5f6368;")
-        content_layout.addWidget(title)
+        cl.addWidget(title)
 
-        # ---- Algorithm sections ----------------------------------------
-        # Add one group box per vision algorithm.  Future algorithms slot in
-        # here as additional _build_*_section() calls.
-        content_layout.addWidget(self._build_focus_section())
+        focus_group = self._build_focus_group()
+        cl.addWidget(focus_group)
+        self._group_boxes["Focus Detection"] = focus_group
 
-        content_layout.addStretch()
+        # Register group boxes with parent dialog for scroll-to support.
+        if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
+            self.parent_dialog.register_group_box("Machine Vision", "Focus Detection", focus_group)
 
-        # ---- Save button -----------------------------------------------
+        cl.addStretch()
+
         btn_row = QHBoxLayout()
         self._save_btn = QPushButton("Save")
         self._save_btn.setEnabled(False)
@@ -104,277 +366,270 @@ class MachineVisionSettingsWidget(QWidget):
         self._save_btn.clicked.connect(self._on_save)
         btn_row.addWidget(self._save_btn)
         btn_row.addStretch()
-        content_layout.addLayout(btn_row)
+        cl.addLayout(btn_row)
 
         scroll.setWidget(content)
         root.addWidget(scroll)
 
-        # Connect parent dialog save button if available.
         if self.parent_dialog and hasattr(self.parent_dialog, "save_btn"):
             self.parent_dialog.save_btn.clicked.connect(self._on_save)
 
-    def _build_focus_section(self) -> QGroupBox:
-        """Build the Focus Detection settings group box."""
+    def _build_focus_group(self) -> QGroupBox:
         group = QGroupBox("Focus Detection")
-        form = QFormLayout(group)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        vbox = QVBoxLayout(group)
 
-        # window_size — odd integer spinbox
-        window_spin = QSpinBox()
-        window_spin.setMinimum(3)
-        window_spin.setMaximum(101)
-        window_spin.setSingleStep(2)       # keep it odd
-        window_spin.setFixedWidth(90)
-        window_spin.setToolTip(
-            "Side length (px) of the local variance window.  Must be odd.\n"
-            "Larger values integrate more spatial context but reduce heatmap resolution."
+        # Method selector
+        method_row = QFormLayout()
+        method_row.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self._method_combo = QComboBox()
+        self._method_combo.addItem("Laplacian", FOCUS_METHOD_LAPLACIAN)
+        self._method_combo.addItem("Tenengrad", FOCUS_METHOD_TENENGRAD)
+        self._method_combo.setFixedWidth(160)
+        self._method_combo.setToolTip(
+            "Laplacian: local variance of the Laplacian — good general-purpose measure.\n"
+            "Tenengrad: Sobel gradient magnitude — faster, slightly noisier."
         )
-        window_spin.valueChanged.connect(self._on_window_size_changed)
-        form.addRow("Window size:", window_spin)
-        self._focus_widgets["window_size"] = window_spin
+        method_row.addRow("Method:", self._method_combo)
+        vbox.addLayout(method_row)
 
-        # radius — float slider + spinbox
-        form.addRow("Blur radius:", self._build_float_row(
-            key="radius",
-            min_val=0.0, max_val=32.0, decimals=1, step=0.5,
-            tooltip=(
-                "Gaussian/box blur radius (px) applied after the variance step.\n"
-                "Spreads the focus signal to neighbouring regions.  0 = no blur."
-            ),
-            on_change=self._on_radius_changed,
-        ))
+        # Stacked panels — one per method
+        self._method_stack = QStackedWidget()
+        self._method_stack.addWidget(self._laplacian_panel)   # index 0 = Laplacian
+        self._method_stack.addWidget(self._tenengrad_panel)   # index 1 = Tenengrad
 
-        # threshold — float slider + spinbox
-        form.addRow("Threshold:", self._build_float_row(
-            key="threshold",
-            min_val=0.0, max_val=500.0, decimals=1, step=1.0,
-            tooltip=(
-                "Raw variance values below this level are zeroed out before\n"
-                "blurring, suppressing flat / textureless regions.  0 = disabled."
-            ),
-            on_change=self._on_threshold_changed,
-        ))
+        vbox.addWidget(self._method_stack)
 
-        # overlay_alpha — float slider + spinbox
-        form.addRow("Overlay alpha:", self._build_float_row(
-            key="overlay_alpha",
-            min_val=0.0, max_val=1.0, decimals=2, step=0.05,
-            tooltip=(
-                "Blend weight of the focus heatmap over the camera image.\n"
-                "0.0 = camera image only;  1.0 = heatmap only."
-            ),
-            on_change=self._on_alpha_changed,
-        ))
-
-        # score_ceiling — float spinbox (no slider — value range is unbounded)
-        ceiling_row = QHBoxLayout()
-        ceiling_spin = QDoubleSpinBox()
-        ceiling_spin.setMinimum(0.0)
-        ceiling_spin.setMaximum(1_000_000.0)
-        ceiling_spin.setDecimals(1)
-        ceiling_spin.setSingleStep(10.0)
-        ceiling_spin.setFixedWidth(110)
-        ceiling_spin.setSpecialValueText("Auto (per-frame)")   # shown when value == 0
-        ceiling_spin.setToolTip(
-            "Fixed ceiling used to normalise the raw score map to [0, 1].\n"
-            "\n"
-            "When > 0, the same value is applied to every frame so the\n"
-            "heatmap brightness is stable across a focus sweep.\n"
-            "\n"
-            "Set to 0 to use per-frame normalisation (always fills the full\n"
-            "colour range, but prevents meaningful cross-frame comparison).\n"
-            "\n"
-            "Tip: focus sharply, read the 'raw max' value shown in the overlay\n"
-            "legend, then enter that value here."
-        )
-        ceiling_spin.valueChanged.connect(self._on_ceiling_changed)
-        ceiling_row.addWidget(ceiling_spin)
-
-        reset_ceiling_btn = QPushButton("Reset to auto")
-        reset_ceiling_btn.setMaximumWidth(110)
-        reset_ceiling_btn.setToolTip("Set score ceiling back to 0 (per-frame normalisation).")
-        reset_ceiling_btn.clicked.connect(lambda: ceiling_spin.setValue(0.0))
-        ceiling_row.addWidget(reset_ceiling_btn)
-        ceiling_row.addStretch()
-
-        ceiling_container = QWidget()
-        ceiling_container.setLayout(ceiling_row)
-        form.addRow("Score ceiling:", ceiling_container)
-        self._focus_widgets["score_ceiling"] = ceiling_spin
-
-        # half_resolution — checkbox
-        half_res_check = QCheckBox()
-        half_res_check.setToolTip(
-            "Process at half the input resolution for speed.\n"
-            "The result is upscaled back to full resolution before display."
-        )
-        half_res_check.checkStateChanged.connect(self._on_half_resolution_changed)
-        form.addRow("Half resolution:", half_res_check)
-        self._focus_widgets["half_resolution"] = half_res_check
+        self._method_combo.currentIndexChanged.connect(self._on_method_combo_changed)
 
         return group
 
-    def _build_float_row(
-        self,
-        key: str,
-        min_val: float,
-        max_val: float,
-        decimals: int,
-        step: float,
-        tooltip: str,
-        on_change,
-    ) -> QWidget:
-        """
-        Build a linked horizontal slider + double spinbox for a float parameter.
+    # ------------------------------------------------------------------
+    # Signal connections for parameter panels
+    # ------------------------------------------------------------------
 
-        The slider maps [min_val, max_val] onto [0, 1000] integer steps.
-        """
-        container = QWidget()
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
+    def _connect_panel_signals(self) -> None:
+        """Connect every widget in each panel to its change handler."""
+        self._connect_tenengrad_signals()
+        self._connect_laplacian_signals()
 
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setMinimum(0)
-        slider.setMaximum(1000)
-        slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    def _connect_tenengrad_signals(self) -> None:
+        w = self._tenengrad_panel.widgets
+        w["kernel_size"].currentIndexChanged.connect(
+            lambda _: self._on_field_changed("tenengrad", "kernel_size", w["kernel_size"].currentData())
+        )
+        w["radius"].valueChanged.connect(
+            lambda v: self._on_field_changed("tenengrad", "radius", v)
+        )
+        w["threshold"].valueChanged.connect(
+            lambda v: self._on_field_changed("tenengrad", "threshold", v)
+        )
+        w["overlay_alpha"].valueChanged.connect(
+            lambda v: self._on_field_changed("tenengrad", "overlay_alpha", v)
+        )
+        w["score_ceiling"].valueChanged.connect(
+            lambda v: self._on_field_changed("tenengrad", "score_ceiling", v)
+        )
+        w["auto_ceiling"].checkStateChanged.connect(
+            lambda s: self._on_field_changed("tenengrad", "auto_ceiling", s == Qt.CheckState.Checked.value)
+        )
+        w["half_resolution"].checkStateChanged.connect(
+            lambda s: self._on_field_changed("tenengrad", "half_resolution", s == Qt.CheckState.Checked.value)
+        )
 
-        spin = QDoubleSpinBox()
-        spin.setMinimum(min_val)
-        spin.setMaximum(max_val)
-        spin.setDecimals(decimals)
-        spin.setSingleStep(step)
-        spin.setFixedWidth(90)
-        spin.setToolTip(tooltip)
-        slider.setToolTip(tooltip)
-
-        span = max_val - min_val
-
-        def _spin_to_slider(val: float) -> int:
-            return int((val - min_val) / span * 1000) if span > 0 else 0
-
-        def _slider_to_spin(pos: int) -> float:
-            return min_val + (pos / 1000.0) * span
-
-        def _on_spin_changed(val: float) -> None:
-            slider.blockSignals(True)
-            slider.setValue(_spin_to_slider(val))
-            slider.blockSignals(False)
-            on_change(val)
-
-        def _on_slider_changed(pos: int) -> None:
-            val = _slider_to_spin(pos)
-            spin.blockSignals(True)
-            spin.setValue(val)
-            spin.blockSignals(False)
-            on_change(val)
-
-        spin.valueChanged.connect(_on_spin_changed)
-        slider.valueChanged.connect(_on_slider_changed)
-
-        row.addWidget(slider)
-        row.addWidget(spin)
-
-        # Store both so _populate_from_settings can set them.
-        self._focus_widgets[f"{key}_slider"] = slider
-        self._focus_widgets[key] = spin
-
-        return container
+    def _connect_laplacian_signals(self) -> None:
+        w = self._laplacian_panel.widgets
+        w["window_size"].valueChanged.connect(self._on_window_size_changed)
+        w["radius"].valueChanged.connect(
+            lambda v: self._on_field_changed("laplacian", "radius", v)
+        )
+        w["threshold"].valueChanged.connect(
+            lambda v: self._on_field_changed("laplacian", "threshold", v)
+        )
+        w["overlay_alpha"].valueChanged.connect(
+            lambda v: self._on_field_changed("laplacian", "overlay_alpha", v)
+        )
+        w["score_ceiling"].valueChanged.connect(
+            lambda v: self._on_field_changed("laplacian", "score_ceiling", v)
+        )
+        w["auto_ceiling"].checkStateChanged.connect(
+            lambda s: self._on_field_changed("laplacian", "auto_ceiling", s == Qt.CheckState.Checked.value)
+        )
+        w["half_resolution"].checkStateChanged.connect(
+            lambda s: self._on_field_changed("laplacian", "half_resolution", s == Qt.CheckState.Checked.value)
+        )
 
     # ------------------------------------------------------------------
-    # Populate widgets from a settings object
+    # Populate from settings
     # ------------------------------------------------------------------
 
     def _populate_from_settings(self, settings: MachineVisionSettings) -> None:
-        """Push all values from *settings* into the widgets without triggering saves."""
-        self._block_focus_signals(True)
+        """Push all values into widgets without triggering saves."""
+        self._block_all_signals(True)
         try:
             f = settings.focus
 
-            self._set_spin(self._focus_widgets.get("window_size"), f.window_size)
+            # Method combo
+            idx = self._method_combo.findData(f.method)
+            if idx >= 0:
+                self._method_combo.setCurrentIndex(idx)
+            self._method_stack.setCurrentIndex(
+                0 if f.method == FOCUS_METHOD_LAPLACIAN else 1
+            )
 
-            self._set_float_row("radius", f.radius, 0.0, 32.0)
-            self._set_float_row("threshold", f.threshold, 0.0, 500.0)
-            self._set_float_row("overlay_alpha", f.overlay_alpha, 0.0, 1.0)
-
-            self._set_spin(self._focus_widgets.get("score_ceiling"), f.score_ceiling)
-
-            check = self._focus_widgets.get("half_resolution")
-            if isinstance(check, QCheckBox):
-                check.setChecked(f.half_resolution)
+            self._populate_tenengrad(f.tenengrad)
+            self._populate_laplacian(f.laplacian)
         finally:
-            self._block_focus_signals(False)
+            self._block_all_signals(False)
 
-        # After loading, nothing is "unsaved" relative to disk.
+        self._snapshot_saved_values(settings)
         self._set_unsaved(False)
 
-    def _set_float_row(self, key: str, value: float, min_val: float, max_val: float) -> None:
-        spin = self._focus_widgets.get(key)
-        slider = self._focus_widgets.get(f"{key}_slider")
+    def _populate_tenengrad(self, t: TenengradSettings) -> None:
+        w = self._tenengrad_panel.widgets
+        idx = w["kernel_size"].findData(t.kernel_size)
+        if idx >= 0:
+            w["kernel_size"].setCurrentIndex(idx)
+        self._set_float_row(w, "radius", t.radius, 0.0, 32.0)
+        self._set_float_row(w, "threshold", t.threshold, 0.0, 500.0)
+        self._set_float_row(w, "overlay_alpha", t.overlay_alpha, 0.0, 1.0)
+        w["score_ceiling"].setValue(t.score_ceiling)
+        w["score_ceiling"].setEnabled(not t.auto_ceiling)
+        w["auto_ceiling"].setChecked(t.auto_ceiling)
+        w["half_resolution"].setChecked(t.half_resolution)
+
+    def _populate_laplacian(self, lap: LaplacianSettings) -> None:
+        w = self._laplacian_panel.widgets
+        w["window_size"].setValue(lap.window_size)
+        self._set_float_row(w, "radius", lap.radius, 0.0, 32.0)
+        self._set_float_row(w, "threshold", lap.threshold, 0.0, 500.0)
+        self._set_float_row(w, "overlay_alpha", lap.overlay_alpha, 0.0, 1.0)
+        w["score_ceiling"].setValue(lap.score_ceiling)
+        w["score_ceiling"].setEnabled(not lap.auto_ceiling)
+        w["auto_ceiling"].setChecked(lap.auto_ceiling)
+        w["half_resolution"].setChecked(lap.half_resolution)
+
+    def _set_float_row(
+        self,
+        w: dict[str, QWidget],
+        key: str,
+        value: float,
+        min_val: float,
+        max_val: float,
+    ) -> None:
+        spin = w.get(key)
+        slider = w.get(f"{key}_slider")
+        if isinstance(spin, QDoubleSpinBox):
+            spin.setValue(value)
         span = max_val - min_val
-        slider_pos = int((value - min_val) / span * 1000) if span > 0 else 0
-        self._set_spin(spin, value)
-        if isinstance(slider, QSlider):
-            slider.setValue(slider_pos)
-
-    def _set_spin(self, widget: QWidget | None, value: float | int) -> None:
-        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
-            widget.setValue(value)
-
-    def _block_focus_signals(self, block: bool) -> None:
-        for w in self._focus_widgets.values():
-            w.blockSignals(block)
+        if isinstance(slider, QSlider) and span > 0:
+            slider.setValue(int((value - min_val) / span * 1000))
 
     # ------------------------------------------------------------------
-    # Widget change handlers — apply live, mark unsaved
+    # Saved-value snapshot and orange tracking
     # ------------------------------------------------------------------
 
-    def _on_window_size_changed(self, value: int) -> None:
-        # Snap to nearest odd number.
-        if value % 2 == 0:
-            spin = self._focus_widgets.get("window_size")
-            if isinstance(spin, QSpinBox):
-                spin.blockSignals(True)
-                spin.setValue(value + 1)
-                spin.blockSignals(False)
-            value += 1
-        self._apply_focus_field("window_size", value)
+    def _snapshot_saved_values(self, settings: MachineVisionSettings) -> None:
+        """Record current values as the saved baseline for orange tracking."""
+        f = settings.focus
+        self._saved_values = {
+            "method": f.method,
+            "tenengrad.kernel_size": f.tenengrad.kernel_size,
+            "tenengrad.radius": f.tenengrad.radius,
+            "tenengrad.threshold": f.tenengrad.threshold,
+            "tenengrad.half_resolution": f.tenengrad.half_resolution,
+            "tenengrad.overlay_alpha": f.tenengrad.overlay_alpha,
+            "tenengrad.score_ceiling": f.tenengrad.score_ceiling,
+            "tenengrad.auto_ceiling": f.tenengrad.auto_ceiling,
+            "laplacian.window_size": f.laplacian.window_size,
+            "laplacian.radius": f.laplacian.radius,
+            "laplacian.threshold": f.laplacian.threshold,
+            "laplacian.half_resolution": f.laplacian.half_resolution,
+            "laplacian.overlay_alpha": f.laplacian.overlay_alpha,
+            "laplacian.score_ceiling": f.laplacian.score_ceiling,
+            "laplacian.auto_ceiling": f.laplacian.auto_ceiling,
+        }
 
-    def _on_radius_changed(self, value: float) -> None:
-        self._apply_focus_field("radius", value)
+    def _check_modified(self, key: str, current_value: object) -> bool:
+        saved = self._saved_values.get(key)
+        if isinstance(saved, float) and isinstance(current_value, float):
+            return abs(saved - current_value) > 1e-9
+        return saved != current_value
 
-    def _on_threshold_changed(self, value: float) -> None:
-        self._apply_focus_field("threshold", value)
+    def _apply_orange(self, widget: QWidget, orange: bool) -> None:
+        """Apply or clear orange styling on a single leaf widget."""
+        color = _ORANGE if orange else ""
+        if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
+            widget.setStyleSheet(f"color: {color};" if orange else "")
+        elif isinstance(widget, QCheckBox):
+            widget.setStyleSheet(f"QCheckBox {{ color: {color}; }}" if orange else "")
+        elif isinstance(widget, QComboBox):
+            widget.setStyleSheet(f"QComboBox {{ color: {color}; }}" if orange else "")
+        elif isinstance(widget, QSlider) and orange:
+            widget.setStyleSheet("""
+                QSlider::handle:horizontal {
+                    background: #FFA500;
+                    border: 1px solid #FFA500;
+                    width: 18px;
+                    margin: -2px 0;
+                    border-radius: 3px;
+                }
+            """)
+        elif isinstance(widget, QSlider):
+            widget.setStyleSheet("")
 
-    def _on_alpha_changed(self, value: float) -> None:
-        self._apply_focus_field("overlay_alpha", value)
+    def _mark_field(self, section_field: str, widget_key: str, panel_widgets: dict[str, QWidget], current_value: object) -> None:
+        """Check if field is modified and orange the relevant widget(s)."""
+        orange = self._check_modified(section_field, current_value)
+        w = panel_widgets.get(widget_key)
+        if w:
+            self._apply_orange(w, orange)
+        slider = panel_widgets.get(f"{widget_key}_slider")
+        if slider:
+            self._apply_orange(slider, orange)
 
-    def _on_ceiling_changed(self, value: float) -> None:
-        self._apply_focus_field("score_ceiling", value)
+    # ------------------------------------------------------------------
+    # Change handlers
+    # ------------------------------------------------------------------
 
     @Slot(int)
-    def _on_half_resolution_changed(self, state: int) -> None:
-        self._apply_focus_field("half_resolution", state == Qt.CheckState.Checked.value)
-
-    def _apply_focus_field(self, field: str, value) -> None:
-        """Copy current settings, update one focus field, apply live."""
+    def _on_method_combo_changed(self, index: int) -> None:
+        method = self._method_combo.itemData(index)
+        self._method_stack.setCurrentIndex(0 if method == FOCUS_METHOD_LAPLACIAN else 1)
         s = self._mv._copy_settings()
-        setattr(s.focus, field, value)
+        s.focus.method = method
         self._mv.apply_settings(s)
+        orange = self._check_modified("method", method)
+        self._apply_orange(self._method_combo, orange)
+        self._set_unsaved(True)
+
+    def _on_window_size_changed(self, value: int) -> None:
+        # Snap to nearest odd.
+        if value % 2 == 0:
+            w = self._laplacian_panel.widgets["window_size"]
+            w.blockSignals(True)
+            w.setValue(value + 1)
+            w.blockSignals(False)
+            value += 1
+        self._on_field_changed("laplacian", "window_size", value)
+
+    def _on_field_changed(self, section: str, field: str, value: object) -> None:
+        """Apply the changed field to the manager and update orange state."""
+        s = self._mv._copy_settings()
+        target = s.focus.tenengrad if section == "tenengrad" else s.focus.laplacian
+        setattr(target, field, value)
+        self._mv.apply_settings(s)
+
+        panel = self._tenengrad_panel if section == "tenengrad" else self._laplacian_panel
+        self._mark_field(f"{section}.{field}", field, panel.widgets, value)
         self._set_unsaved(True)
 
     # ------------------------------------------------------------------
-    # External settings change (e.g. from another widget or future API)
+    # External settings change
     # ------------------------------------------------------------------
 
     @Slot()
     def _on_settings_changed_externally(self) -> None:
-        """
-        Re-populate widgets when something outside this page changes the
-        manager's settings (e.g. a future "capture ceiling" button on the
-        focus overlay legend).
-        """
         self._populate_from_settings(self._mv.settings)
-        # Re-mark as unsaved since the new values haven't been saved yet.
         self._set_unsaved(True)
 
     # ------------------------------------------------------------------
@@ -385,17 +640,25 @@ class MachineVisionSettingsWidget(QWidget):
     def _on_save(self) -> None:
         try:
             self._mv.save_settings()
+            self._snapshot_saved_values(self._mv.settings)
+            self._clear_all_orange()
             self._set_unsaved(False)
             if self._ctx.toast:
                 self._ctx.toast.success("Machine vision settings saved", duration=2000)
-            info("Machine vision settings saved from settings page")
+            info("Machine vision settings saved")
         except Exception as exc:
             error(f"Failed to save machine vision settings: {exc}")
             if self._ctx.toast:
                 self._ctx.toast.error(f"Save failed: {exc}", duration=3000)
 
+    def _clear_all_orange(self) -> None:
+        for panel in (self._tenengrad_panel, self._laplacian_panel):
+            for w in panel.widgets.values():
+                self._apply_orange(w, False)
+        self._apply_orange(self._method_combo, False)
+
     # ------------------------------------------------------------------
-    # Unsaved state helpers
+    # Unsaved state
     # ------------------------------------------------------------------
 
     def _set_unsaved(self, has_changes: bool) -> None:
@@ -409,6 +672,24 @@ class MachineVisionSettingsWidget(QWidget):
 
     def has_unsaved_changes(self) -> bool:
         return self._has_unsaved_changes
+
+    # ------------------------------------------------------------------
+    # Sidebar sub-item support
+    # ------------------------------------------------------------------
+
+    def get_group_names(self) -> list[str]:
+        """Return group names for SettingsDialog sidebar sub-items."""
+        return list(self._GROUP_NAMES)
+
+    # ------------------------------------------------------------------
+    # Signal blocking helpers
+    # ------------------------------------------------------------------
+
+    def _block_all_signals(self, block: bool) -> None:
+        self._method_combo.blockSignals(block)
+        for panel in (self._tenengrad_panel, self._laplacian_panel):
+            for w in panel.widgets.values():
+                w.blockSignals(block)
 
 
 def machine_vision_page(parent_dialog=None) -> QWidget:
