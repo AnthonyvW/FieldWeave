@@ -55,9 +55,8 @@ if __name__ == "__main__":
     win.show()
     
     exit_code = app.exec()
-    
-    # Cleanup
+
+    # Cleanup is handled by MainWindow.closeEvent.
     info("FieldWeave application shutting down")
-    ctx.cleanup()
-    
+
     sys.exit(exit_code)

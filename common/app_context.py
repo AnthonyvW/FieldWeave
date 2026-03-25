@@ -44,6 +44,7 @@ class AppContext:
         self._main_window = None
         self._motion_manager: MotionControllerManager | None = None
         self._initialized = True
+        self._cleaned_up: bool = False
 
         # Load settings
         self._load_settings()
@@ -223,12 +224,17 @@ class AppContext:
     # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
-        """Cleanup all resources."""
-        if self._camera_manager:
-            self._camera_manager.cleanup()
+        """Cleanup all resources. Safe to call more than once."""
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
+
 
         if self._motion_manager:
             self._motion_manager.shutdown()
+            
+        if self._camera_manager:
+            self._camera_manager.cleanup()
 
         self._camera_manager = None
         self._motion_manager = None
