@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QScrollArea,
-    QFrame
+    QFrame,
 )
-from UI.style import RIGHT_SIDEBAR_WIDTH
+from UI.style import RIGHT_SIDEBAR_WIDTH, OUTER_MARGIN
 from UI.tabs.base_tab import CameraWithSidebarPage
 
 from UI.widgets.camera_preview import CameraPreview
@@ -15,6 +16,7 @@ from UI.widgets.automation_control_widget import AutomationWidget
 from UI.widgets.navigation_widget import NavigationWidget
 
 from common.app_context import open_settings
+
 
 class ProjectTab(CameraWithSidebarPage):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -46,12 +48,27 @@ class ProjectTab(CameraWithSidebarPage):
         # End Widgets
 
         content_layout.addStretch(1)
-        sidebar_layout.addWidget(self._wrap_scroll(content), 1)
+
+        scroll = self._wrap_scroll(content, sidebar_container)
+        sidebar_layout.addWidget(scroll, 1)
         return sidebar_container
-    
-    def _wrap_scroll(self, widget: QWidget) -> QScrollArea:
+
+    def _wrap_scroll(self, widget: QWidget, sidebar: QWidget) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(widget)
+
+        scrollbar_width = scroll.style().pixelMetric(
+            scroll.style().PixelMetric.PM_ScrollBarExtent
+        )
+
+        def _on_range_changed(min_val: int, max_val: int) -> None:
+            needed = max_val > min_val
+            sidebar.setFixedWidth(RIGHT_SIDEBAR_WIDTH + (scrollbar_width if needed else 0))
+            self.set_sidebar_flush_right(needed)
+
+        scroll.verticalScrollBar().rangeChanged.connect(_on_range_changed)
         return scroll
