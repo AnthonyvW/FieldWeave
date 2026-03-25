@@ -5,7 +5,7 @@ Provides plugin architecture for multiple camera types and manages frame acquisi
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Callable, Any
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot, Qt
 
@@ -396,6 +396,38 @@ class CameraManager(QObject):
         """ Get the most recently captured still frame buffer. """
         return self._current_still_buffer
     
+    def capture_still(
+        self,
+        resolution_index: int | None = None,
+        timeout_ms: int = 5000,
+        on_captured: Callable[[], None] | None = None,
+        on_complete: Callable[[np.ndarray | None], None] | None = None,
+    ) -> bool:
+        """
+        Capture a still image and deliver it as a numpy array without saving.
+
+        Args:
+            resolution_index:  Still-resolution index. None uses the settings value.
+            timeout_ms:        Maximum time to wait for the frame (milliseconds).
+            on_captured:       Zero-argument callback fired as soon as the raw
+                            frame is pulled from the SDK.
+            on_complete:       Callback ``(image: np.ndarray | None) -> None``
+                            fired once conversion is done.
+
+        Returns:
+            True if the snap and pull succeeded, False otherwise.
+        """
+        if not self._active_camera:
+            error("Cannot capture still - no active camera")
+            return False
+
+        return self._active_camera.capture_still(
+            resolution_index=resolution_index,
+            timeout_ms=timeout_ms,
+            on_captured=on_captured,
+            on_complete=on_complete,
+        )
+
     def copy_current_frame_to_numpy(self) -> np.ndarray | None:
         """
         Copy the current preview frame to a numpy array.

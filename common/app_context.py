@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from camera.camera_manager import CameraManager
 from camera.cameras.base_camera import BaseCamera
+from machine_vision.machine_vision_manager import MachineVisionManager
 from common.logger import info, error, warning, debug
 from common.fieldweaveConfig import FieldWeaveSettingsManager, FieldWeaveSettings
 from motion.motion_controller_manager import MotionControllerManager
@@ -43,6 +44,7 @@ class AppContext:
         self._toast_manager: ToastManager | None = None
         self._main_window = None
         self._motion_manager: MotionControllerManager | None = None
+        self._machine_vision_manager: MachineVisionManager | None = None  # set by _initialize_machine_vision_manager
         self._initialized = True
         self._cleaned_up: bool = False
 
@@ -54,6 +56,9 @@ class AppContext:
 
         # Initialize motion controller manager
         self._initialize_motion_manager()
+
+        # Initialize machine vision manager
+        self._initialize_machine_vision_manager()
 
     # ------------------------------------------------------------------
     # Camera
@@ -104,6 +109,23 @@ class AppContext:
     def has_motion(self) -> bool:
         """Return True if the motion manager is available and the controller is ready."""
         return self._motion_manager is not None and self._motion_manager.get_state() == MotionState.READY
+
+    # ------------------------------------------------------------------
+    # Machine vision
+    # ------------------------------------------------------------------
+
+    @property
+    def machine_vision(self) -> MachineVisionManager:
+        """
+        Get the machine vision manager.
+
+        The manager owns a dedicated worker thread; call
+        request_focus_analysis() to submit a job and connect to
+        focus_result_ready to receive results.
+        """
+        if self._machine_vision_manager is None:
+            self._initialize_machine_vision_manager()
+        return self._machine_vision_manager
 
     # ------------------------------------------------------------------
     # Settings
@@ -219,6 +241,16 @@ class AppContext:
             error(f"Failed to start motion controller manager: {e}")
             self._motion_manager = None
 
+    def _initialize_machine_vision_manager(self) -> None:
+        """Start the machine vision manager and its worker thread."""
+        try:
+            info("Initializing machine vision manager...")
+            self._machine_vision_manager = MachineVisionManager()
+            info("Machine vision manager started")
+        except Exception as e:
+            error(f"Failed to start machine vision manager: {e}")
+            self._machine_vision_manager = None
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -229,15 +261,18 @@ class AppContext:
             return
         self._cleaned_up = True
 
+        if self._machine_vision_manager:
+            self._machine_vision_manager.shutdown()
 
         if self._motion_manager:
             self._motion_manager.shutdown()
-            
+
         if self._camera_manager:
             self._camera_manager.cleanup()
 
         self._camera_manager = None
         self._motion_manager = None
+        self._machine_vision_manager = None
         self._settings_dialog = None
         self._settings_manager = None
         self._settings = None

@@ -500,6 +500,155 @@ class AmscopeCamera(BaseCamera):
     # Image Capture and Saving
     # -------------------------
     
+    def capture_still(
+        self,
+        resolution_index: int | None = None,
+        timeout_ms: int = 5000,
+        on_captured: Callable[[], None] | None = None,
+        on_complete: Callable[[np.ndarray | None], None] | None = None,
+    ) -> bool:
+        """
+        Capture a still image and return it as a numpy array without saving.
+
+        Mirrors capture_and_save_still: blocks only until the hardware has
+        finished exposing and the raw pixel data has been pulled, then spawns
+        a background thread to convert the buffer and call on_complete.
+
+        Args:
+            resolution_index:  Still-resolution index. Defaults to settings value.
+            timeout_ms:        Maximum time to wait for the frame (milliseconds).
+            on_captured:       Zero-argument callback fired as soon as the raw
+                            frame is pulled — use this to unblock automation.
+            on_complete:       Callback ``(image: np.ndarray | None) -> None``
+                            fired once conversion is done. Receives a
+                            (height, width, 3) uint8 RGB array, or None on
+                            failure.
+
+        Returns:
+            True if the snap and pull succeeded.
+            False if the camera is not open, snap fails, or times out.
+        """
+        if not self._hcam:
+            error("Camera not open")
+            return False
+
+        if resolution_index is None:
+            resolution_index = self.settings.get_still_resolution_index()
+
+        amcam = self._get_sdk()
+        try:
+            t_start = time.perf_counter()
+
+            width, height = self._hcam.get_StillResolution(resolution_index)
+            buffer_size = amcam.TDIBWIDTHBYTES(width * 24) * height
+            pData = bytearray(buffer_size)
+
+            still_ready = threading.Event()
+            capture_success: dict[str, Any] = {"success": False, "width": 0, "height": 0}
+
+            original_callback = self._callback
+            original_context = self._callback_context
+
+            def still_callback(event: int, ctx: Any) -> None:
+                if event == self.EVENT_STILLIMAGE:
+                    with self._still_buffer_lock:
+                        read_buf = (
+                            self._still_buffer_a
+                            if self._still_buffer_active == 0
+                            else self._still_buffer_b
+                        )
+                        w = self._still_buffer_width
+                        h = self._still_buffer_height
+
+                    if read_buf is not None and w > 0:
+                        try:
+                            n = min(len(pData), len(read_buf))
+                            pData[:n] = read_buf[:n]
+                            capture_success.update(success=True, width=w, height=h)
+                        except Exception as copy_err:
+                            error(f"Failed to copy still buffer: {copy_err}")
+                            capture_success["success"] = False
+                    else:
+                        error("Still buffer not yet populated; cannot capture still")
+                        capture_success["success"] = False
+                    still_ready.set()
+
+                if original_callback:
+                    original_callback(event, original_context)
+
+            self._callback = still_callback
+            self._callback_context = None
+
+            if not self.snap_image(resolution_index):
+                error("Failed to trigger still capture")
+                self._callback = original_callback
+                self._callback_context = original_context
+                return False
+
+            if not still_ready.wait(timeout_ms / 1000.0):
+                error(f"Still capture timed out after {timeout_ms}ms")
+                self._callback = original_callback
+                self._callback_context = original_context
+                return False
+
+            self._callback = original_callback
+            self._callback_context = original_context
+
+            if not capture_success["success"]:
+                error("Failed to pull still image")
+                return False
+
+            t_captured = time.perf_counter()
+            snap_ms = (t_captured - t_start) * 1000
+            debug(f"Still capture (snap + pull): {snap_ms:.1f} ms")
+
+            if on_captured is not None:
+                try:
+                    on_captured()
+                except Exception as cb_err:
+                    exception(f"Error in on_captured callback: {cb_err}")
+
+            def _process() -> None:
+                nonlocal pData
+                t_proc_start = time.perf_counter()
+                image: np.ndarray | None = None
+                try:
+                    w = capture_success["width"]
+                    h = capture_success["height"]
+                    stride = amcam.TDIBWIDTHBYTES(w * 24)
+                    image = (
+                        np.frombuffer(pData, dtype=np.uint8)
+                        .reshape((h, stride))[:, : w * 3]
+                        .reshape((h, w, 3))
+                        .copy()
+                    )
+                    del pData
+                    process_ms = (time.perf_counter() - t_proc_start) * 1000
+                    total_ms = (time.perf_counter() - t_start) * 1000
+                    debug(
+                        f"Still capture processing (numpy): {process_ms:.1f} ms | "
+                        f"Total (snap={snap_ms:.1f} ms, "
+                        f"process={process_ms:.1f} ms, "
+                        f"total={total_ms:.1f} ms)"
+                    )
+                except Exception:
+                    exception("Failed to process still image buffer")
+                finally:
+                    gc.collect()
+
+                if on_complete is not None:
+                    try:
+                        on_complete(image)
+                    except Exception as cb_err:
+                        exception(f"Error in on_complete callback: {cb_err}")
+
+            threading.Thread(target=_process, daemon=True, name="CameraStillProcess").start()
+            return True
+
+        except Exception:
+            exception("Failed to capture still image")
+            return False
+
     def capture_and_save_still(
         self,
         filepath: Path,

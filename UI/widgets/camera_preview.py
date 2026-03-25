@@ -152,6 +152,14 @@ class CameraPreview(QFrame):
         self._channel_button.menu.raise_()
         self._channel_button.channel_changed.connect(self._on_channel_changed)
 
+
+        self._focus_overlay.set_vision_manager(get_app_context().machine_vision)
+    
+        # Also connect repaint so the label refreshes after each result.
+        get_app_context().machine_vision.focus_result_ready.connect(
+            lambda _result: self._video_label.update()
+        )
+
         self._connect_to_camera_manager()
 
     def _connect_to_camera_manager(self) -> None:
