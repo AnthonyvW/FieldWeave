@@ -46,7 +46,7 @@ class _ArrowComboBox(QComboBox):
 # Automation widget
 # ---------------------------------------------------------------------------
 
-_MODES: list[str] = ["Focus Stacking", "Z-Stack Area Scan", "Tree Core Imaging", "(DEV) Square Move"]
+_MODES: list[str] = ["Tree Core Imaging", "Focus Stacking", "Z-Stack Area Scan", "(DEV) Square Move"]
 
 
 class AutomationWidget(QWidget):
@@ -148,10 +148,10 @@ class AutomationWidget(QWidget):
         self._tree_core_widget = TreeCoreWidget()
         self._square_move_widget = SquareMoveWidget()
 
-        self._stack.addWidget(self._focus_stack_widget)   # index 0 → Focus Stacking
-        self._stack.addWidget(self._area_scan_widget)     # index 1 → Z-Stack Area Scan
-        self._stack.addWidget(self._tree_core_widget)     # index 2 → Tree Core Imaging
-        self._stack.addWidget(self._square_move_widget)     # index 3 → Square Move
+        self._stack.addWidget(self._tree_core_widget)     # Tree Core Imaging
+        self._stack.addWidget(self._focus_stack_widget)   # Focus Stacking
+        self._stack.addWidget(self._area_scan_widget)     # Z-Stack Area Scan
+        self._stack.addWidget(self._square_move_widget)   # Square Move
 
         outer_layout.addWidget(self._stack)
 
