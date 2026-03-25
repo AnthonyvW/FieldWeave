@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt
 
 from UI.widgets.automation.focus_stack_widget import FocusStackWidget
 from UI.widgets.automation.focus_stack_area_scan_widget import ZStackAreaScanWidget
+from UI.widgets.automation.square_move_widget import SquareMoveWidget
 
 
 class _ArrowComboBox(QComboBox):
@@ -70,7 +71,7 @@ class TreeCoreImagingWidget(QWidget):
 # Automation widget
 # ---------------------------------------------------------------------------
 
-_MODES: list[str] = ["Focus Stacking", "Z-Stack Area Scan", "Tree Core Imaging"]
+_MODES: list[str] = ["Focus Stacking", "Z-Stack Area Scan", "Tree Core Imaging", "(DEV) Square Move"]
 
 
 class AutomationWidget(QWidget):
@@ -170,10 +171,12 @@ class AutomationWidget(QWidget):
         self._focus_stack_widget = FocusStackWidget()
         self._area_scan_widget = ZStackAreaScanWidget()
         self._tree_core_widget = TreeCoreImagingWidget()
+        self._square_move_widget = SquareMoveWidget()
 
         self._stack.addWidget(self._focus_stack_widget)   # index 0 → Focus Stacking
         self._stack.addWidget(self._area_scan_widget)     # index 1 → Z-Stack Area Scan
         self._stack.addWidget(self._tree_core_widget)     # index 2 → Tree Core Imaging
+        self._stack.addWidget(self._square_move_widget)     # index 3 → Square Move
 
         outer_layout.addWidget(self._stack)
 
