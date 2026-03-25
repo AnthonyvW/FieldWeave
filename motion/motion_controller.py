@@ -221,9 +221,13 @@ class MotionController:
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
+            # Get command with timeout
+            if self._command_queue.empty():
+                time.sleep(0.05)
+                continue
             try:
-                cmd = self._command_queue.get(timeout=0.1)
-            except queue.Empty:
+                cmd = self._command_queue.get_nowait()
+            except Exception:
                 continue
 
             try:

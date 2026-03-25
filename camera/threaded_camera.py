@@ -7,6 +7,7 @@ from typing import Optional, Callable, Any, TypeVar, Generic
 from queue import Queue, Empty
 from threading import Thread, Event, Lock
 from functools import wraps
+import time
 
 from PySide6.QtCore import QObject, Signal
 
@@ -148,9 +149,12 @@ class CameraThread(QObject):
         while self._running.is_set():
             try:
                 # Get command with timeout
+                if self._command_queue.empty():
+                    time.sleep(0.05)
+                    continue
                 try:
-                    command = self._command_queue.get(timeout=0.1)
-                except Empty:
+                    command = self._command_queue.get_nowait()
+                except Exception:
                     continue
                 
                 # Handle shutdown

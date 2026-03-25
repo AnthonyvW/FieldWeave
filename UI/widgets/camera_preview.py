@@ -200,7 +200,7 @@ class CameraPreview(QFrame):
         src = camera_manager.get_current_frame()
         if not src:
             return
-
+        
         try:
             camera = camera_manager.active_camera
             if not camera:
@@ -347,9 +347,9 @@ class CameraPreview(QFrame):
         self._video_label.setText("Camera stream stopped")
 
     @Slot()
-    def _on_camera_error(self) -> None:
-        self._video_label.setText("Camera error occurred")
-        error("Preview: Camera error occurred")
+    def _on_camera_error(self, description: str) -> None:
+        self._video_label.setText(f"Camera error: {description}")
+        error(f"Preview: Camera error occurred: {description}")
 
     @Slot()
     def _on_camera_disconnected(self) -> None:

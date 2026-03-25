@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 import numpy as np
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal, Slot, Qt
 
 from camera.cameras.base_camera import BaseCamera
 from camera.cameras.amscope_camera import AmscopeCamera
@@ -45,7 +45,7 @@ class CameraManager(QObject):
     still_frame_ready = Signal(int, int) # still:   width, height
     streaming_started = Signal(int, int)  # width, height
     streaming_stopped = Signal()
-    camera_error = Signal()
+    camera_error = Signal(str)
     camera_disconnected = Signal()
     
     # Internal signal for forwarding camera events to UI thread
@@ -84,7 +84,7 @@ class CameraManager(QObject):
         self._is_streaming = False
         
         # Connect internal camera event signal
-        self._camera_event.connect(self._on_camera_event)
+        self._camera_event.connect(self._on_camera_event, Qt.ConnectionType.QueuedConnection)
         
         info("Camera manager initialized")
     
@@ -559,15 +559,29 @@ class CameraManager(QObject):
 
             self._current_still_buffer = bytes(still_buf)
             self._still_frame_seq += 1
-            self.still_frame_ready.emit(still_w, still_h)
+            self.still_frame_ready.emit(self._still_frame_width, self._still_frame_height)
 
         except Exception as e:
             error(f"Error handling still image event: {e}")
     
-    def _handle_error(self):
-        """Handle camera error"""
-        error("Camera error occurred")
-        self.camera_error.emit()
+    def _handle_error(self) -> None:
+        """Handle camera error."""
+        description = "unknown"
+        if self._active_camera is not None:
+            base_camera = self._active_camera.underlying_camera
+            if isinstance(base_camera, AmscopeCamera):
+                try:
+                    amcam = AmscopeCamera._get_sdk_static()
+                    # get_LastError returns the HRESULT of the most recent failure
+                    hr = amcam.Amcam.get_LastError()
+                    hr_unsigned = hr & 0xFFFFFFFF
+                    from camera.cameras.amscope_camera import _HRESULT_NAMES
+                    description = _HRESULT_NAMES.get(hr_unsigned, f"0x{hr_unsigned:08X}")
+                except Exception:
+                    pass
+
+        error(f"Camera error occurred: {description}")
+        self.camera_error.emit(description)
         self.stop_streaming()
     
     def _handle_disconnected(self):

@@ -21,6 +21,38 @@ from camera.settings.amscope_settings import AmscopeSettings
 # Module-level reference to the loaded SDK
 _amcam = None
 
+_HRESULT_NAMES: dict[int, str] = {
+    0x00000000: "S_OK",
+    0x00000001: "S_FALSE",
+    0x8000FFFF: "E_UNEXPECTED (catastrophic failure)",
+    0x80004001: "E_NOTIMPL (not supported on this camera)",
+    0x80070005: "E_ACCESSDENIED (permission denied)",
+    0x8007000E: "E_OUTOFMEMORY (out of memory)",
+    0x80070057: "E_INVALIDARG (invalid argument)",
+    0x80004003: "E_POINTER (null pointer)",
+    0x80004005: "E_FAIL (generic failure)",
+    0x8001010E: "E_WRONG_THREAD (called from wrong thread)",
+    0x8007001F: "E_GEN_FAILURE (device not functioning — check cable/USB/power)",
+    0x800700AA: "E_BUSY (camera already in use)",
+    0x8000000A: "E_PENDING (no data available yet)",
+    0x8001011F: "E_TIMEOUT (operation timed out)",
+    0x80072743: "E_UNREACH (network unreachable — check IP/firewall)",
+    0x800704C7: "E_CANCELLED (operation cancelled)",
+}
+
+def _format_hresult(e: Exception) -> str:
+    """Format an amcam HRESULTException with a human-readable error name.
+
+    Falls back to the exception's own str() for non-HRESULT exceptions so
+    callers can always use this on any caught exception.
+    """
+    hr: int | None = getattr(e, "hr", None)
+    if hr is None:
+        return str(e)
+    # HRESULT values from the SDK are signed 32-bit; normalise to unsigned.
+    hr_unsigned = hr & 0xFFFFFFFF
+    name = _HRESULT_NAMES.get(hr_unsigned, f"0x{hr_unsigned:08X}")
+    return f"HRESULT {name}"
 
 class AmscopeCamera(BaseCamera):
     """
@@ -57,10 +89,13 @@ class AmscopeCamera(BaseCamera):
         if not AmscopeCamera._sdk_loaded:
             AmscopeCamera.ensure_sdk_loaded()
 
-        self._frame_buffer: ctypes.Array | None = None
-        self._still_buffer: ctypes.Array | None = None
+        self._still_buffer_a: ctypes.Array | None = None
+        self._still_buffer_b: ctypes.Array | None = None
+        self._still_buffer_active: int = 0  # which buffer the SDK last wrote into (0=a, 1=b)
         self._still_buffer_width: int = 0
         self._still_buffer_height: int = 0
+        self._still_buffer_lock = threading.Lock()
+
         self._pending_still_resolution_index: int = 0
         self._dfc_completion_callback = None  # Callback for DFC completion
     
@@ -222,7 +257,9 @@ class AmscopeCamera(BaseCamera):
         self._callback = None
         self._callback_context = None
         self._frame_buffer = None
-        self._still_buffer = None
+        self._still_buffer_a = None
+        self._still_buffer_b = None
+        self._still_buffer_active = 0
         self._still_buffer_width = 0
         self._still_buffer_height = 0
         if self._settings is not None:
@@ -332,7 +369,8 @@ class AmscopeCamera(BaseCamera):
             self._hcam.Snap(resolution_index)
             self._pending_still_resolution_index = resolution_index
             return True
-        except:
+        except Exception as e:
+            error(f"snap_image failed: {_format_hresult(e)}")
             return False
     
     # -------------------------
@@ -425,17 +463,14 @@ class AmscopeCamera(BaseCamera):
             exception("Failed to process histogram callback")
 
     def get_still_buffer(self) -> tuple[ctypes.Array, int, int] | None:
-        """
-        Return the camera's internal still frame buffer and its dimensions.
-
-        Returns:
-            ``(buffer, width, height)`` if a still has been captured since
-            streaming started, or ``None`` if the buffer has not been
-            allocated yet.
-        """
-        if self._still_buffer is None or self._still_buffer_width == 0 or self._still_buffer_height == 0:
-            return None
-        return self._still_buffer, self._still_buffer_width, self._still_buffer_height
+        with self._still_buffer_lock:
+            if self._still_buffer_active == 0:
+                buf = self._still_buffer_a
+            else:
+                buf = self._still_buffer_b
+            if buf is None or self._still_buffer_width == 0:
+                return None
+            return buf, self._still_buffer_width, self._still_buffer_height
 
     def pull_still_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24) -> tuple[bool, int, int]:
         """
@@ -545,13 +580,21 @@ class AmscopeCamera(BaseCamera):
 
             def still_callback(event: int, ctx: Any) -> None:
                 if event == self.EVENT_STILLIMAGE:
-                    if self._still_buffer is not None and self._still_buffer_width > 0:
+                    with self._still_buffer_lock:
+                        if self._still_buffer_active == 0:
+                            read_buf = self._still_buffer_a
+                        else:
+                            read_buf = self._still_buffer_b
+                        w = self._still_buffer_width
+                        h = self._still_buffer_height
+
+                    if read_buf is not None and w > 0:
                         try:
-                            n = min(len(pData), len(self._still_buffer))
-                            pData[:n] = self._still_buffer[:n]
+                            n = min(len(pData), len(read_buf))
+                            pData[:n] = read_buf[:n]
                             capture_success['success'] = True
-                            capture_success['width'] = self._still_buffer_width
-                            capture_success['height'] = self._still_buffer_height
+                            capture_success['width'] = w
+                            capture_success['height'] = h
                         except Exception as copy_err:
                             error(f"Failed to copy still buffer: {copy_err}")
                             capture_success['success'] = False
@@ -560,7 +603,6 @@ class AmscopeCamera(BaseCamera):
                         capture_success['success'] = False
                     still_ready.set()
 
-                # Forward to the original callback so live preview keeps working
                 if original_callback:
                     original_callback(event, original_context)
 
@@ -772,15 +814,26 @@ class AmscopeCamera(BaseCamera):
                 else:
                     sw, sh = raw_w, raw_h
 
-                required = amcam.TDIBWIDTHBYTES(sw * 24) * sh
-                if self._still_buffer is None or len(self._still_buffer) < required:
-                    debug(f"Still buffer reallocated: {sw}x{sh}")
-                    self._still_buffer = ctypes.create_string_buffer(required)
+                with self._still_buffer_lock:
+                    required = amcam.TDIBWIDTHBYTES(sw * 24) * sh
 
-                self._hcam.PullImageV4(self._still_buffer, 1, 24, 0, None)
-                self._still_buffer_width = sw
-                self._still_buffer_height = sh
-                debug(f"Still frame pulled: {sw}x{sh}")
+                    # Allocate both buffers at max size once, never shrink or reallocate
+                    if self._still_buffer_a is None or len(self._still_buffer_a) < required:
+                        self._still_buffer_a = ctypes.create_string_buffer(required)
+                        self._still_buffer_b = ctypes.create_string_buffer(required)
+                        debug(f"Still double-buffer allocated: {sw}x{sh} ({required} bytes each)")
+
+                    # Write into whichever buffer is NOT currently being read by still_callback
+                    next_active = 1 - self._still_buffer_active
+                    write_buf = self._still_buffer_b if next_active == 1 else self._still_buffer_a
+
+                    self._hcam.PullImageV4(write_buf, 1, 24, 0, None)
+
+                    # Only after the pull completes do we update the active index and dimensions
+                    self._still_buffer_active = next_active
+                    self._still_buffer_width = sw
+                    self._still_buffer_height = sh
+                    debug(f"Still frame pulled into buffer {next_active}: {sw}x{sh}")
             except Exception as e:
                 error(f"Failed to pull still frame into still buffer: {e}")
             if self._settings is not None and self._settings._histogram_enabled:

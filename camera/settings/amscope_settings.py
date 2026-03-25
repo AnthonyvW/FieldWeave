@@ -708,7 +708,7 @@ class AmscopeSettings(CameraSettings):
 
         try:
             if self._camera is not None and hasattr(self._camera, '_hcam') and self._camera._hcam:
-                metadata['serial'] = self._camera._hcam.get_SerialNumber()
+                metadata['serial'] = self._camera._hcam.SerialNumber()
         except Exception:
             pass
 
