@@ -432,6 +432,7 @@ class ZStackAreaScan(AutomationRoutine):
             else:
                 info("[ZStackAreaScan]   All stacks complete.")
 
+        self.motion.home()
         # ------------------------------------------------------------------
         # Final summary
         # ------------------------------------------------------------------
