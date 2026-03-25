@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 MotionStateCallback = Callable[[str], None]
 
 # Fired when the active routine publishes a status update.
-# Signature: (job_name, activity, progress_current, progress_total) -> None
-RoutineStateCallback = Callable[[str, str, int, int], None]
+# Signature: (job_name, activity, progress_current, progress_total, eta_seconds) -> None
+RoutineStateCallback = Callable[[str, str, int, int, int], None]
 
 # Fired when the user issues a direct motion command (jog, home, etc.).
 # Signature: () -> None
@@ -146,7 +146,7 @@ class MotionControllerManager:
 
         *listener* is called whenever the active routine reports a change to
         its job name, activity, or progress.
-        Signature: ``(job_name: str, activity: str, progress_current: int, progress_total: int) -> None``
+        Signature: ``(job_name: str, activity: str, progress_current: int, progress_total: int, eta_seconds: int) -> None``
         """
         self._routine_state_listeners.append(listener)
 
@@ -179,11 +179,11 @@ class MotionControllerManager:
                 warning(f"State listener raised: {exc}")
 
     def _emit_routine_state(
-        self, job_name: str, activity: str, progress_current: int, progress_total: int
+        self, job_name: str, activity: str, progress_current: int, progress_total: int, eta_seconds: int
     ) -> None:
         for listener in list(self._routine_state_listeners):
             try:
-                listener(job_name, activity, progress_current, progress_total)
+                listener(job_name, activity, progress_current, progress_total, eta_seconds)
             except Exception as exc:
                 warning(f"Routine state listener raised: {exc}")
 

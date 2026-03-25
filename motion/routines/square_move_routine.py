@@ -194,10 +194,9 @@ class SquareMove(AutomationRoutine):
                 target_mm_x = target.x / _NM_PER_MM
                 target_mm_y = target.y / _NM_PER_MM
 
-                self._set_activity(
+                self._set_status(
                     f"Rep {repeat_index + 1}/{self._repeats}  —  {label}"
-                )
-                self._set_progress(legs_done, total_legs)
+                , legs_done, total_legs)
 
                 info(
                     f"[SquareMove] Leg {leg_index + 1}/4: moving to {label} "

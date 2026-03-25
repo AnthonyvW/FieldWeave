@@ -147,8 +147,7 @@ class ZStackScan(AutomationRoutine):
                 z=target_z_nm,
             )
 
-            self._set_activity(f"Step {idx + 1}/{total}  —  Z={target_z_mm:.3f} mm")
-            self._set_progress(idx, total)
+            self._set_status(f"Step {idx + 1}/{total}  —  Z={target_z_mm:.3f} mm", idx, total)
             info(f"[ZStackScan] Step {idx + 1}/{total}: moving to Z={target_z_mm:.6f} mm")
             self.motion.move_to_position(target_pos)
 

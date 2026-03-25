@@ -38,8 +38,8 @@ from common.logger import info, error, warning, debug
 if TYPE_CHECKING:
     from motion.motion_controller_manager import MotionControllerManager
 
-# Signature: (job_name, activity, progress_current, progress_total) -> None
-RoutineStateCallback = Callable[[str, str, int, int], None]
+# Signature: (job_name, activity, progress_current, progress_total, eta_seconds) -> None
+RoutineStateCallback = Callable[[str, str, int, int, int], None]
 
 
 class AutomationRoutine(ABC):
@@ -62,7 +62,7 @@ class AutomationRoutine(ABC):
     """
 
     #: Human-readable name shown in the status bar. Override in subclasses.
-    job_name: str = "Unnamed Routine"
+    job_name: str = "-"
 
     def __init__(self, motion: MotionControllerManager) -> None:
         self.motion = motion
@@ -79,9 +79,10 @@ class AutomationRoutine(ABC):
         self._activity: str = "-"
         self._progress_current: int = 0
         self._progress_total: int = 0
+        self._eta_seconds: int = 0
 
         # Optional callback fired whenever any of the above fields change.
-        # Signature: (job_name, activity, progress_current, progress_total) -> None
+        # Signature: (job_name, activity, progress_current, progress_total, eta_seconds) -> None
         self.on_state_changed: RoutineStateCallback | None = None
 
     # ------------------------------------------------------------------
@@ -107,17 +108,53 @@ class AutomationRoutine(ABC):
         self._activity = activity
         self._notify_state()
 
-    def _set_progress(self, current: int, total: int) -> None:
-        """Update progress counters and notify listeners."""
+    def _set_progress(self, current: int, total: int, eta_seconds: int = 0) -> None:
+        """Update progress counters (and optionally ETA) and notify listeners.
+
+        Parameters
+        ----------
+        current:
+            Number of steps completed so far.
+        total:
+            Total number of steps.
+        eta_seconds:
+            Estimated seconds remaining.  Pass 0 (the default) when unknown.
+        """
         self._progress_current = current
         self._progress_total = total
+        self._eta_seconds = eta_seconds
+        self._notify_state()
+
+    def _set_status(
+        self,
+        activity: str,
+        current: int,
+        total: int,
+        eta_seconds: int = 0,
+    ) -> None:
+        """Update activity and progress atomically in a single notification.
+
+        Prefer this over calling :meth:`_set_activity` and
+        :meth:`_set_progress` separately to avoid the UI briefly showing a
+        mismatched activity/progress pair between the two calls.
+        """
+        self._activity = activity
+        self._progress_current = current
+        self._progress_total = total
+        self._eta_seconds = eta_seconds
         self._notify_state()
 
     def _notify_state(self) -> None:
         cb = self.on_state_changed
         if cb is not None:
             try:
-                cb(self.job_name, self._activity, self._progress_current, self._progress_total)
+                cb(
+                    self.job_name,
+                    self._activity,
+                    self._progress_current,
+                    self._progress_total,
+                    self._eta_seconds,
+                )
             except Exception as exc:
                 warning(f"[{type(self).__name__}] on_state_changed raised: {exc}")
 
@@ -136,6 +173,10 @@ class AutomationRoutine(ABC):
     @property
     def progress_total(self) -> int:
         return self._progress_total
+
+    @property
+    def eta_seconds(self) -> int:
+        return self._eta_seconds
 
     # ------------------------------------------------------------------
     # Control API
@@ -239,10 +280,11 @@ class AutomationRoutine(ABC):
         finally:
             self._running = False
             self._finished.set()
-            # Clear activity/progress on exit so the UI resets cleanly.
+            # Clear activity/progress/ETA on exit so the UI resets cleanly.
             self._activity = "-"
             self._progress_current = 0
             self._progress_total = 0
+            self._eta_seconds = 0
             self._notify_state()
 
     # ------------------------------------------------------------------

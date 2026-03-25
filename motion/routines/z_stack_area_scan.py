@@ -224,10 +224,19 @@ class ZStackAreaScan(AutomationRoutine):
             # ----------------------------------------------------------
             current_pos = self.motion.get_position()
             xy_target = Position(x=target_x_nm, y=target_y_nm, z=current_pos.z)
-            self._set_activity(
-                f"Stack {stack_idx + 1}/{total_stacks}  —  moving to XY"
+            _stacks_done_so_far = len(stack_durations)
+            if _stacks_done_so_far > 0:
+                _mean_s = sum(stack_durations) / _stacks_done_so_far
+                _stacks_remaining = total_stacks - stack_idx
+                _eta = round(_stacks_remaining * (_mean_s + 1.0))
+            else:
+                _eta = 0
+            self._set_status(
+                f"Stack {stack_idx + 1}/{total_stacks}  —  moving to XY",
+                stack_idx,
+                total_stacks,
+                _eta,
             )
-            self._set_progress(stack_idx, total_stacks)
             info(
                 f"[ZStackAreaScan] Stack {stack_idx + 1}/{total_stacks}:"
                 f" moving to X={target_x_nm / _NM_PER_MM:.6f} mm"
@@ -424,11 +433,10 @@ class ZStackAreaScan(AutomationRoutine):
             stacks_done = len(stack_durations)
             stacks_left = total_stacks - stacks_done
 
-            self._set_progress(stacks_done, total_stacks)
-
             mean_stack_s = sum(stack_durations) / stacks_done
             # Add 1 second per remaining stack to account for XY travel
             eta_s = stacks_left * (mean_stack_s + 1.0)
+            self._set_progress(stacks_done, total_stacks, round(eta_s) if stacks_left > 0 else 0)
 
             info(
                 f"[ZStackAreaScan] Stack {stacks_done}/{total_stacks} complete"

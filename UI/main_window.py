@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self._pending_activity: str = "-"
         self._pending_progress_current: int = 0
         self._pending_progress_total: int = 0
+        self._pending_eta_seconds: int = 0
 
         # When a routine finishes this latches True so the COMPLETE state is
         # held in the status bar.  It is cleared when:
@@ -125,7 +126,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_routine_state_changed(
-        self, job_name: str, activity: str, progress_current: int, progress_total: int
+        self, job_name: str, activity: str, progress_current: int, progress_total: int, eta_seconds: int
     ) -> None:
         """Called on the routine thread when job/activity/progress updates."""
         if job_name != "-" or activity != "-":
@@ -137,6 +138,7 @@ class MainWindow(QMainWindow):
         self._pending_activity = activity
         self._pending_progress_current = progress_current
         self._pending_progress_total = progress_total
+        self._pending_eta_seconds = eta_seconds
 
     def _on_motion_interaction(self) -> None:
         """Called when the user issues a direct motion command (jog, home, etc.).
@@ -176,6 +178,7 @@ class MainWindow(QMainWindow):
             activity = self._pending_activity
             progress_current = self._pending_progress_current
             progress_total = self._pending_progress_total
+            eta_seconds = self._pending_eta_seconds
 
         elif self._state.automation_state in (AutomationState.RUNNING, AutomationState.PAUSED):
             # Routine just finished on this flush tick — set the latch and
@@ -187,6 +190,7 @@ class MainWindow(QMainWindow):
             activity = "-"
             progress_current = 0
             progress_total = 0
+            eta_seconds = 0
 
         elif self._completed_latch:
             # Latch is held from a previous completion — keep showing COMPLETE.
@@ -195,6 +199,7 @@ class MainWindow(QMainWindow):
             activity = "-"
             progress_current = 0
             progress_total = 0
+            eta_seconds = 0
 
         else:
             automation_state = AutomationState.IDLE
@@ -202,6 +207,7 @@ class MainWindow(QMainWindow):
             activity = "-"
             progress_current = 0
             progress_total = 0
+            eta_seconds = 0
 
         new_state = State(
             machine_state=self._pending_machine_state,
@@ -210,6 +216,7 @@ class MainWindow(QMainWindow):
             job_name=job_name,
             progress_current=progress_current,
             progress_total=progress_total,
+            eta_seconds=eta_seconds,
         )
 
         if new_state != self._state:
@@ -302,6 +309,7 @@ class MainWindow(QMainWindow):
         if show_progress:
             percent = int(round(100.0 * self._state.progress_current / max(1, self._state.progress_total)))
             self.progress.setValue(max(0, min(100, percent)))
+            self.progress.setFormat("%p%")
 
         kind = _AUTOMATION_STATE_KIND.get(self._state.automation_state, "idle")
         self.status_bar.setProperty("kind", kind)
