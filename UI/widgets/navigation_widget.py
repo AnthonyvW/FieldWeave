@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QLabel,
+    QMessageBox,
 )
 from PySide6.QtGui import QPainter, QColor, QPen
 from PySide6.QtCore import Qt, QRectF, QTimer
@@ -699,6 +700,23 @@ class NavigationWidget(QWidget):
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Confirm Homing")
+        dialog.setText("Are you sure you want to home the motion system?")
+        dialog.setInformativeText(
+            "Ensure the path is clear before continuing."
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.button(QMessageBox.StandardButton.Ok).setText("Yes")
+        dialog.button(QMessageBox.StandardButton.Cancel).setText("No")
+
+        if dialog.exec() != QMessageBox.StandardButton.Ok:
+            return
+
         ctx.motion.home()
         self._update_position_display()
 
