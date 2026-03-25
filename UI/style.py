@@ -121,7 +121,7 @@ def apply_style(app: QApplication) -> None:
             border-radius: 4px;
             height: 8px;
 
-            color: white;
+            color: {header_bar_color};
             font-weight: 800;
         }}
         QProgressBar#CornerStatusProgress::chunk {{

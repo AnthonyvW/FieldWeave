@@ -86,7 +86,11 @@ class SquareMove(AutomationRoutine):
     move_timeout_s:
         Maximum time (seconds) to wait for each leg to complete before
         logging a warning and continuing.  Defaults to ``60.0``.
+    dwell_s:
+        Time (seconds) to wait at each corner after the stage has settled
+        before issuing the next move command.  Defaults to ``0.3``.
     """
+    job_name = "Square Move"
 
     def __init__(
         self,
@@ -95,6 +99,7 @@ class SquareMove(AutomationRoutine):
         side_mm: float = 10.0,
         repeats: int = 5,
         move_timeout_s: float = _MOVE_TIMEOUT_S,
+        dwell_s: float = 0.3,
     ) -> None:
         super().__init__(motion)
 
@@ -104,11 +109,14 @@ class SquareMove(AutomationRoutine):
             raise ValueError(f"repeats must be >= 1, got {repeats!r}")
         if move_timeout_s <= 0:
             raise ValueError(f"move_timeout_s must be positive, got {move_timeout_s!r}")
+        if dwell_s < 0:
+            raise ValueError(f"dwell_s must be >= 0, got {dwell_s!r}")
 
         self._side_nm: int = round(side_mm * _NM_PER_MM)
         self._side_mm: float = side_mm
         self._repeats: int = repeats
         self._move_timeout_s: float = move_timeout_s
+        self._dwell_s: float = dwell_s
         self._on_confirm: Callable[[float], bool] = on_confirm or (lambda _: True)
 
     # ------------------------------------------------------------------
@@ -119,6 +127,7 @@ class SquareMove(AutomationRoutine):
         # ------------------------------------------------------------------
         # Confirmation
         # ------------------------------------------------------------------
+        self._set_activity("Waiting for confirmation")
         info(f"[SquareMove] Requesting confirmation for {self._side_mm} mm square")
         confirmed = self._on_confirm(self._side_mm)
         if not confirmed:
@@ -146,27 +155,31 @@ class SquareMove(AutomationRoutine):
         # Corners in order; Z and any other axes are kept at their current values.
         corners: list[tuple[str, Position]] = [
             (
-                "corner 1  (+X)",
-                Position(x=origin.x + self._side_nm, y=origin.y,              z=origin.z),
+                "Corner 1  (+X)",
+                Position(x=origin.x + self._side_nm, y=origin.y,                z=origin.z),
             ),
             (
-                "corner 2  (+X, +Y)",
+                "Corner 2  (+X, +Y)",
                 Position(x=origin.x + self._side_nm, y=origin.y + self._side_nm, z=origin.z),
             ),
             (
-                "corner 3  (+Y)",
+                "Corner 3  (+Y)",
                 Position(x=origin.x,                 y=origin.y + self._side_nm, z=origin.z),
             ),
             (
-                "origin    (home)",
-                Position(x=origin.x,                 y=origin.y,              z=origin.z),
+                "Origin",
+                Position(x=origin.x,                 y=origin.y,                z=origin.z),
             ),
         ]
+
+        # Total legs across all repeats, used for progress reporting.
+        total_legs = self._repeats * len(corners)
 
         # ------------------------------------------------------------------
         # Traverse each corner, repeated self._repeats times
         # ------------------------------------------------------------------
         start_time = time.monotonic()
+        legs_done = 0
 
         for repeat_index in range(self._repeats):
             if self._check_stop():
@@ -181,6 +194,11 @@ class SquareMove(AutomationRoutine):
                 target_mm_x = target.x / _NM_PER_MM
                 target_mm_y = target.y / _NM_PER_MM
 
+                self._set_activity(
+                    f"Rep {repeat_index + 1}/{self._repeats}  —  {label}"
+                )
+                self._set_progress(legs_done, total_legs)
+
                 info(
                     f"[SquareMove] Leg {leg_index + 1}/4: moving to {label} "
                     f"({target_mm_x:.6f}, {target_mm_y:.6f}) mm"
@@ -194,6 +212,15 @@ class SquareMove(AutomationRoutine):
                         f"[SquareMove] Leg {leg_index + 1} timed out — "
                         f"continuing anyway"
                     )
+
+                if self._dwell_s > 0 and not self._check_stop():
+                    self._set_activity(
+                        f"Rep {repeat_index + 1}/{self._repeats}  —  {label}  (dwell)"
+                    )
+                    time.sleep(self._dwell_s)
+
+                legs_done += 1
+                self._set_progress(legs_done, total_legs)
 
                 if self._check_stop():
                     break

@@ -10,6 +10,17 @@ from .models import Position
 if TYPE_CHECKING:
     from motion.routines.automation_routine import AutomationRoutine
 
+# Fired when the MotionState string changes. Signature: (new_state: str) -> None
+MotionStateCallback = Callable[[str], None]
+
+# Fired when the active routine publishes a status update.
+# Signature: (job_name, activity, progress_current, progress_total) -> None
+RoutineStateCallback = Callable[[str, str, int, int], None]
+
+# Fired when the user issues a direct motion command (jog, home, etc.).
+# Signature: () -> None
+InteractionCallback = Callable[[], None]
+
 
 class MotionControllerManager:
     """
@@ -24,6 +35,18 @@ class MotionControllerManager:
     It also owns the currently active :class:`AutomationRoutine`, ensuring
     only one routine runs at a time and exposing pause / resume / stop
     controls.
+
+    State change notifications
+    --------------------------
+    Register a callable with :meth:`add_state_listener` to be notified
+    whenever the controller's :class:`MotionState` changes.
+
+    Register a callable with :meth:`add_routine_state_listener` to receive
+    live job/activity/progress updates from the active routine.
+
+    Register a callable with :meth:`add_interaction_listener` to be notified
+    whenever the user issues a direct motion command (jog, home, move, etc.).
+    This is used by the UI to clear the COMPLETE latch on the status bar.
 
     Typical usage
     -------------
@@ -45,7 +68,22 @@ class MotionControllerManager:
         self._lock = threading.Lock()
         self._controller: MotionController | None = None
         self._active_routine: AutomationRoutine | None = None
+
+        self._state_listeners: list[MotionStateCallback] = []
+        self._routine_state_listeners: list[RoutineStateCallback] = []
+        self._interaction_listeners: list[InteractionCallback] = []
+
+        # Track the last known state so we only fire listeners on actual changes.
+        self._last_known_state: str = MotionState.CONNECTING
+
         self._start()
+
+        # Background thread that polls the controller state and fires listeners
+        # when it changes.
+        self._poll_thread = threading.Thread(
+            target=self._poll_state_loop, daemon=True, name="MotionStatePoll"
+        )
+        self._poll_thread.start()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -85,6 +123,89 @@ class MotionControllerManager:
         self._start()
 
     # ------------------------------------------------------------------
+    # State-change listeners
+    # ------------------------------------------------------------------
+
+    def add_state_listener(self, listener: MotionStateCallback) -> None:
+        """Subscribe to motion-state changes.
+
+        *listener* is called on a background thread whenever the
+        :class:`MotionState` string transitions to a new value.
+        Signature: ``(new_state: str) -> None``
+        """
+        self._state_listeners.append(listener)
+
+    def remove_state_listener(self, listener: MotionStateCallback) -> None:
+        try:
+            self._state_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def add_routine_state_listener(self, listener: RoutineStateCallback) -> None:
+        """Subscribe to routine status updates.
+
+        *listener* is called whenever the active routine reports a change to
+        its job name, activity, or progress.
+        Signature: ``(job_name: str, activity: str, progress_current: int, progress_total: int) -> None``
+        """
+        self._routine_state_listeners.append(listener)
+
+    def remove_routine_state_listener(self, listener: RoutineStateCallback) -> None:
+        try:
+            self._routine_state_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def add_interaction_listener(self, listener: InteractionCallback) -> None:
+        """Subscribe to direct user motion interactions.
+
+        *listener* is called (on the calling thread) whenever the user
+        issues a manual motion command such as a jog, home, or absolute move.
+        Signature: ``() -> None``
+        """
+        self._interaction_listeners.append(listener)
+
+    def remove_interaction_listener(self, listener: InteractionCallback) -> None:
+        try:
+            self._interaction_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def _emit_state(self, new_state: str) -> None:
+        for listener in list(self._state_listeners):
+            try:
+                listener(new_state)
+            except Exception as exc:
+                warning(f"State listener raised: {exc}")
+
+    def _emit_routine_state(
+        self, job_name: str, activity: str, progress_current: int, progress_total: int
+    ) -> None:
+        for listener in list(self._routine_state_listeners):
+            try:
+                listener(job_name, activity, progress_current, progress_total)
+            except Exception as exc:
+                warning(f"Routine state listener raised: {exc}")
+
+    def _emit_interaction(self) -> None:
+        for listener in list(self._interaction_listeners):
+            try:
+                listener()
+            except Exception as exc:
+                warning(f"Interaction listener raised: {exc}")
+
+    def _poll_state_loop(self) -> None:
+        """Poll the controller state every 250 ms and fire listeners on change."""
+        import time
+        while True:
+            time.sleep(0.25)
+            ctrl = self._controller
+            new_state = ctrl.get_state() if ctrl is not None else MotionState.FAILED
+            if new_state != self._last_known_state:
+                self._last_known_state = new_state
+                self._emit_state(new_state)
+
+    # ------------------------------------------------------------------
     # Automation routine management
     # ------------------------------------------------------------------
 
@@ -104,8 +225,7 @@ class MotionControllerManager:
         return self._active_routine is not None and self._active_routine.is_paused
 
     def start_routine(self, routine: AutomationRoutine) -> None:
-        """
-        Start *routine*, replacing any previously finished routine.
+        """Start *routine*, replacing any previously finished routine.
 
         Raises :class:`RuntimeError` if a routine is already running.
         """
@@ -114,6 +234,8 @@ class MotionControllerManager:
                 "A routine is already running. Call stop_routine() first."
             )
         self._active_routine = routine
+        # Wire up the routine's state callback so updates flow to our listeners.
+        routine.on_state_changed = self._emit_routine_state
         info("Started Routine")
         routine.start()
 
@@ -130,8 +252,7 @@ class MotionControllerManager:
             self._active_routine.resume()
 
     def stop_routine(self) -> None:
-        """
-        Stop the active routine and wait for its thread to exit.
+        """Stop the active routine and wait for its thread to exit.
 
         Blocks for up to 10 seconds for a clean shutdown.
         """
@@ -156,16 +277,15 @@ class MotionControllerManager:
     # ------------------------------------------------------------------
 
     def move_axis(self, axis: str, direction: int) -> bool:
-        """
-        Jog *axis* by one speed-step in *direction* (+1 or -1).
+        """Jog *axis* by one speed-step in *direction* (+1 or -1).
 
         Returns False if the move would exceed axis limits.
         """
+        self._emit_interaction()
         return self._get_controller().move_axis(axis, direction)
 
     def move(self, axis: str, amount_nm: int, *, is_relative: bool = True) -> bool:
-        """
-        Move *axis* by *amount_nm* nanometres.
+        """Move *axis* by *amount_nm* nanometres.
 
         When *is_relative* is True (the default) *amount_nm* is a delta from
         the current position.  When False it is an absolute target in
@@ -173,19 +293,21 @@ class MotionControllerManager:
 
         Returns False if the move would exceed axis limits.
         """
+        self._emit_interaction()
         return self._get_controller().move(axis, amount_nm, is_relative=is_relative)
 
     def move_to_position(self, position: Position) -> None:
         """Enqueue an absolute move to *position* (coordinates in nanometres)."""
+        self._emit_interaction()
         self._get_controller().move_to_position(position)
 
     def home(self) -> None:
         """Enqueue a homing sequence."""
+        self._emit_interaction()
         self._get_controller().home()
 
     def set_speed(self, speed_nm: int) -> None:
-        """
-        Set the jog step size in nanometres.
+        """Set the jog step size in nanometres.
 
         Clamped to a minimum of config.step_size (hardware resolution).
         """
@@ -201,6 +323,7 @@ class MotionControllerManager:
 
     def reset_fault(self) -> None:
         """Clear a faulted state so the controller can accept commands again."""
+        self._emit_interaction()
         self._get_controller().reset_fault()
 
     @property

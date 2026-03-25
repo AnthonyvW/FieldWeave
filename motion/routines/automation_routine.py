@@ -9,12 +9,20 @@ Subclasses implement :meth:`steps` as a generator, yielding after each
 logical step.  This preserves state across pauses without resorting to
 complex state machines.
 
+Subclasses should set :attr:`job_name` at construction time and call
+:meth:`_set_activity` / :meth:`_set_progress` during execution to surface
+human-readable status information to the UI.
+
 Example::
 
     class MyRoutine(AutomationRoutine):
+        job_name = "My Routine"
+
         def steps(self):
+            self._set_activity("Moving right")
             self.motion.move_axis("x", 1)
             yield
+            self._set_activity("Moving left")
             self.motion.move_axis("x", -1)
             yield
 """
@@ -23,12 +31,15 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING, Callable, Generator
 
 from common.logger import info, error, warning, debug
 
 if TYPE_CHECKING:
     from motion.motion_controller_manager import MotionControllerManager
+
+# Signature: (job_name, activity, progress_current, progress_total) -> None
+RoutineStateCallback = Callable[[str, str, int, int], None]
 
 
 class AutomationRoutine(ABC):
@@ -39,11 +50,19 @@ class AutomationRoutine(ABC):
     between logical steps.  The runner thread advances the generator, honouring
     pause / stop requests between each yield.
 
+    Set the class-level :attr:`job_name` (or override it in ``__init__``) to
+    give the routine a human-readable display name.  During execution call
+    :meth:`_set_activity` and :meth:`_set_progress` to push live status
+    information to any registered :attr:`on_state_changed` callback.
+
     Parameters
     ----------
     motion:
         The :class:`MotionControllerManager` to use for all moves.
     """
+
+    #: Human-readable name shown in the status bar. Override in subclasses.
+    job_name: str = "Unnamed Routine"
 
     def __init__(self, motion: MotionControllerManager) -> None:
         self.motion = motion
@@ -55,6 +74,15 @@ class AutomationRoutine(ABC):
         self._thread: threading.Thread | None = None
         self._running = False
         self._finished = threading.Event()
+
+        # Live status fields — updated by subclasses via helpers below.
+        self._activity: str = "-"
+        self._progress_current: int = 0
+        self._progress_total: int = 0
+
+        # Optional callback fired whenever any of the above fields change.
+        # Signature: (job_name, activity, progress_current, progress_total) -> None
+        self.on_state_changed: RoutineStateCallback | None = None
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -69,6 +97,45 @@ class AutomationRoutine(ABC):
         stopped.  The framework will block at each yield until the routine
         is resumed, or raise :class:`_StopRoutine` to abort execution.
         """
+
+    # ------------------------------------------------------------------
+    # Status helpers for subclasses
+    # ------------------------------------------------------------------
+
+    def _set_activity(self, activity: str) -> None:
+        """Update the current activity description and notify listeners."""
+        self._activity = activity
+        self._notify_state()
+
+    def _set_progress(self, current: int, total: int) -> None:
+        """Update progress counters and notify listeners."""
+        self._progress_current = current
+        self._progress_total = total
+        self._notify_state()
+
+    def _notify_state(self) -> None:
+        cb = self.on_state_changed
+        if cb is not None:
+            try:
+                cb(self.job_name, self._activity, self._progress_current, self._progress_total)
+            except Exception as exc:
+                warning(f"[{type(self).__name__}] on_state_changed raised: {exc}")
+
+    # ------------------------------------------------------------------
+    # Read-only state accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def activity(self) -> str:
+        return self._activity
+
+    @property
+    def progress_current(self) -> int:
+        return self._progress_current
+
+    @property
+    def progress_total(self) -> int:
+        return self._progress_total
 
     # ------------------------------------------------------------------
     # Control API
@@ -172,6 +239,11 @@ class AutomationRoutine(ABC):
         finally:
             self._running = False
             self._finished.set()
+            # Clear activity/progress on exit so the UI resets cleanly.
+            self._activity = "-"
+            self._progress_current = 0
+            self._progress_total = 0
+            self._notify_state()
 
     # ------------------------------------------------------------------
     # Helpers available to subclasses

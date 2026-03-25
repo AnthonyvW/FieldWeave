@@ -115,6 +115,8 @@ class ZStackAreaScan(AutomationRoutine):
         How long (ms) to wait for each image capture to complete.
     """
 
+    job_name = "Z-Stack Area Scan"
+
     def __init__(
         self,
         motion: MotionControllerManager,
@@ -163,6 +165,8 @@ class ZStackAreaScan(AutomationRoutine):
         ctx = get_app_context()
         camera = ctx.camera
 
+        self._set_activity("Initialising")
+
         if camera is None:
             error("[ZStackAreaScan] No camera available — aborting")
             return
@@ -202,6 +206,8 @@ class ZStackAreaScan(AutomationRoutine):
         )
         info(f"[ZStackAreaScan] Output folder: {self._output_folder}")
 
+        self._set_progress(0, total_stacks)
+
         routine_start = time.monotonic()
         stack_durations: list[float] = []
         total_images_captured = 0
@@ -218,6 +224,10 @@ class ZStackAreaScan(AutomationRoutine):
             # ----------------------------------------------------------
             current_pos = self.motion.get_position()
             xy_target = Position(x=target_x_nm, y=target_y_nm, z=current_pos.z)
+            self._set_activity(
+                f"Stack {stack_idx + 1}/{total_stacks}  —  moving to XY"
+            )
+            self._set_progress(stack_idx, total_stacks)
             info(
                 f"[ZStackAreaScan] Stack {stack_idx + 1}/{total_stacks}:"
                 f" moving to X={target_x_nm / _NM_PER_MM:.6f} mm"
@@ -303,6 +313,10 @@ class ZStackAreaScan(AutomationRoutine):
                     x=target_x_nm,
                     y=target_y_nm,
                     z=target_z_nm,
+                )
+                self._set_activity(
+                    f"Stack {stack_idx + 1}/{total_stacks}"
+                    f"  —  Z slice {z_idx + 1}/{total_z}"
                 )
                 info(
                     f"[ZStackAreaScan]   Z slice {z_idx + 1}/{total_z}:"
@@ -410,6 +424,8 @@ class ZStackAreaScan(AutomationRoutine):
             stacks_done = len(stack_durations)
             stacks_left = total_stacks - stacks_done
 
+            self._set_progress(stacks_done, total_stacks)
+
             mean_stack_s = sum(stack_durations) / stacks_done
             # Add 1 second per remaining stack to account for XY travel
             eta_s = stacks_left * (mean_stack_s + 1.0)
@@ -432,6 +448,7 @@ class ZStackAreaScan(AutomationRoutine):
             else:
                 info("[ZStackAreaScan]   All stacks complete.")
 
+        self._set_activity("Returning home")
         self.motion.home()
         # ------------------------------------------------------------------
         # Final summary

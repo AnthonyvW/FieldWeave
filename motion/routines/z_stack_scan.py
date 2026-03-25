@@ -66,6 +66,8 @@ class ZStackScan(AutomationRoutine):
         How long (ms) to wait for each image capture to complete.
     """
 
+    job_name = "Z-Stack Scan"
+
     def __init__(
         self,
         motion: MotionControllerManager,
@@ -96,6 +98,8 @@ class ZStackScan(AutomationRoutine):
         ctx = get_app_context()
         camera = ctx.camera
 
+        self._set_activity("Initialising")
+
         if camera is None:
             error("[ZStackScan] No camera available — aborting")
             return
@@ -125,6 +129,8 @@ class ZStackScan(AutomationRoutine):
         info(f"[ZStackScan] {total} positions from {z_near} nm to {z_far} nm, step {self._step_nm} nm")
         info(f"[ZStackScan] Output folder: {self._output_folder}")
 
+        self._set_progress(0, total)
+
         scan_start_time = time.monotonic()
         capture_times: list[float] = []
         captured_positions: list[int] = []
@@ -141,6 +147,8 @@ class ZStackScan(AutomationRoutine):
                 z=target_z_nm,
             )
 
+            self._set_activity(f"Step {idx + 1}/{total}  —  Z={target_z_mm:.3f} mm")
+            self._set_progress(idx, total)
             info(f"[ZStackScan] Step {idx + 1}/{total}: moving to Z={target_z_mm:.6f} mm")
             self.motion.move_to_position(target_pos)
 
@@ -225,6 +233,7 @@ class ZStackScan(AutomationRoutine):
                     )
                 capture_times.append(time.monotonic() - capture_start)
                 captured_positions.append(actual_pos.z)
+                self._set_progress(idx + 1, total)
                 info(f"[ZStackScan] Saved {filepath}")
 
             yield  # pause/stop point: after capture
