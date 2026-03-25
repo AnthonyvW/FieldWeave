@@ -3,4 +3,4 @@ opencv-python==4.10.0.84
 pyserial==3.5
 PyYAML==6.0.2
 pillow==11.1.0
-pyside6=6.10.1
+pyside6==6.10.1
