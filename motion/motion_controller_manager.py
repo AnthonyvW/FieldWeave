@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Callable, TYPE_CHECKING
 
+from common.logger import info, warning, error
 from .motion_controller import MotionController, MotionState
 from .models import Position
 
@@ -113,16 +114,19 @@ class MotionControllerManager:
                 "A routine is already running. Call stop_routine() first."
             )
         self._active_routine = routine
+        info("Started Routine")
         routine.start()
 
     def pause_routine(self) -> None:
         """Pause the active routine (no-op if none is running)."""
         if self._active_routine is not None:
+            info("Paused Routine")
             self._active_routine.pause()
 
     def resume_routine(self) -> None:
         """Resume a paused routine (no-op if none is running)."""
         if self._active_routine is not None:
+            info("Resumed Routine")
             self._active_routine.resume()
 
     def stop_routine(self) -> None:
@@ -132,6 +136,7 @@ class MotionControllerManager:
         Blocks for up to 10 seconds for a clean shutdown.
         """
         if self._active_routine is not None:
+            info("Stopped Routine")
             self._active_routine.stop()
             self._active_routine.wait(timeout=10)
             self._active_routine = None

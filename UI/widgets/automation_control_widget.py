@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from common.app_context import get_app_context
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -228,11 +229,19 @@ class AutomationWidget(QWidget):
     def _on_pause_clicked(self) -> None:
         self._paused = self._pause_btn.isChecked()
         self._pause_btn.setText("Resume" if self._paused else "Pause")
-        # TODO: propagate pause/resume signal to the running automation task
+        manager = get_app_context().motion
+        if manager is None:
+            return
+        if self._paused:
+            manager.pause_routine()
+        else:
+            manager.resume_routine()
 
     def _on_stop_clicked(self) -> None:
         self._set_running(False)
-        # TODO: propagate stop signal to the running automation task
+        manager = get_app_context().motion
+        if manager is not None:
+            manager.stop_routine()
 
     # ------------------------------------------------------------------
     # Public accessors

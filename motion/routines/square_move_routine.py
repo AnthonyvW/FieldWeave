@@ -188,12 +188,6 @@ class SquareMove(AutomationRoutine):
 
                 self.motion.move_to_position(target)
 
-                yield  # pause/stop point: move enqueued
-
-                if self._check_stop():
-                    break
-
-                # Poll until both X and Y are within tolerance
                 timed_out = self._wait_for_position(target)
                 if timed_out:
                     warning(
