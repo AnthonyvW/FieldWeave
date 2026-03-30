@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Callable
 from logging.handlers import RotatingFileHandler
-
+import threading
 
 class AppLogger:
     """
@@ -30,6 +30,7 @@ class AppLogger:
             return
         
         self._log_callbacks: list[Callable[[str, str], None]] = []
+        self._callbacks_lock = threading.Lock()
         self._logger = logging.getLogger('FieldWeaveApp')
         self._logger.setLevel(logging.DEBUG)
         
@@ -163,9 +164,10 @@ class AppLogger:
             callback: Function(level, message) to call on each log message
         """
         # Remove if already registered to avoid duplicates
-        if callback in self._log_callbacks:
-            self._log_callbacks.remove(callback)
-        self._log_callbacks.append(callback)
+        with self._callbacks_lock:
+            if callback in self._log_callbacks:
+                self._log_callbacks.remove(callback)
+            self._log_callbacks.append(callback)
     
     def unregister_callback(self, callback: Callable[[str, str], None]):
         """
@@ -174,16 +176,18 @@ class AppLogger:
         Args:
             callback: Callback to remove
         """
-        if callback in self._log_callbacks:
-            self._log_callbacks.remove(callback)
+        with self._callbacks_lock:
+            if callback in self._log_callbacks:
+                self._log_callbacks.remove(callback)
     
     def _notify_callbacks(self, level: str, message: str):
         """Notify all registered callbacks"""
-        for callback in self._log_callbacks:
+        with self._callbacks_lock:
+            callbacks = list(self._log_callbacks)  # snapshot to avoid holding lock during calls
+        for callback in callbacks:
             try:
                 callback(level, message)
             except Exception as e:
-                # Don't let callback errors break logging
                 print(f"Error in log callback: {e}")
     
     def debug(self, message: str):

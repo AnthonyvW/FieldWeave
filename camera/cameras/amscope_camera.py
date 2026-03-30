@@ -9,14 +9,15 @@ from typing import Callable, Any
 from types import SimpleNamespace
 from pathlib import Path
 import ctypes
-import numpy as np
+import time
 import threading
 import gc
-import time
+
+import numpy as np
 
 from camera.cameras.base_camera import BaseCamera, CameraResolution
-from common.logger import info, debug, error, exception, warning
 from camera.settings.amscope_settings import AmscopeSettings
+from common.logger import info, debug, error, exception, warning
 
 # Module-level reference to the loaded SDK
 _amcam = None
@@ -90,6 +91,7 @@ class AmscopeCamera(BaseCamera):
         if not AmscopeCamera._sdk_loaded:
             AmscopeCamera.ensure_sdk_loaded()
 
+        self._frame_buffer: ctypes.Array | None = None
         self._still_buffer_a: ctypes.Array | None = None
         self._still_buffer_b: ctypes.Array | None = None
         # which buffer the SDK last wrote into (0=a, 1=b)
@@ -99,7 +101,7 @@ class AmscopeCamera(BaseCamera):
         self._still_buffer_lock = threading.Lock()
 
         self._pending_still_resolution_index: int = 0
-        self._dfc_completion_callback = None  # Callback for DFC completion
+        self._dfc_completion_callback: Callable[[], None] | None = None  # Callback for DFC completion
 
     def _get_settings_class(self):
         """
@@ -289,7 +291,7 @@ class AmscopeCamera(BaseCamera):
         amcam = self._get_sdk()
         try:
             # Get current resolution to allocate preview frame buffer
-            res_index, width, height = self.get_current_preview_resolution()
+            _res_index, _width, _height = self.get_current_preview_resolution()
             # Allocate preview frame buffer using the post-rotation output size.
             # get_FinalSize() accounts for AMCAM_OPTION_ROTATE so the buffer
             # is correctly sized for 90/270° rotations where width and height
@@ -398,46 +400,6 @@ class AmscopeCamera(BaseCamera):
     # -------------------------
     # Image Capture and Saving
     # -------------------------
-        """
-        Submit a single histogram request to the SDK.
-
-        We call Amcam_GetHistogramV2 directly rather than through the SDK's
-        GetHistogram wrapper because the wrapper drops nFlag before forwarding
-        to our callback, making it impossible to know the array size.  By going
-        directly we receive (aHist: c_void_p, nFlag: c_uint) and can reconstruct
-        the typed pointer ourselves.
-
-        A closure is used so that ``self`` and ``is_still`` are both available
-        inside the raw ctypes callback without relying on the ctx py_object
-        (which the SDK passes through but we don't need for routing).
-
-        Args:
-            is_still: True to tag this request as belonging to a still capture,
-                      False for a preview frame.
-        """
-        if not self._hcam:
-            return
-        amcam = self._get_sdk()
-
-        # Capture self and is_still in a closure so the raw callback can route
-        # back to the instance method.
-        instance = self
-
-        def _cb(aHist: int, nFlag: int, ctx: object) -> None:
-            instance._on_histogram(aHist, nFlag, is_still)
-
-        try:
-            # Keep a strong reference on self so the callback is not GC'd
-            # before the SDK fires it.
-            self._histogram_callback = amcam.Amcam._Amcam__HISTOGRAM_CALLBACK(
-                _cb)
-            amcam.Amcam._Amcam__lib.Amcam_GetHistogramV2(
-                self._hcam._Amcam__h,
-                self._histogram_callback,
-                ctypes.py_object(None),
-            )
-        except Exception as e:
-            error(f"Failed to request histogram: {e}")
 
     def _on_histogram(self, aHist: int, nFlag: int, is_still: bool) -> None:
         """
@@ -469,6 +431,28 @@ class AmscopeCamera(BaseCamera):
                 self.settings._preview_histogram = histogram
         except Exception:
             exception("Failed to process histogram callback")
+
+    def _request_histogram(self, is_still: bool) -> None:
+        """Request a histogram from the SDK for the current frame.
+
+        Registers a one-shot callback via Amcam_GetHistogramV2. The SDK
+        invokes the callback on its own internal thread, so ``_on_histogram``
+        must be thread-safe (it only writes to settings attributes, which is
+        acceptable).
+
+        Args:
+            is_still: True if this histogram is for a still capture,
+                      False for the live preview stream.
+        """
+        if not self._hcam:
+            return
+        try:
+            self._hcam.GetHistogram(
+                lambda aHist, nFlag: self._on_histogram(aHist, nFlag, is_still),
+                None,
+            )
+        except Exception:
+            exception("Failed to request histogram")
 
     def get_still_buffer(self) -> tuple[ctypes.Array, int, int] | None:
         with self._still_buffer_lock:
@@ -886,13 +870,13 @@ class AmscopeCamera(BaseCamera):
             error("Camera not in capture mode")
             return False
 
-        if not hasattr(self, '_frame_buffer') or self._frame_buffer is None:
+        if self._frame_buffer is None:
             error("No frame buffer available")
             return False
 
         try:
             # Get current resolution
-            res_index, width, height = self.get_current_preview_resolution()
+            _, width, height = self.get_current_preview_resolution()
 
             # Copy from frame buffer
             amcam = self._get_sdk()
@@ -919,7 +903,7 @@ class AmscopeCamera(BaseCamera):
 
             return success
 
-        except Exception as e:
+        except Exception:
             exception(f"Failed to capture and save stream frame: {filepath}")
             return False
 
@@ -953,7 +937,7 @@ class AmscopeCamera(BaseCamera):
         amcam = self._get_sdk()
 
         # Update frame buffer on IMAGE events
-        if event == self.EVENT_IMAGE and hasattr(self, '_frame_buffer') and self._frame_buffer is not None:
+        if event == self.EVENT_IMAGE and self._frame_buffer is not None:
             try:
                 self._hcam.PullImageV4(self._frame_buffer, 0, 24, 0, None)
             except:
@@ -1011,7 +995,7 @@ class AmscopeCamera(BaseCamera):
         elif event == amcam.AMCAM_EVENT_DFC:
             # DFC event received - call completion callback if registered
             debug("DFC event received")
-            if hasattr(self, '_dfc_completion_callback') and self._dfc_completion_callback:
+            if self._dfc_completion_callback is not None:
                 self._dfc_completion_callback()
 
         # Call registered callback

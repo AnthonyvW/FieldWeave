@@ -164,7 +164,7 @@ class AppContext:
         """Register the main window instance."""
         self._main_window = window
         if self._toast_manager is None:
-            from UI.widgets.toast_widget import ToastManager
+            from UI.widgets.toast_widget import ToastManager # pylint: disable=import-outside-toplevel
             self._toast_manager = ToastManager(window)
 
     def register_settings_dialog(self, dialog: SettingsDialog) -> None:
