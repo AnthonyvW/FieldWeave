@@ -362,7 +362,7 @@ class ZStackAreaScan(AutomationRoutine):
                 # Capture
                 actual_pos = self.motion.get_position()
                 filepath = subfolder / f"{actual_pos.z}.jpg"
-                info(f"[ZStackAreaScan]   Capturing: {filepath}")
+                info(f"[ZStackAreaScan]   Capturing: {str(filepath)}")
 
                 capture_success: bool | None = None
                 capture_error: Exception | None = None

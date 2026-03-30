@@ -154,7 +154,7 @@ class CameraPreview(QFrame):
 
 
         self._focus_overlay.set_vision_manager(get_app_context().machine_vision)
-    
+
         # Also connect repaint so the label refreshes after each result.
         get_app_context().machine_vision.focus_result_ready.connect(
             lambda _result: self._video_label.update()
@@ -208,7 +208,7 @@ class CameraPreview(QFrame):
         src = camera_manager.get_current_frame()
         if not src:
             return
-        
+
         try:
             camera = camera_manager.active_camera
             if not camera:
@@ -395,18 +395,16 @@ class CameraPreview(QFrame):
 
     def cleanup(self) -> None:
         info("Preview: cleanup starting...")
-        try:
-            ctx = get_app_context()
-            camera_manager = ctx.camera_manager
 
-            camera_manager.preview_frame_ready.disconnect(self._on_frame_ready)
-            camera_manager.still_frame_ready.disconnect(self._on_still_frame_ready)
-            camera_manager.streaming_started.disconnect(self._on_streaming_started)
-            camera_manager.streaming_stopped.disconnect(self._on_streaming_stopped)
-            camera_manager.camera_error.disconnect(self._on_camera_error)
-            camera_manager.camera_disconnected.disconnect(self._on_camera_disconnected)
-            camera_manager.active_camera_changed.disconnect(self._on_active_camera_changed)
-        except Exception as e:
-            error(f"Preview: Error disconnecting signals: {e}")
+        ctx = get_app_context()
+        camera_manager = ctx.camera_manager
+
+        camera_manager.preview_frame_ready.disconnect(self._on_frame_ready)
+        camera_manager.still_frame_ready.disconnect(self._on_still_frame_ready)
+        camera_manager.streaming_started.disconnect(self._on_streaming_started)
+        camera_manager.streaming_stopped.disconnect(self._on_streaming_stopped)
+        camera_manager.camera_error.disconnect(self._on_camera_error)
+        camera_manager.camera_disconnected.disconnect(self._on_camera_disconnected)
+        camera_manager.active_camera_changed.disconnect(self._on_active_camera_changed)
 
         info("Preview cleanup complete")

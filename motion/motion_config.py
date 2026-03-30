@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Any, Union
 
@@ -64,7 +64,7 @@ class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
         if not data:
             return MotionSystemSettings()
 
-        valid_fields = {f.name for f in MotionSystemSettings.__dataclass_fields__.values()}
+        valid_fields = {f.name for f in fields(MotionSystemSettings)}
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}
         return MotionSystemSettings(**filtered_data)
 

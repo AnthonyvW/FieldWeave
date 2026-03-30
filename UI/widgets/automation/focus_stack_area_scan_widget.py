@@ -478,13 +478,9 @@ class ZStackAreaScanWidget(QWidget):
         return decimals
 
     def _get_printer_step_mm(self) -> float:
-        try:
-            ctx = get_app_context()
-            if ctx.settings is not None:
-                step_nm: int = ctx.settings.motion.step_size
-                return step_nm / 1_000_000.0
-        except Exception:
-            pass
+        motion = get_app_context().motion
+        if motion is not None and motion.settings is not None:
+            return motion.settings.step_size / 1_000_000.0
         return 0.04
 
     def _get_current_position_mm(self) -> tuple[float, float, float] | None:
@@ -645,24 +641,20 @@ class ZStackAreaScanWidget(QWidget):
             return
 
         _NM_PER_MM = 1_000_000
-        try:
-            routine = ZStackAreaScan(
-                motion=motion,
-                x_start_nm=round(x_start * _NM_PER_MM),
-                x_end_nm=round(x_end * _NM_PER_MM),
-                x_step_nm=round(x.step_mm * _NM_PER_MM),
-                y_start_nm=round(y_start * _NM_PER_MM),
-                y_end_nm=round(y_end * _NM_PER_MM),
-                y_step_nm=round(y.step_mm * _NM_PER_MM),
-                z_start_nm=round(z_start * _NM_PER_MM),
-                z_end_nm=round(z_end * _NM_PER_MM),
-                z_step_nm=round(z.step_mm * _NM_PER_MM),
-                output_folder=output_folder,
-            )
-            motion.start_routine(routine)
-        except Exception as exc:
-            error(f"ZStackAreaScanWidget: failed to start routine — {exc}")
-            return
+        routine = ZStackAreaScan(
+            motion=motion,
+            x_start_nm=round(x_start * _NM_PER_MM),
+            x_end_nm=round(x_end * _NM_PER_MM),
+            x_step_nm=round(x.step_mm * _NM_PER_MM),
+            y_start_nm=round(y_start * _NM_PER_MM),
+            y_end_nm=round(y_end * _NM_PER_MM),
+            y_step_nm=round(y.step_mm * _NM_PER_MM),
+            z_start_nm=round(z_start * _NM_PER_MM),
+            z_end_nm=round(z_end * _NM_PER_MM),
+            z_step_nm=round(z.step_mm * _NM_PER_MM),
+            output_folder=output_folder,
+        )
+        motion.start_routine(routine)
 
         self._enter_running_state()
 

@@ -40,6 +40,7 @@ _HRESULT_NAMES: dict[int, str] = {
     0x800704C7: "E_CANCELLED (operation cancelled)",
 }
 
+
 def _format_hresult(e: Exception) -> str:
     """Format an amcam HRESULTException with a human-readable error name.
 
@@ -54,27 +55,27 @@ def _format_hresult(e: Exception) -> str:
     name = _HRESULT_NAMES.get(hr_unsigned, f"0x{hr_unsigned:08X}")
     return f"HRESULT {name}"
 
+
 class AmscopeCamera(BaseCamera):
     """
     Amscope camera implementation using the amcam SDK.
-    
+
     Now includes integrated settings management with Amscope-specific
     settings like fan control, TEC, low noise mode, etc.
-    
+
     The SDK must be loaded before using this class:
         AmscopeCamera.ensure_sdk_loaded()
-    
+
     Or it will be loaded automatically on first use.
     """
-    
+
     # Class-level flag to track SDK loading
     _sdk_loaded = False
-    
-    
+
     def __init__(self, model: str):
         """
         Initialize Amscope camera.
-        
+
         Args:
             model: Camera model name (default "Amscope")
         """
@@ -82,7 +83,7 @@ class AmscopeCamera(BaseCamera):
 
         # Set Settings class
         self._settings_class = AmscopeSettings
-        
+
         self._hcam = None  # Will be amcam.Amcam after SDK loads
 
         # Ensure SDK is loaded before instantiating
@@ -91,74 +92,76 @@ class AmscopeCamera(BaseCamera):
 
         self._still_buffer_a: ctypes.Array | None = None
         self._still_buffer_b: ctypes.Array | None = None
-        self._still_buffer_active: int = 0  # which buffer the SDK last wrote into (0=a, 1=b)
+        # which buffer the SDK last wrote into (0=a, 1=b)
+        self._still_buffer_active: int = 0
         self._still_buffer_width: int = 0
         self._still_buffer_height: int = 0
         self._still_buffer_lock = threading.Lock()
 
         self._pending_still_resolution_index: int = 0
         self._dfc_completion_callback = None  # Callback for DFC completion
-    
+
     def _get_settings_class(self):
         """
         Get the settings class for Amscope cameras.
-        
+
         Returns:
             AmscopeSettings class
         """
-        from camera.settings.amscope_settings import AmscopeSettings
+        from camera.settings.amscope_settings import AmscopeSettings  # pylint: disable=import-outside-toplevel
         return AmscopeSettings
-    
+
     @property
     def settings(self) -> AmscopeSettings:
         """
         Get settings with proper type hint for Amscope.
-        
+
         Returns:
             AmscopeSettings object
         """
         if self._settings is None:
-            raise RuntimeError("Settings not initialized. Call initialize_settings() first.")
+            raise RuntimeError(
+                "Settings not initialized. Call initialize_settings() first.")
         return self._settings
-    
+
     # -------------------------
     # SDK Management
     # -------------------------
-    
+
     @classmethod
     def ensure_sdk_loaded(cls, sdk_path: Path | None = None) -> bool:
         """
         Ensure the Amscope SDK is loaded and ready to use.
-        
+
         Args:
             sdk_path: Optional path to SDK base directory.
                      If None, auto-detects from project structure.
-        
+
         Returns:
             True if SDK loaded successfully, False otherwise
         """
         global _amcam
-        
+
         if cls._sdk_loaded and _amcam is not None:
             return True
-        
+
         try:
-            from camera.sdk_loaders.amscope_sdk_loader import AmscopeSdkLoader
-            
+            from camera.sdk_loaders.amscope_sdk_loader import AmscopeSdkLoader  # pylint: disable=import-outside-toplevel
+
             loader = AmscopeSdkLoader(sdk_path)
             _amcam = loader.load()
-            
+
             cls._sdk_loaded = True
             info("Amscope SDK loaded successfully")
             return True
-            
+
         except Exception as e:
             error(f"Failed to load Amscope SDK: {e}")
             info("Attempting fallback to direct import...")
-            
+
             try:
                 # Fallback to direct import if loader fails
-                import amcam as amcam_module
+                import amcam as amcam_module  # pylint: disable=import-outside-toplevel
                 _amcam = amcam_module
                 cls._sdk_loaded = True
                 info("Amscope SDK loaded via direct import")
@@ -166,7 +169,7 @@ class AmscopeCamera(BaseCamera):
             except ImportError as ie:
                 error(f"Direct import also failed: {ie}")
                 return False
-    
+
     @staticmethod
     def _get_sdk():
         """Get the loaded SDK module"""
@@ -176,16 +179,16 @@ class AmscopeCamera(BaseCamera):
                 "Amscope SDK not loaded. Call AmscopeCamera.ensure_sdk_loaded() first."
             )
         return _amcam
-    
+
     @classmethod
     def _get_sdk_static(cls):
         """Static version of _get_sdk for class methods"""
         return cls._get_sdk()
-    
+
     # -------------------------
     # Event Constants
     # -------------------------
-    
+
     @classmethod
     def get_event_constants(cls):
         """Get event constants as a namespace object."""
@@ -198,40 +201,40 @@ class AmscopeCamera(BaseCamera):
             ERROR=amcam.AMCAM_EVENT_ERROR,
             DISCONNECTED=amcam.AMCAM_EVENT_DISCONNECTED
         )
-    
+
     @property
     def EVENT_IMAGE(self):
         return self._get_sdk().AMCAM_EVENT_IMAGE
-    
+
     @property
     def EVENT_EXPOSURE(self):
         return self._get_sdk().AMCAM_EVENT_EXPOSURE
-    
+
     @property
     def EVENT_TEMPTINT(self):
         return self._get_sdk().AMCAM_EVENT_TEMPTINT
-    
+
     @property
     def EVENT_STILLIMAGE(self):
         return self._get_sdk().AMCAM_EVENT_STILLIMAGE
-    
+
     @property
     def EVENT_ERROR(self):
         return self._get_sdk().AMCAM_EVENT_ERROR
-    
+
     @property
     def EVENT_DISCONNECTED(self):
         return self._get_sdk().AMCAM_EVENT_DISCONNECTED
-    
+
     @property
     def handle(self):
         """Get the underlying amcam handle"""
         return self._hcam
-    
+
     # -------------------------
     # Camera Control
     # -------------------------
-    
+
     def open(self, camera_id: str) -> bool:
         """Open connection to Amscope camera"""
         amcam = self._get_sdk()
@@ -247,7 +250,7 @@ class AmscopeCamera(BaseCamera):
             return False
         except self._get_sdk().HRESULTException:
             return False
-    
+
     def close(self):
         """Close camera connection"""
         if self._hcam:
@@ -266,22 +269,23 @@ class AmscopeCamera(BaseCamera):
             self._settings._histogram_enabled = False
             self._settings._preview_histogram = None
             self._settings._still_histogram = None
-    
+
     def _reallocate_frame_buffer(self):
         """Reallocate frame buffer based on current resolution."""
         try:
             width, height = self._hcam.get_Size()
             buffer_size = self.calculate_buffer_size(width, height, 24)
             self._frame_buffer = ctypes.create_string_buffer(buffer_size)
-            info(f"Reallocated frame buffer: {width}x{height}, size={buffer_size}")
+            info(
+                f"Reallocated frame buffer: {width}x{height}, size={buffer_size}")
         except Exception as e:
             error(f"Failed to reallocate frame buffer: {e}")
-    
+
     def start_capture(self, callback: Callable, context: Any) -> bool:
         """Start capturing frames with callback"""
         if not self._hcam:
             return False
-        
+
         amcam = self._get_sdk()
         try:
             # Get current resolution to allocate preview frame buffer
@@ -296,14 +300,15 @@ class AmscopeCamera(BaseCamera):
                 _, fw, fh = self.get_current_preview_resolution()
             buffer_size = amcam.TDIBWIDTHBYTES(fw * 24) * fh
             self._frame_buffer = ctypes.create_string_buffer(buffer_size)
-            
+
             self._callback = callback
             self._callback_context = context
-            self._hcam.StartPullModeWithCallback(self._event_callback_wrapper, self)
+            self._hcam.StartPullModeWithCallback(
+                self._event_callback_wrapper, self)
             return True
         except self._get_sdk().HRESULTException:
             return False
-    
+
     def stop_capture(self):
         """Stop capturing frames"""
         if self._hcam:
@@ -311,7 +316,7 @@ class AmscopeCamera(BaseCamera):
                 self._hcam.Stop()
             except:
                 pass
-    
+
     def get_frame_buffer(self) -> tuple[ctypes.Array, int, int] | None:
         """
         Return the camera's internal preview frame buffer and its dimensions.
@@ -336,30 +341,31 @@ class AmscopeCamera(BaseCamera):
     def pull_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24, timeout_ms: int = 1000) -> bool:
         """
         Pull the latest image into buffer (expects ctypes.create_string_buffer)
-        
+
         Args:
             buffer: ctypes buffer to receive image data
             bits_per_pixel: Bits per pixel (typically 24)
             timeout_ms: Timeout in milliseconds to wait for frame
-            
+
         Returns:
             True if successful, False otherwise
         """
         if not self._hcam:
             error("Cannot pull image: camera handle is None")
             return False
-        
+
         amcam = self._get_sdk()
         try:
             # Use WaitImageV4 to wait for a frame (bStill=0 for video stream)
             # This is more reliable than PullImageV4 which may fail if no frame is ready
-            self._hcam.WaitImageV4(timeout_ms, buffer, 0, bits_per_pixel, 0, None)
+            self._hcam.WaitImageV4(timeout_ms, buffer, 0,
+                                   bits_per_pixel, 0, None)
             return True
         except amcam.HRESULTException as e:
             # If timeout or no frame available, log the error
             error(f"Failed to pull image: {e}")
             return False
-    
+
     def snap_image(self, resolution_index: int = 0) -> bool:
         """Capture a still image at specified resolution"""
         if not self._hcam:
@@ -372,11 +378,11 @@ class AmscopeCamera(BaseCamera):
         except Exception as e:
             error(f"snap_image failed: {_format_hresult(e)}")
             return False
-    
+
     # -------------------------
     # Resolution Management
     # -------------------------
-    
+
     def get_preview_resolutions(self) -> list[CameraResolution]:
         """Get available preview resolutions"""
         return self.settings.get_preview_resolutions()
@@ -423,7 +429,8 @@ class AmscopeCamera(BaseCamera):
         try:
             # Keep a strong reference on self so the callback is not GC'd
             # before the SDK fires it.
-            self._histogram_callback = amcam.Amcam._Amcam__HISTOGRAM_CALLBACK(_cb)
+            self._histogram_callback = amcam.Amcam._Amcam__HISTOGRAM_CALLBACK(
+                _cb)
             amcam.Amcam._Amcam__lib.Amcam_GetHistogramV2(
                 self._hcam._Amcam__h,
                 self._histogram_callback,
@@ -442,14 +449,15 @@ class AmscopeCamera(BaseCamera):
             is_still: True if triggered by a still capture, False for preview.
         """
         try:
-            bins     = 1 << (nFlag & 0x0F)          # e.g. 256 or 65536
+            bins = 1 << (nFlag & 0x0F)          # e.g. 256 or 65536
             channels = 1 if (nFlag & 0x8000) else 3
 
             # Cast the void pointer to a typed float array of the correct length
             total_bins = bins * channels
             arr_type = ctypes.c_float * total_bins
             arr = arr_type.from_address(aHist)
-            raw = np.ctypeslib.as_array(arr).astype(np.float64).reshape(channels, bins)
+            raw = np.ctypeslib.as_array(arr).astype(
+                np.float64).reshape(channels, bins)
 
             # Normalise each channel independently
             totals = raw.sum(axis=1, keepdims=True)
@@ -475,17 +483,17 @@ class AmscopeCamera(BaseCamera):
     def pull_still_image(self, buffer: ctypes.Array, bits_per_pixel: int = 24) -> tuple[bool, int, int]:
         """
         Pull a still image into buffer
-        
+
         Args:
             buffer: Buffer to receive image data (ctypes.create_string_buffer)
             bits_per_pixel: Bits per pixel (typically 24)
-            
+
         Returns:
             Tuple of (success, width, height)
         """
         if not self._hcam:
             return False, 0, 0
-        
+
         amcam = self._get_sdk()
         try:
             # Get still resolution to return dimensions
@@ -495,11 +503,11 @@ class AmscopeCamera(BaseCamera):
             return True, w, h
         except amcam.HRESULTException:
             return False, 0, 0
-    
+
     # -------------------------
     # Image Capture and Saving
     # -------------------------
-    
+
     def capture_still(
         self,
         resolution_index: int | None = None,
@@ -544,7 +552,8 @@ class AmscopeCamera(BaseCamera):
             pData = bytearray(buffer_size)
 
             still_ready = threading.Event()
-            capture_success: dict[str, Any] = {"success": False, "width": 0, "height": 0}
+            capture_success: dict[str, Any] = {
+                "success": False, "width": 0, "height": 0}
 
             original_callback = self._callback
             original_context = self._callback_context
@@ -564,7 +573,8 @@ class AmscopeCamera(BaseCamera):
                         try:
                             n = min(len(pData), len(read_buf))
                             pData[:n] = read_buf[:n]
-                            capture_success.update(success=True, width=w, height=h)
+                            capture_success.update(
+                                success=True, width=w, height=h)
                         except Exception as copy_err:
                             error(f"Failed to copy still buffer: {copy_err}")
                             capture_success["success"] = False
@@ -642,7 +652,8 @@ class AmscopeCamera(BaseCamera):
                     except Exception as cb_err:
                         exception(f"Error in on_complete callback: {cb_err}")
 
-            threading.Thread(target=_process, daemon=True, name="CameraStillProcess").start()
+            threading.Thread(target=_process, daemon=True,
+                             name="CameraStillProcess").start()
             return True
 
         except Exception:
@@ -703,7 +714,8 @@ class AmscopeCamera(BaseCamera):
 
         if resolution_index is None:
             resolution_index = self.settings.get_still_resolution_index()
-            debug(f"Still resolution index resolved from settings: {resolution_index} ({self.settings.still_resolution})")
+            debug(
+                f"Still resolution index resolved from settings: {resolution_index} ({self.settings.still_resolution})")
 
         amcam = self._get_sdk()
         try:
@@ -813,9 +825,11 @@ class AmscopeCamera(BaseCamera):
 
                     t_processed = time.perf_counter()
                     process_ms = (t_processed - t_proc_start) * 1000
-                    debug(f"Still image processing (numpy): {process_ms:.1f} ms")
+                    debug(
+                        f"Still image processing (numpy): {process_ms:.1f} ms")
 
-                    save_ok = self.save_image(image_data, filepath, additional_metadata)
+                    save_ok = self.save_image(
+                        image_data, filepath, additional_metadata)
 
                     t_saved = time.perf_counter()
                     save_ms = (t_saved - t_processed) * 1000
@@ -838,7 +852,8 @@ class AmscopeCamera(BaseCamera):
 
                 except Exception:
                     save_ok = False
-                    exception(f"Failed to process/save still image: {filepath}")
+                    exception(
+                        f"Failed to process/save still image: {filepath}")
 
                 if on_complete is not None:
                     try:
@@ -860,7 +875,7 @@ class AmscopeCamera(BaseCamera):
         except Exception:
             exception(f"Failed to capture and save still image: {filepath}")
             return False
-    
+
     def capture_and_save_stream(
         self,
         filepath: Path,
@@ -870,71 +885,73 @@ class AmscopeCamera(BaseCamera):
         if not self._hcam or not self._is_open:
             error("Camera not in capture mode")
             return False
-        
+
         if not hasattr(self, '_frame_buffer') or self._frame_buffer is None:
             error("No frame buffer available")
             return False
-        
+
         try:
             # Get current resolution
             res_index, width, height = self.get_current_preview_resolution()
-            
+
             # Copy from frame buffer
             amcam = self._get_sdk()
             stride = amcam.TDIBWIDTHBYTES(width * 24)
-            
+
             # Create numpy array from buffer
-            image_data = np.frombuffer(self._frame_buffer, dtype=np.uint8).reshape((height, stride))[:, :width*3].reshape((height, width, 3)).copy()
-            
+            image_data = np.frombuffer(self._frame_buffer, dtype=np.uint8).reshape(
+                (height, stride))[:, :width*3].reshape((height, width, 3)).copy()
+
             # Convert BGR to RGB
             image_data = image_data[:, :, ::-1].copy()
-            
+
             # Save with metadata
-            success = self.save_image(image_data, filepath, additional_metadata)
-            
+            success = self.save_image(
+                image_data, filepath, additional_metadata)
+
             del image_data
             gc.collect()
-            
+
             if success:
                 info(f"Stream frame captured and saved: {filepath}")
             else:
                 error(f"Failed to save stream frame: {filepath}")
-            
+
             return success
-            
+
         except Exception as e:
             exception(f"Failed to capture and save stream frame: {filepath}")
             return False
-    
+
     # -------------------------
     # Utility Methods
     # -------------------------
-    
+
     @staticmethod
     def calculate_buffer_size(width: int, height: int, bits_per_pixel: int = 24) -> int:
         """Calculate required buffer size for image data"""
         amcam = AmscopeCamera._get_sdk_static()
         return amcam.TDIBWIDTHBYTES(width * bits_per_pixel) * height
-    
+
     @staticmethod
     def calculate_stride(width: int, bits_per_pixel: int = 24) -> int:
         """Calculate image stride (bytes per row)"""
         amcam = AmscopeCamera._get_sdk_static()
         return amcam.TDIBWIDTHBYTES(width * bits_per_pixel)
-    
+
     @classmethod
     def enable_gige(cls, callback: Callable | None = None, context: Any = None):
         """Enable GigE camera support"""
         if not cls._sdk_loaded:
             cls.ensure_sdk_loaded()
-        
+
         amcam = cls._get_sdk_static()
         amcam.Amcam.GigeEnable(callback, context)
-    
+
     def _event_callback_wrapper(self, event: int, context: Any):
         """Internal wrapper for camera events."""
         amcam = self._get_sdk()
-        
+
         # Update frame buffer on IMAGE events
         if event == self.EVENT_IMAGE and hasattr(self, '_frame_buffer') and self._frame_buffer is not None:
             try:
@@ -968,9 +985,12 @@ class AmscopeCamera(BaseCamera):
 
                     # Allocate both buffers at max size once, never shrink or reallocate
                     if self._still_buffer_a is None or len(self._still_buffer_a) < required:
-                        self._still_buffer_a = ctypes.create_string_buffer(required)
-                        self._still_buffer_b = ctypes.create_string_buffer(required)
-                        debug(f"Still double-buffer allocated: {sw}x{sh} ({required} bytes each)")
+                        self._still_buffer_a = ctypes.create_string_buffer(
+                            required)
+                        self._still_buffer_b = ctypes.create_string_buffer(
+                            required)
+                        debug(
+                            f"Still double-buffer allocated: {sw}x{sh} ({required} bytes each)")
 
                     # Write into whichever buffer is NOT currently being read by still_callback
                     next_active = 1 - self._still_buffer_active
@@ -982,7 +1002,8 @@ class AmscopeCamera(BaseCamera):
                     self._still_buffer_active = next_active
                     self._still_buffer_width = sw
                     self._still_buffer_height = sh
-                    debug(f"Still frame pulled into buffer {next_active}: {sw}x{sh}")
+                    debug(
+                        f"Still frame pulled into buffer {next_active}: {sw}x{sh}")
             except Exception as e:
                 error(f"Failed to pull still frame into still buffer: {e}")
             if self._settings is not None and self._settings._histogram_enabled:
@@ -992,7 +1013,7 @@ class AmscopeCamera(BaseCamera):
             debug("DFC event received")
             if hasattr(self, '_dfc_completion_callback') and self._dfc_completion_callback:
                 self._dfc_completion_callback()
-        
+
         # Call registered callback
         if self._callback:
             self._callback(event, self._callback_context)

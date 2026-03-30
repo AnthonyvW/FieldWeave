@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import threading
 from typing import Callable, TYPE_CHECKING
+import time
 
 from common.logger import info, warning, error
-from .motion_controller import MotionController, MotionState
-from .models import Position
+from motion.motion_controller import MotionController, MotionState
+from motion.models import Position
+from motion.motion_config import MotionSystemSettings
 
 if TYPE_CHECKING:
     from motion.routines.automation_routine import AutomationRoutine
@@ -196,7 +198,6 @@ class MotionControllerManager:
 
     def _poll_state_loop(self) -> None:
         """Poll the controller state every 250 ms and fire listeners on change."""
-        import time
         while True:
             time.sleep(0.25)
             ctrl = self._controller
@@ -339,6 +340,12 @@ class MotionControllerManager:
         if ctrl is None:
             return MotionState.FAILED
         return ctrl.get_state()
+
+    @property
+    def settings(self) -> MotionSystemSettings | None:
+        if self._controller:
+            return self._controller.config
+        return None
 
     # ------------------------------------------------------------------
     # Message listeners

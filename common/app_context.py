@@ -26,11 +26,11 @@ class AppContext:
     Singleton application context managing shared resources.
     """
     _instance: AppContext | None = None
+    _initialized = False
 
     def __new__(cls) -> AppContext:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
         return cls._instance
 
     def __init__(self) -> None:
@@ -51,11 +51,11 @@ class AppContext:
         # Load settings
         self._load_settings()
 
-        # Initialize camera manager
-        self._initialize_camera_manager()
-
         # Initialize motion controller manager
         self._initialize_motion_manager()
+
+        # Initialize camera manager
+        self._initialize_camera_manager()
 
         # Initialize machine vision manager
         self._initialize_machine_vision_manager()

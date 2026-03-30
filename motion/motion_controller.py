@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import queue
 import re
 import threading
 import time
@@ -13,8 +12,8 @@ import serial.tools.list_ports
 
 from common.logger import info, error, warning, debug
 
-from .models import Position
-from .motion_config import MotionSystemSettings, MotionSystemSettingsManager
+from motion.models import Position
+from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
 
 _NM_PER_MM = 1_000_000
 
