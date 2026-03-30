@@ -7,32 +7,23 @@ FocusOverlay receives FocusResult objects produced by MachineVisionManager
 and composites the pre-rendered heatmap into the camera preview.  All heavy
 OpenCV work happens off the GUI thread; this file only handles display.
 
-Wiring
-------
-CameraPreview calls:
-
-  1. focus_overlay.set_vision_manager(ctx.machine_vision) once after
-     construction, giving the overlay a direct reference to the manager.
-  2. update_full() on every frame (via OverlayLabel.notify_full()), where
-     the overlay submits analysis jobs to the manager itself.
-  3. mv.focus_result_ready.connect(focus_overlay.receive_result) so results
-     are delivered back on the GUI thread via Qt's queued connection.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import Qt, QRect, Slot, Signal
-from PySide6.QtGui import QPainter, QImage, QPixmap
+from PySide6.QtGui import QPainter, QImage, QPixmap, QColor, QPen
 from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 
+from common.app_context import get_app_context
 from common.logger import info
-from .overlay_base import Overlay
+from UI.widgets.preview_overlay.overlay_base import Overlay
 
 if TYPE_CHECKING:
-    from machine_vision.machine_vision_manager import FocusResult, MachineVisionManager
+    from machine_vision.machine_vision_manager import FocusResult
 
 
 class FocusOverlay(Overlay):
@@ -41,21 +32,13 @@ class FocusOverlay(Overlay):
 
     The heatmap is rendered by MachineVisionWorker off-thread.  This class
     only stores the latest result pixmap and paints it when Qt asks.
-
-    Call set_vision_manager() once after construction to connect the overlay
-    to the shared MachineVisionManager.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._result_pixmap: QPixmap | None = None
         self._scores_text: str = ""
-        self._vision_manager: MachineVisionManager | None = None
-
-    def set_vision_manager(self, manager: MachineVisionManager) -> None:
-        """Connect this overlay to the shared MachineVisionManager."""
-        self._vision_manager = manager
-        manager.focus_result_ready.connect(self.receive_result)
+        get_app_context().machine_vision.focus_result_ready.connect(self.receive_result)
 
     # ------------------------------------------------------------------
     # Called by OverlayLabel on every rendered frame (GUI thread)
@@ -69,10 +52,8 @@ class FocusOverlay(Overlay):
         enabled.  The manager silently drops the request if it is still
         processing the previous frame.
         """
-        if self._vision_manager is None:
-            return
         h, w = frame.shape[:2]
-        self._vision_manager.request_focus_analysis(frame, w, h)
+        get_app_context().machine_vision.request_focus_analysis(frame, w, h)
 
     # ------------------------------------------------------------------
     # Receive results from MachineVisionManager (GUI thread, queued signal)
@@ -99,10 +80,9 @@ class FocusOverlay(Overlay):
 
         s = result.scores
         ceiling_str = "auto"
-        if self._vision_manager is not None:
-            active = self._vision_manager.settings.focus.active
-            if not active.auto_ceiling:
-                ceiling_str = f"{active.score_ceiling:.1f}"
+        active = get_app_context().machine_vision.settings.focus.active
+        if not active.auto_ceiling:
+            ceiling_str = f"{active.score_ceiling:.1f}"
         self._scores_text = (
             f"Focus ({result.method})  "
             f"whole={s.whole:.2f}  center={s.center:.2f}  peak={s.peak:.2f}"
@@ -140,7 +120,6 @@ class FocusOverlay(Overlay):
             font.setPointSize(8)
             painter.setFont(font)
 
-            from PySide6.QtGui import QColor, QPen
             # Shadow pass for readability.
             painter.setPen(QPen(QColor(0, 0, 0, 200)))
             painter.drawText(rect.left() + 6, rect.bottom() - 7, self._scores_text)

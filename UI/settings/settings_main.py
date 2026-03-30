@@ -10,8 +10,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QDialog,
     QDialogButtonBox,
-    QListWidget,
-    QListWidgetItem,
     QStackedWidget,
     QFrame,
     QMessageBox,

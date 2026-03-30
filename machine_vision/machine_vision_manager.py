@@ -11,17 +11,14 @@ import threading
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from common.logger import debug, info, error, warning
-from .machine_vision_worker import MachineVisionWorker, FocusResult
-from .machine_vision_config import (
+from common.logger import info, error, warning
+from machine_vision.machine_vision_worker import MachineVisionWorker, FocusResult
+from machine_vision.machine_vision_config import (
     FocusDetectionSettings,
-    FocusMethod,
     LaplacianSettings,
     MachineVisionSettings,
     MachineVisionSettingsManager,
     TenengradSettings,
-    FOCUS_METHOD_TENENGRAD,
-    FOCUS_METHOD_LAPLACIAN,
 )
 
 

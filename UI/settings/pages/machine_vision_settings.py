@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info, error
 from machine_vision.machine_vision_config import (
-    FocusDetectionSettings,
     LaplacianSettings,
     MachineVisionSettings,
     TenengradSettings,
@@ -304,8 +303,7 @@ class MachineVisionSettingsWidget(QWidget):
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.parent_dialog = parent_dialog
-        self._ctx = get_app_context()
-        self._mv = self._ctx.machine_vision
+        self._mv = get_app_context().machine_vision
 
         self._has_unsaved_changes: bool = False
 
@@ -638,18 +636,19 @@ class MachineVisionSettingsWidget(QWidget):
 
     @Slot()
     def _on_save(self) -> None:
+        ctx = get_app_context()
         try:
             self._mv.save_settings()
             self._snapshot_saved_values(self._mv.settings)
             self._clear_all_orange()
             self._set_unsaved(False)
-            if self._ctx.toast:
-                self._ctx.toast.success("Machine vision settings saved", duration=2000)
+            if ctx.toast:
+                ctx.toast.success("Machine vision settings saved", duration=2000)
             info("Machine vision settings saved")
         except Exception as exc:
             error(f"Failed to save machine vision settings: {exc}")
-            if self._ctx.toast:
-                self._ctx.toast.error(f"Save failed: {exc}", duration=3000)
+            if ctx.toast:
+                ctx.toast.error(f"Save failed: {exc}", duration=3000)
 
     def _clear_all_orange(self) -> None:
         for panel in (self._tenengrad_panel, self._laplacian_panel):
