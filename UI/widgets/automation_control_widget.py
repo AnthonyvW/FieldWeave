@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from common.app_context import get_app_context
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -11,7 +10,9 @@ from PySide6.QtWidgets import (
     QStackedWidget,
 )
 from PySide6.QtGui import QPainter, QColor, QFont
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
+
+from common.app_context import get_app_context
 
 from UI.widgets.automation.focus_stack_widget import FocusStackWidget
 from UI.widgets.automation.focus_stack_area_scan_widget import ZStackAreaScanWidget
@@ -41,6 +42,15 @@ class _ArrowComboBox(QComboBox):
         painter.setFont(font)
         painter.setPen(QColor(60, 60, 60))
         painter.drawText(panel_x, 0, arrow_w, self.height(), Qt.AlignmentFlag.AlignCenter, "▼")
+
+class _CollapsibleStack(QStackedWidget):
+    def sizeHint(self) -> QSize:
+        w = self.currentWidget()
+        return w.sizeHint() if w else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w else super().minimumSizeHint()
 
 # ---------------------------------------------------------------------------
 # Automation widget
@@ -142,7 +152,7 @@ class AutomationWidget(QWidget):
         outer_layout.addWidget(divider)
 
         # ---- Stacked content area ----
-        self._stack = QStackedWidget()
+        self._stack = _CollapsibleStack()
         self._focus_stack_widget = FocusStackWidget()
         self._area_scan_widget = ZStackAreaScanWidget()
         self._tree_core_widget = TreeCoreWidget()
