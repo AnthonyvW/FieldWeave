@@ -205,8 +205,6 @@ class DiamondButton(QPushButton):
 
 
 class NavigationWidget(QWidget):
-    # Shared step size (nm) across all instances.
-    _shared_step_size_nm: int = 400_000
     _instances: list[NavigationWidget] = []
 
     @classmethod
@@ -222,14 +220,6 @@ class NavigationWidget(QWidget):
     # ------------------------------------------------------------------
     # Step size — shared across instances, stored in nm
     # ------------------------------------------------------------------
-
-    @property
-    def _step_size_nm(self) -> int:
-        return NavigationWidget._shared_step_size_nm
-
-    @_step_size_nm.setter
-    def _step_size_nm(self, value: int) -> None:
-        NavigationWidget._shared_step_size_nm = value
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -536,26 +526,31 @@ class NavigationWidget(QWidget):
 
         # If the current step size is no longer in the new presets, fall back
         # to the first preset so the controller speed stays consistent.
-        if self._step_size_nm not in presets_nm and presets_nm:
+        if self._current_step_size_nm() not in presets_nm and presets_nm:
             self._set_step_size_nm(presets_nm[0], notify_instances=False)
 
         self._populate_step_buttons(presets_nm)
 
+    def _current_step_size_nm(self) -> int:
+        """Return the currently selected step size from the motion config, or the first fallback."""
+        ctx = get_app_context()
+        if ctx.motion is not None and ctx.motion.settings is not None:
+            return ctx.motion.settings.step_size
+        return _FALLBACK_PRESETS_NM[0]
+
     def _set_step_size_nm(self, size_nm: int, *, notify_instances: bool = True) -> None:
-        """Set the shared step size and update all live instances."""
-        NavigationWidget._shared_step_size_nm = size_nm
+        """Persist the selected step size to the motion config and update all live instances."""
+        ctx = get_app_context()
+        if ctx.motion is not None and ctx.motion.settings is not None:
+            ctx.motion.settings.step_size = size_nm
 
         if notify_instances:
             for instance in list(NavigationWidget._instances):
                 instance._sync_step_size_buttons()
 
-        ctx = get_app_context()
-        if ctx.motion is not None:
-            ctx.motion.set_speed(size_nm)
-
     def _sync_step_size_buttons(self) -> None:
-        """Update checked states to reflect the current shared step size."""
-        current = NavigationWidget._shared_step_size_nm
+        """Update checked states to reflect the current step size in config."""
+        current = self._current_step_size_nm()
         for btn, btn_size_nm in self.step_buttons:
             btn.setChecked(btn_size_nm == current)
 
@@ -808,17 +803,14 @@ class NavigationWidget(QWidget):
     # Movement helpers
     # ------------------------------------------------------------------
 
-    def _dir(self, base: int, inverted: bool) -> int:
-        """Return *base* direction (+1/-1) optionally flipped by *inverted*."""
-        return -base if inverted else base
-
     def _move_up(self) -> None:
         """Move stage up (positive Y, subject to inversion)."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("y", self._dir(1, self._invert_y))
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("y", -step if self._invert_y else step)
         self._update_position_display()
 
     def _move_down(self) -> None:
@@ -827,7 +819,8 @@ class NavigationWidget(QWidget):
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("y", self._dir(-1, self._invert_y))
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("y", step if self._invert_y else -step)
         self._update_position_display()
 
     def _move_left(self) -> None:
@@ -836,7 +829,8 @@ class NavigationWidget(QWidget):
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("x", self._dir(-1, self._invert_x))
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("x", step if self._invert_x else -step)
         self._update_position_display()
 
     def _move_right(self) -> None:
@@ -845,7 +839,8 @@ class NavigationWidget(QWidget):
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("x", self._dir(1, self._invert_x))
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("x", -step if self._invert_x else step)
         self._update_position_display()
 
     def _go_home(self) -> None:
@@ -880,7 +875,8 @@ class NavigationWidget(QWidget):
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("z", self._dir(1, self._invert_z))
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("z", -step if self._invert_z else step)
         self._update_position_display()
 
     def _z_decrease(self) -> None:
@@ -889,5 +885,6 @@ class NavigationWidget(QWidget):
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("z", self._dir(-1, self._invert_z))
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("z", step if self._invert_z else -step)
         self._update_position_display()

@@ -54,8 +54,7 @@ class MotionControllerManager:
     -------------
     manager = MotionControllerManager()
     manager.wait_until_ready()           # blocks until homed
-    manager.move_axis("x", 1)
-    manager.set_speed(80_000)            # 0.08 mm steps
+    manager.move_axis("x", 80_000)           # jog +0.08 mm in X
 
     routine = ZStackScan(manager, ...)
     manager.start_routine(routine)
@@ -277,13 +276,13 @@ class MotionControllerManager:
     # Public motion API
     # ------------------------------------------------------------------
 
-    def move_axis(self, axis: str, direction: int) -> bool:
-        """Jog *axis* by one speed-step in *direction* (+1 or -1).
+    def move_axis(self, axis: str, amount_nm: int) -> bool:
+        """Jog *axis* by *amount_nm* nanometres (signed relative move).
 
         Returns False if the move would exceed axis limits.
         """
         self._emit_interaction()
-        return self._get_controller().move_axis(axis, direction)
+        return self._get_controller().move_axis(axis, amount_nm)
 
     def move(self, axis: str, amount_nm: int, *, is_relative: bool = True) -> bool:
         """Move *axis* by *amount_nm* nanometres.
@@ -306,13 +305,6 @@ class MotionControllerManager:
         """Enqueue a homing sequence."""
         self._emit_interaction()
         self._get_controller().home()
-
-    def set_speed(self, speed_nm: int) -> None:
-        """Set the jog step size in nanometres.
-
-        Clamped to a minimum of config.step_size (hardware resolution).
-        """
-        self._get_controller().set_speed(speed_nm)
 
     def get_position(self) -> Position:
         """Return the current position (coordinates in nanometres)."""

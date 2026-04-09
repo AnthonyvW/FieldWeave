@@ -117,7 +117,6 @@ class MotionController:
     - Accept G-code move commands via a thread-safe queue.
     - Track the current position in nanometres.
     - Provide move_axis and move_to_position helpers.
-    - Provide set_speed to change the jog step size.
     - Expose a simple message-listener hook for UI feedback.
     """
 
@@ -126,8 +125,6 @@ class MotionController:
         self.config: MotionSystemSettings = self._config_manager.load()
 
         self.position = Position(0, 0, 0)
-        self.speed: int = self.config.step_size  # nanometres per jog step
-
         self.faulted = False
 
         self._ready = threading.Event()
@@ -341,16 +338,6 @@ class MotionController:
         """Return the machine's maximum extents as a Position (nanometres)."""
         return Position.from_mm(self.config.max_x, self.config.max_y, self.config.max_z)
 
-    def set_speed(self, speed_nm: int) -> None:
-        """
-        Set the jog step size in nanometres.
-
-        The value is clamped to a minimum of config.step_size so the
-        controller cannot be set below its hardware resolution.
-        """
-        self.speed = max(self.config.step_size, speed_nm)
-        info(f"Speed set to {self.speed / _NM_PER_MM:.6f} mm ({self.speed} nm)")
-
     def move_to_position(self, position: Position) -> None:
         """Enqueue an absolute move to *position* (coordinates in nanometres)."""
         self._enqueue(
@@ -380,14 +367,14 @@ class MotionController:
         self._enqueue(f"G1 {axis.upper()}{mm:.6f}")
         return True
 
-    def move_axis(self, axis: str, direction: int) -> bool:
+    def move_axis(self, axis: str, amount_nm: int) -> bool:
         """
-        Jog *axis* by one speed-step in *direction* (+1 or -1).
+        Jog *axis* by *amount_nm* nanometres (signed relative move).
 
         Returns False (and does not enqueue) if the resulting position would
         exceed the configured axis limits.
         """
-        return self.move(axis, self.speed * direction)
+        return self.move(axis, amount_nm)
 
     def home(self) -> None:
         """Enqueue a homing sequence (G90 + G28)."""
