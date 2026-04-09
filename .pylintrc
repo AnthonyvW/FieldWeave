@@ -1,4 +1,5 @@
 [MASTER]
+ignored-modules=cv2
 disable=
     C0301, # Line too long
     C0103, # snake case
