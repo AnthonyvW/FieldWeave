@@ -16,6 +16,29 @@ from PySide6.QtCore import Qt, QRectF, QTimer, QEvent
 from common.app_context import get_app_context
 from common.logger import warning
 from motion.motion_controller_manager import MotionState
+from motion.motion_config import MotionSystemSettings
+
+# Nanometres per millimetre.
+_NM_PER_MM = 1_000_000
+
+# Fallback preset values (nm) used when no settings are available.
+_FALLBACK_PRESETS_NM: list[int] = [40_000, 400_000, 2_000_000, 10_000_000]
+
+
+def _settings_presets_nm(s: MotionSystemSettings) -> list[int]:
+    """Return exactly 4 step-preset values in nm from *s*, padding with fallbacks."""
+    raw: list[int] = getattr(s, "step_presets", [])
+    padded = (list(raw) + list(_FALLBACK_PRESETS_NM))[:4]
+    return padded
+
+
+def _format_mm(nm: int) -> str:
+    """Format a nanometre value as a compact millimetre label."""
+    mm = nm / _NM_PER_MM
+    # Drop trailing zeros but keep at least 2 decimal places for small values.
+    if mm < 1.0:
+        return f"{mm:.3g}mm"
+    return f"{mm:g}mm"
 
 
 def clamp(v: int, lo: int = 0, hi: int = 255) -> int:
@@ -182,23 +205,42 @@ class DiamondButton(QPushButton):
 
 
 class NavigationWidget(QWidget):
-    # Shared step size across all instances
-    _shared_step_size: float = 0.4
+    # Shared step size (nm) across all instances.
+    _shared_step_size_nm: int = 400_000
     _instances: list[NavigationWidget] = []
 
-    @property
-    def _step_size(self) -> float:
-        return NavigationWidget._shared_step_size
+    @classmethod
+    def notify_settings_changed(cls) -> None:
+        """
+        Call this after navigation settings are saved to push the updated
+        presets and axis-inversion flags to every live NavigationWidget.
+        NavigationSettingsWidget._on_save() calls this automatically.
+        """
+        for instance in list(cls._instances):
+            instance.refresh_from_settings()
 
-    @_step_size.setter
-    def _step_size(self, value: float) -> None:
-        NavigationWidget._shared_step_size = value
+    # ------------------------------------------------------------------
+    # Step size — shared across instances, stored in nm
+    # ------------------------------------------------------------------
+
+    @property
+    def _step_size_nm(self) -> int:
+        return NavigationWidget._shared_step_size_nm
+
+    @_step_size_nm.setter
+    def _step_size_nm(self, value: int) -> None:
+        NavigationWidget._shared_step_size_nm = value
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         NavigationWidget._instances.append(self)
         self.destroyed.connect(
             lambda: NavigationWidget._instances.remove(self))
+
+        # Axis-inversion flags — updated by refresh_from_settings().
+        self._invert_x: bool = False
+        self._invert_y: bool = False
+        self._invert_z: bool = False
 
         # Declare all widget attributes here so they are always defined in __init__
         self.top_btn: DiamondButton
@@ -209,7 +251,10 @@ class NavigationWidget(QWidget):
         self.z_up_btn: QPushButton
         self.z_down_btn: QPushButton
         self.position_label: QLabel
-        self.step_buttons: list[tuple[QPushButton, float]]
+        self.step_buttons: list[tuple[QPushButton, int]]  # (button, size_nm)
+
+        # Step-size preset buttons container — rebuilt by refresh_from_settings().
+        self._step_buttons_layout: QHBoxLayout | None = None
 
         self._setup_ui()
 
@@ -231,6 +276,42 @@ class NavigationWidget(QWidget):
 
         # Start in the unavailable state
         self._set_motion_available(False)
+
+        # Apply current settings (presets + inversion flags).
+        self.refresh_from_settings()
+
+    # ------------------------------------------------------------------
+    # Settings refresh — called at init and after settings are saved
+    # ------------------------------------------------------------------
+
+    def refresh_from_settings(self) -> None:
+        """
+        Pull the latest presets and axis-inversion flags from the motion
+        controller settings and update the widget accordingly.
+
+        Safe to call from any point after __init__ completes.
+        """
+        ctx = get_app_context()
+        s: MotionSystemSettings | None = (
+            ctx.motion.settings if ctx.motion is not None else None
+        )
+
+        if s is not None:
+            self._invert_x = getattr(s, "invert_x", False)
+            self._invert_y = getattr(s, "invert_y", False)
+            self._invert_z = getattr(s, "invert_z", False)
+            presets_nm = _settings_presets_nm(s)
+        else:
+            self._invert_x = False
+            self._invert_y = False
+            self._invert_z = False
+            presets_nm = list(_FALLBACK_PRESETS_NM)
+
+        self._rebuild_step_buttons(presets_nm)
+
+    # ------------------------------------------------------------------
+    # UI setup
+    # ------------------------------------------------------------------
 
     def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -341,6 +422,8 @@ class NavigationWidget(QWidget):
             self._ready_timer.stop()
             self._set_motion_available(True)
             self._position_timer.start()
+            # Settings are now guaranteed to be loaded — apply them.
+            self.refresh_from_settings()
         elif state in (MotionState.FAILED, MotionState.FAULTED):
             self._ready_timer.stop()  # Terminal failure — stay overlaid
 
@@ -369,44 +452,28 @@ class NavigationWidget(QWidget):
             self._overlay.raise_()
             self.position_label.setText("X: --  Y: --  Z: -- mm")
 
-    def _create_step_size_controls(self) -> QWidget:
-        """Create step size selection buttons with position display"""
+    # ------------------------------------------------------------------
+    # Step size controls
+    # ------------------------------------------------------------------
 
+    def _create_step_size_controls(self) -> QWidget:
+        """Create step size selection buttons with position display."""
         group = QGroupBox("Step Size")
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(10, 5, 10, 5)
         group_layout.setSpacing(10)
 
-        # Buttons row
+        # Buttons row — kept as an attribute so _rebuild_step_buttons can clear it.
         buttons_row = QWidget()
-        buttons_layout = QHBoxLayout(buttons_row)
-        buttons_layout.setContentsMargins(0, 0, 0, 0)
-        buttons_layout.setSpacing(8)
+        self._step_buttons_layout = QHBoxLayout(buttons_row)
+        self._step_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self._step_buttons_layout.setSpacing(8)
 
-        # Step size buttons
-        step_sizes = [0.04, 0.4, 2.0, 10.0]
         self.step_buttons = []
-
-        for size in step_sizes:
-            btn = QPushButton(f"{size}mm")
-            btn.setFixedHeight(30)
-            btn.setCheckable(True)
-            btn.setStyleSheet("""
-                QPushButton {
-                    padding: 0px;
-                }
-                QPushButton:checked {
-                    background-color: rgb(140, 143, 146);
-                    color: white;
-                    border: 1px solid rgb(100, 103, 106);
-                }
-            """)
-            btn.clicked.connect(lambda checked, s=size: self._set_step_size(s))
-            buttons_layout.addWidget(btn)
-            self.step_buttons.append((btn, size))
-
-        # Reflect the current shared step size
-        self.sync_step_size_buttons()
+        # Populated properly by refresh_from_settings() → _rebuild_step_buttons()
+        # after __init__ completes; initialise with fallbacks so the widget is
+        # never in an empty state during construction.
+        self._populate_step_buttons(_FALLBACK_PRESETS_NM)
 
         group_layout.addWidget(buttons_row)
 
@@ -424,26 +491,80 @@ class NavigationWidget(QWidget):
 
         return group
 
-    def _set_step_size(self, size: float) -> None:
-        """Set the step size on all instances and update button states"""
-        NavigationWidget._shared_step_size = size
+    def _populate_step_buttons(self, presets_nm: list[int]) -> None:
+        """
+        Fill *self._step_buttons_layout* with one button per preset.
 
-        for instance in NavigationWidget._instances:
-            instance.sync_step_size_buttons()
+        Does NOT clear the layout first — call _rebuild_step_buttons() for that.
+        """
+        self.step_buttons = []
+        for size_nm in presets_nm:
+            btn = QPushButton(_format_mm(size_nm))
+            btn.setFixedHeight(30)
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    padding: 0px;
+                }
+                QPushButton:checked {
+                    background-color: rgb(140, 143, 146);
+                    color: white;
+                    border: 1px solid rgb(100, 103, 106);
+                }
+            """)
+            btn.clicked.connect(lambda checked, s=size_nm: self._set_step_size_nm(s))
+            self._step_buttons_layout.addWidget(btn)
+            self.step_buttons.append((btn, size_nm))
+
+        self._sync_step_size_buttons()
+
+    def _rebuild_step_buttons(self, presets_nm: list[int]) -> None:
+        """
+        Tear down and recreate the step-size buttons for a new set of presets.
+
+        If the currently selected step size is not in the new preset list the
+        first preset is selected instead.
+        """
+        if self._step_buttons_layout is None:
+            return
+
+        # Remove all existing buttons from the layout and delete them.
+        while self._step_buttons_layout.count():
+            item = self._step_buttons_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # If the current step size is no longer in the new presets, fall back
+        # to the first preset so the controller speed stays consistent.
+        if self._step_size_nm not in presets_nm and presets_nm:
+            self._set_step_size_nm(presets_nm[0], notify_instances=False)
+
+        self._populate_step_buttons(presets_nm)
+
+    def _set_step_size_nm(self, size_nm: int, *, notify_instances: bool = True) -> None:
+        """Set the shared step size and update all live instances."""
+        NavigationWidget._shared_step_size_nm = size_nm
+
+        if notify_instances:
+            for instance in list(NavigationWidget._instances):
+                instance._sync_step_size_buttons()
 
         ctx = get_app_context()
         if ctx.motion is not None:
-            ctx.motion.set_speed(round(size * 1_000_000))
+            ctx.motion.set_speed(size_nm)
 
-    def sync_step_size_buttons(self) -> None:
-        """Update button checked states to reflect the current shared step size."""
-        size = NavigationWidget._shared_step_size
-        for btn, btn_size in self.step_buttons:
-            btn.setChecked(btn_size == size)
+    def _sync_step_size_buttons(self) -> None:
+        """Update checked states to reflect the current shared step size."""
+        current = NavigationWidget._shared_step_size_nm
+        for btn, btn_size_nm in self.step_buttons:
+            btn.setChecked(btn_size_nm == current)
+
+    # ------------------------------------------------------------------
+    # Jog controls
+    # ------------------------------------------------------------------
 
     def _create_jog_controls(self) -> QWidget:
-        """Create combined jog controls with diamond navigation and Z-axis"""
-
+        """Create combined jog controls with diamond navigation and Z-axis."""
         group = QGroupBox("Jog")
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(0, 0, 0, 0)
@@ -471,7 +592,7 @@ class NavigationWidget(QWidget):
         return group
 
     def _create_diamond_panel(self) -> QWidget:
-        """Create the diamond navigation with home button in center"""
+        """Create the diamond navigation with home button in center."""
         container = QWidget()
         container.setFixedSize(240, 200)  # Slightly larger for better spacing
 
@@ -497,7 +618,7 @@ class NavigationWidget(QWidget):
         for btn in [self.top_btn, self.left_btn, self.right_btn, self.bot_btn, self.center_btn]:
             btn.installEventFilter(self)
 
-        # Connect buttons to placeholder functions
+        # Connect buttons to movement handlers
         self.top_btn.clicked.connect(self._move_up)
         self.left_btn.clicked.connect(self._move_left)
         self.right_btn.clicked.connect(self._move_right)
@@ -683,45 +804,52 @@ class NavigationWidget(QWidget):
             f"X: {x_mm:.2f}  Y: {y_mm:.2f}  Z: {z_mm:.2f} mm"
         )
 
-    # Placeholder movement functions
+    # ------------------------------------------------------------------
+    # Movement helpers
+    # ------------------------------------------------------------------
+
+    def _dir(self, base: int, inverted: bool) -> int:
+        """Return *base* direction (+1/-1) optionally flipped by *inverted*."""
+        return -base if inverted else base
+
     def _move_up(self) -> None:
-        """Move stage up (positive Y)"""
+        """Move stage up (positive Y, subject to inversion)."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("y", 1)
+        ctx.motion.move_axis("y", self._dir(1, self._invert_y))
         self._update_position_display()
 
     def _move_down(self) -> None:
-        """Move stage down (negative Y)"""
+        """Move stage down (negative Y, subject to inversion)."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("y", -1)
+        ctx.motion.move_axis("y", self._dir(-1, self._invert_y))
         self._update_position_display()
 
     def _move_left(self) -> None:
-        """Move stage left (negative X)"""
+        """Move stage left (negative X, subject to inversion)."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("x", -1)
+        ctx.motion.move_axis("x", self._dir(-1, self._invert_x))
         self._update_position_display()
 
     def _move_right(self) -> None:
-        """Move stage right (positive X)"""
+        """Move stage right (positive X, subject to inversion)."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("x", 1)
+        ctx.motion.move_axis("x", self._dir(1, self._invert_x))
         self._update_position_display()
 
     def _go_home(self) -> None:
-        """Return stage to home position"""
+        """Return stage to home position."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
@@ -747,19 +875,19 @@ class NavigationWidget(QWidget):
         self._update_position_display()
 
     def _z_increase(self) -> None:
-        """Increase Z height"""
+        """Increase Z height (subject to inversion)."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("z", 1)
+        ctx.motion.move_axis("z", self._dir(1, self._invert_z))
         self._update_position_display()
 
     def _z_decrease(self) -> None:
-        """Decrease Z height"""
+        """Decrease Z height (subject to inversion)."""
         ctx = get_app_context()
         if ctx.motion is None:
             warning("NavigationWidget: motion command ignored — controller not ready")
             return
-        ctx.motion.move_axis("z", -1)
+        ctx.motion.move_axis("z", self._dir(-1, self._invert_z))
         self._update_position_display()
