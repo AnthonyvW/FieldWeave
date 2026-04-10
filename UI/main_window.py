@@ -324,8 +324,4 @@ class MainWindow(QMainWindow):
         if hasattr(self.navigate_tab, 'camera_preview'):
             self.navigate_tab.camera_preview.cleanup()
 
-        # Cleanup app context
-        ctx = get_app_context()
-        ctx.cleanup()
-
         super().closeEvent(event)

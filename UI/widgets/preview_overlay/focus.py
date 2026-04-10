@@ -32,6 +32,9 @@ class FocusOverlay(Overlay):
 
     The heatmap is rendered by MachineVisionWorker off-thread.  This class
     only stores the latest result pixmap and paints it when Qt asks.
+
+    When a focus region is active a dashed rectangle is drawn on top of the
+    heatmap showing exactly which area of the frame is being analysed.
     """
 
     def __init__(self) -> None:
@@ -110,8 +113,28 @@ class FocusOverlay(Overlay):
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
+
+        # When a focus region is active, clip the heatmap draw to that
+        # rectangle so the camera image shows through outside it naturally.
+        # When disabled, paint the heatmap over the full frame as before.
+        fr = get_app_context().machine_vision.settings.focus.focus_region
         painter.setOpacity(1.0)
-        painter.drawPixmap(rect.topLeft(), scaled)
+        if fr.enabled:
+            rw = rect.width()
+            rh = rect.height()
+            x0 = rect.left() + int(round(rw * fr.left / 100.0))
+            x1 = rect.left() + int(round(rw * (1.0 - fr.right / 100.0)))
+            y0 = rect.top() + int(round(rh * fr.top / 100.0))
+            y1 = rect.top() + int(round(rh * (1.0 - fr.bottom / 100.0)))
+            painter.save()
+            painter.setClipRect(QRect(x0, y0, x1 - x0, y1 - y0))
+            painter.drawPixmap(rect.topLeft(), scaled)
+            painter.restore()
+        else:
+            painter.drawPixmap(rect.topLeft(), scaled)
+
+        # Draw the focus region border/dimming if the setting is active.
+        self._draw_region_rect(painter, rect)
 
         # Score legend — bottom-left corner of the image rect.
         if self._scores_text:
@@ -128,6 +151,63 @@ class FocusOverlay(Overlay):
             painter.drawText(rect.left() + 5, rect.bottom() - 8, self._scores_text)
 
             painter.restore()
+
+    def _draw_region_rect(self, painter: QPainter, rect: QRect) -> None:
+        """
+        Draw a dashed rectangle indicating the active focus region.
+
+        The rectangle is computed from the current ``FocusRegionSettings``
+        margins, scaled to the display rect so it always matches what the
+        worker actually analyses regardless of the preview resolution.
+
+        Does nothing when the focus region is not enabled.
+        """
+        fr = get_app_context().machine_vision.settings.focus.focus_region
+        if not fr.enabled:
+            return
+
+        rw = rect.width()
+        rh = rect.height()
+
+        x0 = rect.left() + int(round(rw * fr.left / 100.0))
+        x1 = rect.left() + int(round(rw * (1.0 - fr.right / 100.0)))
+        y0 = rect.top() + int(round(rh * fr.top / 100.0))
+        y1 = rect.top() + int(round(rh * (1.0 - fr.bottom / 100.0)))
+
+        region_rect = QRect(x0, y0, x1 - x0, y1 - y0)
+
+        painter.save()
+
+        # Subtle dark fill outside the region to emphasise the active area.
+        painter.setOpacity(0.25)
+        painter.setBrush(QColor(0, 0, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        # Top strip
+        painter.drawRect(QRect(rect.left(), rect.top(), rw, y0 - rect.top()))
+        # Bottom strip
+        painter.drawRect(QRect(rect.left(), y1, rw, rect.bottom() - y1 + 1))
+        # Left strip (between top and bottom strips)
+        painter.drawRect(QRect(rect.left(), y0, x0 - rect.left(), y1 - y0))
+        # Right strip (between top and bottom strips)
+        painter.drawRect(QRect(x1, y0, rect.right() - x1 + 1, y1 - y0))
+
+        # Dashed white border around the active rectangle.
+        painter.setOpacity(1.0)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        pen = QPen(QColor(255, 255, 255, 220))
+        pen.setWidth(1)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(region_rect)
+
+        # Thin black shadow border for contrast on light backgrounds.
+        pen_shadow = QPen(QColor(0, 0, 0, 160))
+        pen_shadow.setWidth(1)
+        pen_shadow.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen_shadow)
+        painter.drawRect(region_rect.adjusted(1, 1, 1, 1))
+
+        painter.restore()
 
 
 class FocusButton(QPushButton):

@@ -8,6 +8,8 @@ Design
 - One QGroupBox per vision algorithm.  Currently: Focus Detection.
 - Within Focus Detection a method dropdown (Tenengrad / Laplacian) swaps
   the visible parameter group so each method has its own tunable controls.
+- A shared "Focus Region" group lets the user restrict analysis to a
+  rectangular inset defined by four edge margins (% of image dimension).
 - Modified fields turn orange exactly like CameraSettingsWidget does.
 - get_group_names() returns the top-level group names so SettingsDialog can
   add them as sidebar sub-items.
@@ -40,6 +42,7 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info, error
 from machine_vision.machine_vision_config import (
+    FocusRegionSettings,
     LaplacianSettings,
     MachineVisionSettings,
     TenengradSettings,
@@ -138,7 +141,7 @@ def _make_ceiling_row(
     reset_btn.clicked.connect(lambda: spin.setValue(15.0))
 
     auto_check.checkStateChanged.connect(
-        lambda s: spin.setEnabled(s != Qt.CheckState.Checked.value)
+        lambda s: spin.setEnabled(s != Qt.CheckState.Checked)
     )
 
     row.addWidget(spin)
@@ -287,6 +290,73 @@ class _LaplacianPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Focus Region panel (shared across methods)
+# ---------------------------------------------------------------------------
+
+class _FocusRegionPanel(QWidget):
+    """
+    Controls for the focus region of interest.
+
+    Each margin (left, right, top, bottom) is a percentage [0 – 50] of the
+    image dimension to exclude from that edge.  When the 'Enabled' checkbox
+    is unchecked all margin controls are disabled and the full frame is used.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._w: dict[str, QWidget] = {}
+        self._build()
+
+    def _build(self) -> None:
+        form = QFormLayout(self)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        enabled_check = QCheckBox()
+        enabled_check.setToolTip(
+            "When checked, restrict focus analysis to the rectangle defined "
+            "by the four margins below.  Pixels outside are ignored."
+        )
+        form.addRow("Enabled:", enabled_check)
+        self._w["enabled"] = enabled_check
+
+        _MARGIN_TOOLTIP = (
+            "Percentage of the image {edge} to exclude from focus analysis [0 – 50].\n"
+            "Example: 10 means the {adj} 10 % of {axis} is masked out."
+        )
+
+        for key, label, edge, adj, axis in (
+            ("left",   "Left margin %:",   "left edge",   "leftmost",   "columns"),
+            ("right",  "Right margin %:",  "right edge",  "rightmost",  "columns"),
+            ("top",    "Top margin %:",    "top edge",    "topmost",    "rows"),
+            ("bottom", "Bottom margin %:", "bottom edge", "bottommost", "rows"),
+        ):
+            container, _spin, _slider = _make_float_row(
+                key, self._w, 0.0, 50.0, 1, 0.5,
+                _MARGIN_TOOLTIP.format(edge=edge, adj=adj, axis=axis),
+            )
+            form.addRow(label, container)
+
+        # Disable margin controls when the region is not enabled.
+        # checkStateChanged emits Qt.CheckState (enum), not a plain int,
+        # so compare against the enum value directly — never use .value.
+        def _toggle_margins(state: Qt.CheckState) -> None:
+            active = state == Qt.CheckState.Checked
+            for k in ("left", "right", "top", "bottom"):
+                for suffix in ("", "_slider"):
+                    w = self._w.get(f"{k}{suffix}")
+                    if w is not None:
+                        w.setEnabled(active)
+
+        enabled_check.checkStateChanged.connect(_toggle_margins)
+        # Initialise to disabled (enabled=False default).
+        _toggle_margins(Qt.CheckState.Unchecked)
+
+    @property
+    def widgets(self) -> dict[str, QWidget]:
+        return self._w
+
+
+# ---------------------------------------------------------------------------
 # Main settings widget
 # ---------------------------------------------------------------------------
 
@@ -307,6 +377,11 @@ class MachineVisionSettingsWidget(QWidget):
 
         self._has_unsaved_changes: bool = False
 
+        # Set to True while this widget is the one calling apply_settings so
+        # that _on_settings_changed_externally can ignore the echo-back signal
+        # and avoid clobbering the widget state with a stale repopulate.
+        self._applying_settings: bool = False
+
         # Saved baseline values for orange-on-modify tracking.
         # Key: "<section>.<field>"  e.g. "laplacian.radius"
         self._saved_values: dict[str, object] = {}
@@ -316,6 +391,7 @@ class MachineVisionSettingsWidget(QWidget):
 
         self._tenengrad_panel = _TenengradPanel()
         self._laplacian_panel = _LaplacianPanel()
+        self._focus_region_panel = _FocusRegionPanel()
 
         self._build_ui()
         self._populate_from_settings(self._mv.settings)
@@ -399,6 +475,17 @@ class MachineVisionSettingsWidget(QWidget):
 
         self._method_combo.currentIndexChanged.connect(self._on_method_combo_changed)
 
+        # Focus region — shared, always visible below the method panels.
+        region_box = QGroupBox("Focus Region")
+        region_box.setToolTip(
+            "Restrict focus analysis to a rectangular region of interest.\n"
+            "Each margin is a percentage of the image dimension to exclude."
+        )
+        region_vbox = QVBoxLayout(region_box)
+        region_vbox.setContentsMargins(6, 6, 6, 6)
+        region_vbox.addWidget(self._focus_region_panel)
+        vbox.addWidget(region_box)
+
         return group
 
     # ------------------------------------------------------------------
@@ -409,52 +496,65 @@ class MachineVisionSettingsWidget(QWidget):
         """Connect every widget in each panel to its change handler."""
         self._connect_tenengrad_signals()
         self._connect_laplacian_signals()
+        self._connect_focus_region_signals()
 
     def _connect_tenengrad_signals(self) -> None:
         w = self._tenengrad_panel.widgets
         w["kernel_size"].currentIndexChanged.connect(
             lambda _: self._on_field_changed("tenengrad", "kernel_size", w["kernel_size"].currentData())
         )
-        w["radius"].valueChanged.connect(
-            lambda v: self._on_field_changed("tenengrad", "radius", v)
-        )
-        w["threshold"].valueChanged.connect(
-            lambda v: self._on_field_changed("tenengrad", "threshold", v)
-        )
-        w["overlay_alpha"].valueChanged.connect(
-            lambda v: self._on_field_changed("tenengrad", "overlay_alpha", v)
-        )
-        w["score_ceiling"].valueChanged.connect(
-            lambda v: self._on_field_changed("tenengrad", "score_ceiling", v)
-        )
+        for field in ("radius", "threshold", "overlay_alpha", "score_ceiling"):
+            w[field].valueChanged.connect(
+                lambda v, f=field: self._on_field_changed("tenengrad", f, v)
+            )
+            if f"{field}_slider" in w:
+                w[f"{field}_slider"].valueChanged.connect(
+                    lambda _, f=field: self._on_field_changed("tenengrad", f, w[f].value())
+                )
         w["auto_ceiling"].checkStateChanged.connect(
-            lambda s: self._on_field_changed("tenengrad", "auto_ceiling", s == Qt.CheckState.Checked.value)
+            lambda s: self._on_field_changed("tenengrad", "auto_ceiling", s == Qt.CheckState.Checked)
         )
         w["half_resolution"].checkStateChanged.connect(
-            lambda s: self._on_field_changed("tenengrad", "half_resolution", s == Qt.CheckState.Checked.value)
+            lambda s: self._on_field_changed("tenengrad", "half_resolution", s == Qt.CheckState.Checked)
         )
 
     def _connect_laplacian_signals(self) -> None:
         w = self._laplacian_panel.widgets
         w["window_size"].valueChanged.connect(self._on_window_size_changed)
-        w["radius"].valueChanged.connect(
-            lambda v: self._on_field_changed("laplacian", "radius", v)
-        )
-        w["threshold"].valueChanged.connect(
-            lambda v: self._on_field_changed("laplacian", "threshold", v)
-        )
-        w["overlay_alpha"].valueChanged.connect(
-            lambda v: self._on_field_changed("laplacian", "overlay_alpha", v)
-        )
-        w["score_ceiling"].valueChanged.connect(
-            lambda v: self._on_field_changed("laplacian", "score_ceiling", v)
-        )
+        for field in ("radius", "threshold", "overlay_alpha", "score_ceiling"):
+            w[field].valueChanged.connect(
+                lambda v, f=field: self._on_field_changed("laplacian", f, v)
+            )
+            if f"{field}_slider" in w:
+                w[f"{field}_slider"].valueChanged.connect(
+                    lambda _, f=field: self._on_field_changed("laplacian", f, w[f].value())
+                )
         w["auto_ceiling"].checkStateChanged.connect(
-            lambda s: self._on_field_changed("laplacian", "auto_ceiling", s == Qt.CheckState.Checked.value)
+            lambda s: self._on_field_changed("laplacian", "auto_ceiling", s == Qt.CheckState.Checked)
         )
         w["half_resolution"].checkStateChanged.connect(
-            lambda s: self._on_field_changed("laplacian", "half_resolution", s == Qt.CheckState.Checked.value)
+            lambda s: self._on_field_changed("laplacian", "half_resolution", s == Qt.CheckState.Checked)
         )
+
+    def _connect_focus_region_signals(self) -> None:
+        w = self._focus_region_panel.widgets
+        w["enabled"].checkStateChanged.connect(
+            lambda s: self._on_focus_region_changed("enabled", s == Qt.CheckState.Checked)
+        )
+        for key in ("left", "right", "top", "bottom"):
+            # Connect both the spinbox and the slider.  The slider→spinbox sync
+            # inside _make_float_row blocks the spinbox signal, so dragging the
+            # slider would otherwise be silent.  Connecting the slider directly
+            # ensures the handler fires from both input paths.  By the time the
+            # slider's valueChanged reaches our lambda the sync closure has
+            # already run, so spin.value() is already up to date — we read that
+            # rather than converting the raw slider int ourselves.
+            w[key].valueChanged.connect(
+                lambda v, k=key: self._on_focus_region_changed(k, v)
+            )
+            w[f"{key}_slider"].valueChanged.connect(
+                lambda _, k=key: self._on_focus_region_changed(k, w[k].value())
+            )
 
     # ------------------------------------------------------------------
     # Populate from settings
@@ -476,6 +576,7 @@ class MachineVisionSettingsWidget(QWidget):
 
             self._populate_tenengrad(f.tenengrad)
             self._populate_laplacian(f.laplacian)
+            self._populate_focus_region(f.focus_region)
         finally:
             self._block_all_signals(False)
 
@@ -506,6 +607,18 @@ class MachineVisionSettingsWidget(QWidget):
         w["auto_ceiling"].setChecked(lap.auto_ceiling)
         w["half_resolution"].setChecked(lap.half_resolution)
 
+    def _populate_focus_region(self, fr: FocusRegionSettings) -> None:
+        w = self._focus_region_panel.widgets
+        w["enabled"].setChecked(fr.enabled)
+        for key in ("left", "right", "top", "bottom"):
+            self._set_float_row(w, key, getattr(fr, key), 0.0, 50.0)
+        # Sync enabled state of margin controls.
+        for k in ("left", "right", "top", "bottom"):
+            for suffix in ("", "_slider"):
+                widget = w.get(f"{k}{suffix}")
+                if widget is not None:
+                    widget.setEnabled(fr.enabled)
+
     def _set_float_row(
         self,
         w: dict[str, QWidget],
@@ -529,6 +642,7 @@ class MachineVisionSettingsWidget(QWidget):
     def _snapshot_saved_values(self, settings: MachineVisionSettings) -> None:
         """Record current values as the saved baseline for orange tracking."""
         f = settings.focus
+        fr = f.focus_region
         self._saved_values = {
             "method": f.method,
             "tenengrad.kernel_size": f.tenengrad.kernel_size,
@@ -545,6 +659,11 @@ class MachineVisionSettingsWidget(QWidget):
             "laplacian.overlay_alpha": f.laplacian.overlay_alpha,
             "laplacian.score_ceiling": f.laplacian.score_ceiling,
             "laplacian.auto_ceiling": f.laplacian.auto_ceiling,
+            "focus_region.enabled": fr.enabled,
+            "focus_region.left": fr.left,
+            "focus_region.right": fr.right,
+            "focus_region.top": fr.top,
+            "focus_region.bottom": fr.bottom,
         }
 
     def _check_modified(self, key: str, current_value: object) -> bool:
@@ -595,7 +714,9 @@ class MachineVisionSettingsWidget(QWidget):
         self._method_stack.setCurrentIndex(0 if method == FOCUS_METHOD_LAPLACIAN else 1)
         s = self._mv._copy_settings()
         s.focus.method = method
+        self._applying_settings = True
         self._mv.apply_settings(s)
+        self._applying_settings = False
         orange = self._check_modified("method", method)
         self._apply_orange(self._method_combo, orange)
         self._set_unsaved(True)
@@ -615,10 +736,22 @@ class MachineVisionSettingsWidget(QWidget):
         s = self._mv._copy_settings()
         target = s.focus.tenengrad if section == "tenengrad" else s.focus.laplacian
         setattr(target, field, value)
+        self._applying_settings = True
         self._mv.apply_settings(s)
+        self._applying_settings = False
 
         panel = self._tenengrad_panel if section == "tenengrad" else self._laplacian_panel
         self._mark_field(f"{section}.{field}", field, panel.widgets, value)
+        self._set_unsaved(True)
+
+    def _on_focus_region_changed(self, field: str, value: object) -> None:
+        """Apply a changed focus-region field to the manager and update orange state."""
+        s = self._mv._copy_settings()
+        setattr(s.focus.focus_region, field, value)
+        self._applying_settings = True
+        self._mv.apply_settings(s)
+        self._applying_settings = False
+        self._mark_field(f"focus_region.{field}", field, self._focus_region_panel.widgets, value)
         self._set_unsaved(True)
 
     # ------------------------------------------------------------------
@@ -627,6 +760,10 @@ class MachineVisionSettingsWidget(QWidget):
 
     @Slot()
     def _on_settings_changed_externally(self) -> None:
+        # Ignore the echo-back from changes we pushed ourselves — repopulating
+        # would overwrite the widget state (e.g. disabled sliders reset to 0).
+        if self._applying_settings:
+            return
         self._populate_from_settings(self._mv.settings)
         self._set_unsaved(True)
 
@@ -651,7 +788,7 @@ class MachineVisionSettingsWidget(QWidget):
                 ctx.toast.error(f"Save failed: {exc}", duration=3000)
 
     def _clear_all_orange(self) -> None:
-        for panel in (self._tenengrad_panel, self._laplacian_panel):
+        for panel in (self._tenengrad_panel, self._laplacian_panel, self._focus_region_panel):
             for w in panel.widgets.values():
                 self._apply_orange(w, False)
         self._apply_orange(self._method_combo, False)
@@ -686,7 +823,7 @@ class MachineVisionSettingsWidget(QWidget):
 
     def _block_all_signals(self, block: bool) -> None:
         self._method_combo.blockSignals(block)
-        for panel in (self._tenengrad_panel, self._laplacian_panel):
+        for panel in (self._tenengrad_panel, self._laplacian_panel, self._focus_region_panel):
             for w in panel.widgets.values():
                 w.blockSignals(block)
 

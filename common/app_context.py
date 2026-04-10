@@ -6,6 +6,7 @@ Provides a singleton pattern for accessing camera and other shared resources.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from PySide6.QtWidgets import QApplication
 from camera.camera_manager import CameraManager
 from camera.cameras.base_camera import BaseCamera
 from machine_vision.machine_vision_manager import MachineVisionManager
@@ -60,6 +61,13 @@ class AppContext:
         # Initialize machine vision manager
         self._initialize_machine_vision_manager()
 
+        # Guarantee cleanup runs before Qt tears down its object tree.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.cleanup)
+        else:
+            warning("AppContext: QApplication not yet created — cleanup will not be wired automatically")
+
     # ------------------------------------------------------------------
     # Camera
     # ------------------------------------------------------------------
@@ -71,6 +79,8 @@ class AppContext:
         Use this to enumerate cameras, switch cameras, start/stop streaming, etc.
         """
         if self._camera_manager is None:
+            if self._cleaned_up:
+                raise RuntimeError("AppContext has already been cleaned up")
             self._initialize_camera_manager()
         return self._camera_manager
 
@@ -124,6 +134,8 @@ class AppContext:
         focus_result_ready to receive results.
         """
         if self._machine_vision_manager is None:
+            if self._cleaned_up:
+                raise RuntimeError("AppContext has already been cleaned up")
             self._initialize_machine_vision_manager()
         return self._machine_vision_manager
 

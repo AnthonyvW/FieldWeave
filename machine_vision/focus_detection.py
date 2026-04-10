@@ -32,6 +32,42 @@ FOCUS_METHOD_TENENGRAD = "tenengrad"
 FOCUS_METHOD_LAPLACIAN = "laplacian"
 
 
+@dataclass(frozen=True)
+class FocusRegion:
+    """
+    Axis-aligned region of interest for focus analysis.
+
+    All four margins are fractional values in [0, 1) representing the
+    proportion of the image dimension to exclude from each edge.  The
+    values are derived from ``FocusRegionSettings`` percentages divided
+    by 100.  When passed to a focus-map function the input image is cropped
+    to this rectangle before any processing, so only the region pixels are
+    ever touched.  The result is embedded back into a full-frame zeros array
+    at the correct position before returning.
+    """
+    left: float = 0.0
+    right: float = 0.0
+    top: float = 0.0
+    bottom: float = 0.0
+
+    def pixel_bounds(self, h: int, w: int) -> tuple[int, int, int, int]:
+        """
+        Return (x0, y0, x1, y1) pixel coordinates of the active rectangle
+        for an image of shape (h, w).  The rectangle is half-open: rows
+        [y0, y1) and columns [x0, x1) are inside the region.
+        """
+        x0 = int(round(w * self.left))
+        x1 = int(round(w * (1.0 - self.right)))
+        y0 = int(round(h * self.top))
+        y1 = int(round(h * (1.0 - self.bottom)))
+        # Clamp to valid range and ensure at least 1 pixel.
+        x0 = max(0, min(x0, w - 1))
+        x1 = max(x0 + 1, min(x1, w))
+        y0 = max(0, min(y0, h - 1))
+        y1 = max(y0 + 1, min(y1, h))
+        return x0, y0, x1, y1
+
+
 def generate_focus_map(
     image: np.ndarray,
     kernel_size: int = 3,
@@ -41,6 +77,7 @@ def generate_focus_map(
     box_blur: bool = False,
     verbose: bool = True,
     normalize: bool = True,
+    focus_region: FocusRegion | None = None,
 ) -> np.ndarray:
     """
     Compute a per-pixel focus map using the Tenengrad focus measure.
@@ -48,18 +85,23 @@ def generate_focus_map(
     Based on 'Autofocusing Algorithm Selection in Computer Microscopy' by Sun et al.
 
     Pipeline:
-      1. Grayscale conversion
-      2. Optional 2x downscale (half_resolution=True) — all processing runs at
-         quarter pixel count, score map is upscaled back before returning
-      3. Horizontal and vertical Sobel gradients, squared and summed
+      1. If focus_region is set, crop the image to the region bounds so all
+         subsequent steps only process the smaller area.
+      2. Grayscale conversion
+      3. Optional 2x downscale (half_resolution=True) — all processing runs at
+         quarter pixel count, score map is upscaled back to crop size before
+         embedding into the full-frame output.
+      4. Horizontal and vertical Sobel gradients, squared and summed
          to get gradient magnitude squared
-      4. Zero out values below threshold to suppress soft/textureless regions,
+      5. Zero out values below threshold to suppress soft/textureless regions,
          sharpening contrast between in-focus and out-of-focus areas
-      5. Box blur or Gaussian blur to spread remaining sharp signal smoothly.
+      6. Box blur or Gaussian blur to spread remaining sharp signal smoothly.
          Box blur is significantly faster with visually similar results for
          this use case.
-      6. sqrt to bring back to gradient magnitude units and compress dynamic range
-      7. Normalise to [0, 1]
+      7. sqrt to bring back to gradient magnitude units and compress dynamic range
+      8. Normalise to [0, 1]
+      9. Embed the crop result into a full-frame zeros array at the correct
+         position (no-op when no region is set).
 
     Returns a 2D float32 array at the original image resolution.
     Normalised to [0, 1] when normalize=True (default). When normalize=False,
@@ -68,6 +110,17 @@ def generate_focus_map(
     def log(msg: str) -> None:
         if verbose:
             print(msg)
+
+    full_h, full_w = image.shape[:2]
+
+    # Crop to the region of interest before any processing.
+    if focus_region is not None:
+        t0 = time.perf_counter()
+        x0, y0, x1, y1 = focus_region.pixel_bounds(full_h, full_w)
+        image = image[y0:y1, x0:x1]
+        log(f"    Region crop:        {(time.perf_counter() - t0) * 1000:.1f}ms")
+    else:
+        x0, y0 = 0, 0
 
     t0 = time.perf_counter()
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
@@ -97,7 +150,7 @@ def generate_focus_map(
     if radius > 0:
         # When running at half resolution the spatial radius halves too, so
         # scale it down to keep the effective blur radius consistent with
-        # what the caller specified in full-resolution pixel units
+        # what the caller specified in full-resolution pixel units.
         effective_radius = radius / 2 if half_resolution else radius
         blur_window = int(effective_radius * 4) + 1
         if blur_window % 2 == 0:
@@ -120,13 +173,23 @@ def generate_focus_map(
 
     if half_resolution:
         t0 = time.perf_counter()
-        result = cv2.resize(result, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+        # Upscale back to crop size, not full-frame size.
+        crop_h, crop_w = image.shape[:2]
+        result = cv2.resize(result, (crop_w, crop_h), interpolation=cv2.INTER_LINEAR)
         log(f"    Upscale:            {(time.perf_counter() - t0) * 1000:.1f}ms")
 
     if normalize:
         t0 = time.perf_counter()
         result = normalize_score_map(result)
         log(f"    Normalise:          {(time.perf_counter() - t0) * 1000:.1f}ms")
+
+    # Embed the crop result back into a full-frame array.
+    if focus_region is not None:
+        t0 = time.perf_counter()
+        full = np.zeros((full_h, full_w), dtype=np.float32)
+        full[y0:y0 + result.shape[0], x0:x0 + result.shape[1]] = result
+        result = full
+        log(f"    Embed:              {(time.perf_counter() - t0) * 1000:.1f}ms")
 
     return result.astype(np.float32)
 
@@ -140,6 +203,7 @@ def generate_focus_map_laplacian(
     box_blur: bool = False,
     verbose: bool = True,
     normalize: bool = True,
+    focus_region: FocusRegion | None = None,
 ) -> np.ndarray:
     """
     Compute a per-pixel focus map using local Laplacian variance.
@@ -151,16 +215,20 @@ def generate_focus_map_laplacian(
     neighbourhood.
 
     Pipeline:
-      1. Grayscale conversion
-      2. Optional 2x downscale (half_resolution=True)
-      3. Laplacian filter to extract second-derivative (edge) response
-      4. Compute E[x²] and E[x]² over a local window using box filtering
+      1. If focus_region is set, crop the image to the region bounds so all
+         subsequent steps only process the smaller area.
+      2. Grayscale conversion
+      3. Optional 2x downscale (half_resolution=True)
+      4. Laplacian filter to extract second-derivative (edge) response
+      5. Compute E[x²] and E[x]² over a local window using box filtering
          → local variance = E[x²] − E[x]²
-      5. Zero out values below threshold (suppress flat/textureless regions)
-      6. Box blur or Gaussian blur to spread the signal smoothly (same
+      6. Zero out values below threshold (suppress flat/textureless regions)
+      7. Box blur or Gaussian blur to spread the signal smoothly (same
          semantics as the Tenengrad radius parameter)
-      7. sqrt to compress dynamic range
-      8. Normalise to [0, 1] (when normalize=True)
+      8. sqrt to compress dynamic range
+      9. Normalise to [0, 1] (when normalize=True)
+      10. Embed the crop result into a full-frame zeros array at the correct
+          position (no-op when no region is set).
 
     The window_size parameter (in full-resolution pixels) controls the spatial
     extent of the local variance computation — larger values integrate more
@@ -172,6 +240,17 @@ def generate_focus_map_laplacian(
     def log(msg: str) -> None:
         if verbose:
             print(msg)
+
+    full_h, full_w = image.shape[:2]
+
+    # Crop to the region of interest before any processing.
+    if focus_region is not None:
+        t0 = time.perf_counter()
+        x0, y0, x1, y1 = focus_region.pixel_bounds(full_h, full_w)
+        image = image[y0:y1, x0:x1]
+        log(f"    Region crop:        {(time.perf_counter() - t0) * 1000:.1f}ms")
+    else:
+        x0, y0 = 0, 0
 
     t0 = time.perf_counter()
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
@@ -215,7 +294,8 @@ def generate_focus_map_laplacian(
             blur_window += 1
         if box_blur:
             local_var = cv2.blur(
-                local_var, (blur_window, blur_window), borderType=cv2.BORDER_REFLECT)
+                local_var, (blur_window, blur_window), borderType=cv2.BORDER_REFLECT,
+            )
             log(f"    Box blur:           {(time.perf_counter() - t0) * 1000:.1f}ms")
         else:
             local_var = cv2.GaussianBlur(
@@ -232,8 +312,10 @@ def generate_focus_map_laplacian(
 
     if half_resolution:
         t0 = time.perf_counter()
+        # Upscale back to crop size, not full-frame size.
+        crop_h, crop_w = image.shape[:2]
         result = cv2.resize(
-            result, (image.shape[1], image.shape[0]),
+            result, (crop_w, crop_h),
             interpolation=cv2.INTER_LINEAR,
         )
         log(f"    Upscale:            {(time.perf_counter() - t0) * 1000:.1f}ms")
@@ -242,6 +324,14 @@ def generate_focus_map_laplacian(
         t0 = time.perf_counter()
         result = normalize_score_map(result)
         log(f"    Normalise:          {(time.perf_counter() - t0) * 1000:.1f}ms")
+
+    # Embed the crop result back into a full-frame array.
+    if focus_region is not None:
+        t0 = time.perf_counter()
+        full = np.zeros((full_h, full_w), dtype=np.float32)
+        full[y0:y0 + result.shape[0], x0:x0 + result.shape[1]] = result
+        result = full
+        log(f"    Embed:              {(time.perf_counter() - t0) * 1000:.1f}ms")
 
     return result.astype(np.float32)
 
@@ -273,7 +363,7 @@ def normalize_score_map(
 class FocusScores:
     """Focus scores derived from a normalised [0, 1] score map."""
     whole: float
-    """Mean score across the entire image."""
+    """Mean score across the active region (or entire image if no region is set)."""
     center: float
     """Mean score within the central region (inner quarter of area by default)."""
     peak: float
@@ -284,9 +374,15 @@ def compute_focus_scores(
     score_map: np.ndarray,
     center_fraction: float = 0.5,
     peak_percentile: float = 99.0,
+    focus_region: FocusRegion | None = None,
 ) -> FocusScores:
     """
     Derive whole-image, center-region, and peak focus scores from a score map.
+
+    When *focus_region* is provided the ``whole`` score is computed only over
+    the active rectangle so that the masked-out border pixels (which are zero)
+    do not drag the mean down.  The ``center`` and ``peak`` scores always
+    operate within the same active rectangle.
 
     Args:
         score_map: 2D float32 array normalised to [0, 1].
@@ -294,21 +390,33 @@ def compute_focus_scores(
             0.5 means the inner 50% of width and height (25% of total area).
         peak_percentile: Pixels at or above this percentile are averaged for
             the peak score. 99.0 means the top 1% of pixels.
+        focus_region: Optional region of interest.  When given, all scores are
+            computed within the active rectangle only.
 
     Returns:
         FocusScores with whole, center, and peak values in [0, 1].
     """
-    whole = float(score_map.mean())
-
     h, w = score_map.shape
-    y0 = int(h * (1.0 - center_fraction) / 2)
-    y1 = int(h * (1.0 + center_fraction) / 2)
-    x0 = int(w * (1.0 - center_fraction) / 2)
-    x1 = int(w * (1.0 + center_fraction) / 2)
-    center = float(score_map[y0:y1, x0:x1].mean())
 
-    threshold = float(np.percentile(score_map, peak_percentile))
-    peak_pixels = score_map[score_map >= threshold]
+    if focus_region is not None:
+        rx0, ry0, rx1, ry1 = focus_region.pixel_bounds(h, w)
+    else:
+        rx0, ry0, rx1, ry1 = 0, 0, w, h
+
+    active = score_map[ry0:ry1, rx0:rx1]
+    whole = float(active.mean())
+
+    # Center crop is relative to the active region, not the full frame.
+    ah = ry1 - ry0
+    aw = rx1 - rx0
+    cy0 = ry0 + int(ah * (1.0 - center_fraction) / 2)
+    cy1 = ry0 + int(ah * (1.0 + center_fraction) / 2)
+    cx0 = rx0 + int(aw * (1.0 - center_fraction) / 2)
+    cx1 = rx0 + int(aw * (1.0 + center_fraction) / 2)
+    center = float(score_map[cy0:cy1, cx0:cx1].mean())
+
+    threshold = float(np.percentile(active, peak_percentile))
+    peak_pixels = active[active >= threshold]
     peak = float(peak_pixels.mean()) if peak_pixels.size > 0 else 0.0
 
     return FocusScores(whole=whole, center=center, peak=peak)
@@ -387,6 +495,7 @@ def build_frame(
     score_map: np.ndarray | None = None,
     method: FocusMethod = FOCUS_METHOD_TENENGRAD,
     laplacian_window: int = 15,
+    focus_region: FocusRegion | None = None,
 ) -> tuple[np.ndarray, FocusScores]:
     """
     Process a single image into a composited BGR frame and its focus scores.
@@ -398,6 +507,10 @@ def build_frame(
     method selects the focus measure: FOCUS_METHOD_TENENGRAD (Sobel-based) or
     FOCUS_METHOD_LAPLACIAN (local Laplacian variance).  laplacian_window is only
     used when method is FOCUS_METHOD_LAPLACIAN.
+
+    focus_region, when provided, restricts scoring to the defined rectangle.
+    Pixels outside the region are zeroed in the score map so they appear dark
+    in the heatmap, making the active area visually obvious.
 
     Returns the composited BGR frame and its FocusScores.
     """
@@ -411,6 +524,7 @@ def build_frame(
                 half_resolution=half_resolution,
                 box_blur=box_blur,
                 verbose=verbose,
+                focus_region=focus_region,
             )
         else:
             score_map = generate_focus_map(
@@ -421,8 +535,9 @@ def build_frame(
                 half_resolution=half_resolution,
                 box_blur=box_blur,
                 verbose=verbose,
+                focus_region=focus_region,
             )
-    scores = compute_focus_scores(score_map)
+    scores = compute_focus_scores(score_map, focus_region=focus_region)
     overlay = apply_focus_overlay(image, score_map, alpha=alpha, colormap=colormap)
     overlay = add_colorbar(overlay, colormap=colormap, side=colorbar_side)
 

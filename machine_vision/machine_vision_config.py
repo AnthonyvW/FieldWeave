@@ -122,6 +122,45 @@ class LaplacianSettings:
 
 
 @dataclass
+class FocusRegionSettings:
+    """
+    Defines a rectangular region of interest for focus analysis.
+
+    Each margin is expressed as a percentage (0–50) of the image dimension
+    to exclude from that edge.  For example, left=10 means the leftmost 10%
+    of columns are masked out.  When enabled=False the full frame is analysed
+    and all margin values are ignored.
+
+    The four margins must not overlap: left + right < 100 and top + bottom < 100.
+    """
+
+    enabled: bool = False
+    """When False the full frame is used and all margins are ignored."""
+
+    left: float = 0.0
+    """Percentage of image width to exclude from the left edge [0–50]."""
+
+    right: float = 0.0
+    """Percentage of image width to exclude from the right edge [0–50]."""
+
+    top: float = 0.0
+    """Percentage of image height to exclude from the top edge [0–50]."""
+
+    bottom: float = 0.0
+    """Percentage of image height to exclude from the bottom edge [0–50]."""
+
+    def validate(self) -> None:
+        for name, val in (("left", self.left), ("right", self.right),
+                          ("top", self.top), ("bottom", self.bottom)):
+            if not (0.0 <= val <= 50.0):
+                raise ValueError(f"focus_region.{name} must be in [0.0, 50.0]")
+        if self.left + self.right >= 100.0:
+            raise ValueError("focus_region left + right must be < 100")
+        if self.top + self.bottom >= 100.0:
+            raise ValueError("focus_region top + bottom must be < 100")
+
+
+@dataclass
 class FocusDetectionSettings:
     """
     Top-level focus-detection configuration.
@@ -136,12 +175,14 @@ class FocusDetectionSettings:
 
     tenengrad: TenengradSettings = field(default_factory=TenengradSettings)
     laplacian: LaplacianSettings = field(default_factory=LaplacianSettings)
+    focus_region: FocusRegionSettings = field(default_factory=FocusRegionSettings)
 
     def validate(self) -> None:
         if self.method not in (FOCUS_METHOD_TENENGRAD, FOCUS_METHOD_LAPLACIAN):
             raise ValueError(f"Unknown focus method: {self.method!r}")
         self.tenengrad.validate()
         self.laplacian.validate()
+        self.focus_region.validate()
 
     @property
     def active(self) -> TenengradSettings | LaplacianSettings:
@@ -193,6 +234,17 @@ def _load_laplacian(d: dict[str, Any]) -> LaplacianSettings:
     )
 
 
+def _load_focus_region(d: dict[str, Any]) -> FocusRegionSettings:
+    D = FocusRegionSettings
+    return FocusRegionSettings(
+        enabled=d.get("enabled", D.enabled),
+        left=d.get("left", D.left),
+        right=d.get("right", D.right),
+        top=d.get("top", D.top),
+        bottom=d.get("bottom", D.bottom),
+    )
+
+
 class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
     """
     Persistent configuration manager for machine-vision settings.
@@ -234,6 +286,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             method=focus_data.get("method", FocusDetectionSettings.method),
             tenengrad=_load_tenengrad(focus_data.get("tenengrad", {})),
             laplacian=_load_laplacian(focus_data.get("laplacian", {})),
+            focus_region=_load_focus_region(focus_data.get("focus_region", {})),
         )
         return MachineVisionSettings(focus=focus)
 
@@ -241,6 +294,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         f = settings.focus
         t = f.tenengrad
         lap = f.laplacian
+        fr = f.focus_region
         return {
             "focus": {
                 "method": f.method,
@@ -261,6 +315,13 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                     "overlay_alpha": lap.overlay_alpha,
                     "score_ceiling": lap.score_ceiling,
                     "auto_ceiling": lap.auto_ceiling,
+                },
+                "focus_region": {
+                    "enabled": fr.enabled,
+                    "left": fr.left,
+                    "right": fr.right,
+                    "top": fr.top,
+                    "bottom": fr.bottom,
                 },
             },
         }
