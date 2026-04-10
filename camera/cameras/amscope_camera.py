@@ -511,7 +511,7 @@ class AmscopeCamera(BaseCamera):
             timeout_ms:        Maximum time to wait for the frame (milliseconds).
             on_captured:       Zero-argument callback fired as soon as the raw
                             frame is pulled — use this to unblock automation.
-            on_complete:       Callback ``(image: np.ndarray | None) -> None``
+            on_complete: Callable[[bool, np.ndarray | None], None] | None = None,``
                             fired once conversion is done. Receives a
                             (height, width, 3) uint8 RGB array, or None on
                             failure.
@@ -632,7 +632,7 @@ class AmscopeCamera(BaseCamera):
 
                 if on_complete is not None:
                     try:
-                        on_complete(image)
+                        on_complete(image is not None, image)
                     except Exception as cb_err:
                         exception(f"Error in on_complete callback: {cb_err}")
 

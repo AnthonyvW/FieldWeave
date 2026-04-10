@@ -232,6 +232,10 @@ class NavigationWidget(QWidget):
         self._invert_y: bool = False
         self._invert_z: bool = False
 
+        # Step size owned by this widget instance (nm).  Never written back to
+        # the motion system's settings — the motion system manages its own value.
+        self._step_size_nm: int = _FALLBACK_PRESETS_NM[0]
+
         # Declare all widget attributes here so they are always defined in __init__
         self.top_btn: DiamondButton
         self.bot_btn: DiamondButton
@@ -532,24 +536,19 @@ class NavigationWidget(QWidget):
         self._populate_step_buttons(presets_nm)
 
     def _current_step_size_nm(self) -> int:
-        """Return the currently selected step size from the motion config, or the first fallback."""
-        ctx = get_app_context()
-        if ctx.motion is not None and ctx.motion.settings is not None:
-            return ctx.motion.settings.step_size
-        return _FALLBACK_PRESETS_NM[0]
+        """Return the step size currently selected on this widget."""
+        return self._step_size_nm
 
     def _set_step_size_nm(self, size_nm: int, *, notify_instances: bool = True) -> None:
-        """Persist the selected step size to the motion config and update all live instances."""
-        ctx = get_app_context()
-        if ctx.motion is not None and ctx.motion.settings is not None:
-            ctx.motion.settings.step_size = size_nm
+        """Set this widget's step size and, optionally, sync button states on all live instances."""
+        self._step_size_nm = size_nm
 
         if notify_instances:
             for instance in list(NavigationWidget._instances):
                 instance._sync_step_size_buttons()
 
     def _sync_step_size_buttons(self) -> None:
-        """Update checked states to reflect the current step size in config."""
+        """Update checked states to reflect this widget's current step size."""
         current = self._current_step_size_nm()
         for btn, btn_size_nm in self.step_buttons:
             btn.setChecked(btn_size_nm == current)

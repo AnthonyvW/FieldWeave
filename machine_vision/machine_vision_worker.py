@@ -24,6 +24,7 @@ from machine_vision.machine_vision_config import (
     LaplacianSettings,
 )
 from machine_vision.focus_detection import (
+    FocusRegion,
     FocusScores,
     generate_focus_map,
     generate_focus_map_laplacian,
@@ -105,6 +106,13 @@ class MachineVisionWorker(QObject):
     laplacian_score_ceiling: float = 15.0
     laplacian_auto_ceiling: bool = False
 
+    # Focus region (shared across methods; ignored when focus_region_enabled is False)
+    focus_region_enabled: bool = False
+    focus_region_left: float = 0.0
+    focus_region_right: float = 0.0
+    focus_region_top: float = 0.0
+    focus_region_bottom: float = 0.0
+
     # Shared
     overlay_colormap: int = cv2.COLORMAP_JET
 
@@ -126,10 +134,21 @@ class MachineVisionWorker(QObject):
             method = self.focus_method
             colormap = self.overlay_colormap
 
+            focus_region: FocusRegion | None = (
+                FocusRegion(
+                    left=self.focus_region_left / 100.0,
+                    right=self.focus_region_right / 100.0,
+                    top=self.focus_region_top / 100.0,
+                    bottom=self.focus_region_bottom / 100.0,
+                )
+                if self.focus_region_enabled
+                else None
+            )
+
             if method == FOCUS_METHOD_TENENGRAD:
-                raw_map, ceiling, alpha = self._run_tenengrad(bgr)
+                raw_map, ceiling, alpha = self._run_tenengrad(bgr, focus_region)
             else:
-                raw_map, ceiling, alpha = self._run_laplacian(bgr)
+                raw_map, ceiling, alpha = self._run_laplacian(bgr, focus_region)
 
             raw_score_max = float(raw_map.max())
 
@@ -138,7 +157,7 @@ class MachineVisionWorker(QObject):
                 ceiling=ceiling if ceiling is not None else None,
             )
 
-            scores = compute_focus_scores(score_map)
+            scores = compute_focus_scores(score_map, focus_region=focus_region)
 
             overlay_bgr = apply_focus_overlay(bgr, score_map, alpha=alpha, colormap=colormap)
             overlay_rgb = cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB)
@@ -162,7 +181,11 @@ class MachineVisionWorker(QObject):
     # Private per-method helpers
     # ------------------------------------------------------------------
 
-    def _run_tenengrad(self, bgr: np.ndarray) -> tuple[np.ndarray, float | None, float]:
+    def _run_tenengrad(
+        self,
+        bgr: np.ndarray,
+        focus_region: FocusRegion | None,
+    ) -> tuple[np.ndarray, float | None, float]:
         """Return (raw_map, ceiling_or_None, alpha)."""
         raw_map = generate_focus_map(
             bgr,
@@ -173,11 +196,16 @@ class MachineVisionWorker(QObject):
             box_blur=True,
             verbose=False,
             normalize=False,
+            focus_region=focus_region,
         )
         ceiling = None if self.tenengrad_auto_ceiling else self.tenengrad_score_ceiling
         return raw_map, ceiling, self.tenengrad_overlay_alpha
 
-    def _run_laplacian(self, bgr: np.ndarray) -> tuple[np.ndarray, float | None, float]:
+    def _run_laplacian(
+        self,
+        bgr: np.ndarray,
+        focus_region: FocusRegion | None,
+    ) -> tuple[np.ndarray, float | None, float]:
         """Return (raw_map, ceiling_or_None, alpha)."""
         raw_map = generate_focus_map_laplacian(
             bgr,
@@ -188,6 +216,7 @@ class MachineVisionWorker(QObject):
             box_blur=True,
             verbose=False,
             normalize=False,
+            focus_region=focus_region,
         )
         ceiling = None if self.laplacian_auto_ceiling else self.laplacian_score_ceiling
         return raw_map, ceiling, self.laplacian_overlay_alpha

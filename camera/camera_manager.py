@@ -401,7 +401,7 @@ class CameraManager(QObject):
         resolution_index: int | None = None,
         timeout_ms: int = 5000,
         on_captured: Callable[[], None] | None = None,
-        on_complete: Callable[[np.ndarray | None], None] | None = None,
+        on_complete: Callable[[bool, np.ndarray | None], None] | None = None,
     ) -> bool:
         """
         Capture a still image and deliver it as a numpy array without saving.
@@ -421,7 +421,7 @@ class CameraManager(QObject):
             error("Cannot capture still - no active camera")
             return False
 
-        return self._active_camera.capture_still(
+        return self._active_camera.underlying_camera.capture_still(
             resolution_index=resolution_index,
             timeout_ms=timeout_ms,
             on_captured=on_captured,

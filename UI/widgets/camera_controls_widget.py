@@ -11,6 +11,9 @@ from PySide6.QtCore import Slot, Signal, QTimer
 from PySide6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush
 from common.logger import info, error, warning, debug
 from common.app_context import get_app_context
+from motion.routines.autofocus.autofocus_routine import Autofocus
+from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
+from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
 
 
 class HistogramWidget(QWidget):
@@ -239,6 +242,11 @@ class CameraControlsWidget(QWidget):
         self._histogram_timer.setInterval(33)  # ~30 fps
         self._histogram_timer.timeout.connect(self._poll_histogram)
 
+        # Autofocus polling timer — started while a routine is running
+        self._autofocus_poll_timer = QTimer(self)
+        self._autofocus_poll_timer.setInterval(250)
+        self._autofocus_poll_timer.timeout.connect(self._poll_autofocus_state)
+
         # Histogram is temporarily removed until rendering issues are fixed
         # Show histogram group only if the camera supports it
         #self._refresh_histogram_visibility()
@@ -252,6 +260,10 @@ class CameraControlsWidget(QWidget):
         # Photo capture group
         capture_group = self._create_capture_group()
         layout.addWidget(capture_group)
+
+        # Autofocus group
+        autofocus_group = self._create_autofocus_group()
+        layout.addWidget(autofocus_group)
 
         """
         # Temporarily removing histogram until rendering issues are fixed
@@ -387,6 +399,212 @@ class CameraControlsWidget(QWidget):
         self._legend_widget.setVisible(is_rgb)
 
         self._histogram_canvas.update_preview(histogram)
+
+    def _create_autofocus_group(self) -> QGroupBox:
+        """Create the autofocus control group."""
+        group = QGroupBox("Autofocus")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        # Three trigger buttons in a row
+        trigger_layout = QHBoxLayout()
+        trigger_layout.setSpacing(6)
+
+        self._af_btn = QPushButton("Autofocus")
+        self._af_btn.setFixedHeight(32)
+        self._af_btn.setToolTip(
+            "Bidirectional sweep: coarse alternating search, refine march, fine polish."
+        )
+        self._af_btn.clicked.connect(self._start_autofocus)
+
+        self._af_descent_btn = QPushButton("Descent")
+        self._af_descent_btn.setFixedHeight(32)
+        self._af_descent_btn.setToolTip(
+            "Descent-only: march downward from current Z, then fine polish."
+        )
+        self._af_descent_btn.clicked.connect(self._start_autofocus_descent)
+
+        self._af_fine_btn = QPushButton("Fine")
+        self._af_fine_btn.setFixedHeight(32)
+        self._af_fine_btn.setToolTip(
+            "Fine-only: narrow bidirectional search around the current Z position."
+        )
+        self._af_fine_btn.clicked.connect(self._start_autofocus_fine)
+
+        trigger_layout.addWidget(self._af_btn)
+        trigger_layout.addWidget(self._af_descent_btn)
+        trigger_layout.addWidget(self._af_fine_btn)
+        layout.addLayout(trigger_layout)
+
+        # Pause / Resume / Stop controls — hidden while no routine is running
+        control_layout = QHBoxLayout()
+        control_layout.setSpacing(6)
+
+        self._af_pause_btn = QPushButton("Pause")
+        self._af_pause_btn.setFixedHeight(28)
+        self._af_pause_btn.clicked.connect(self._pause_or_resume_autofocus)
+
+        self._af_stop_btn = QPushButton("Stop")
+        self._af_stop_btn.setFixedHeight(28)
+        self._af_stop_btn.clicked.connect(self._stop_autofocus)
+
+        control_layout.addWidget(self._af_pause_btn)
+        control_layout.addWidget(self._af_stop_btn)
+        layout.addLayout(control_layout)
+
+        self._af_status_label = QLabel("")
+        self._af_status_label.setStyleSheet("font-size: 11px; color: #555;")
+        self._af_status_label.setWordWrap(True)
+        layout.addWidget(self._af_status_label)
+
+        self._set_autofocus_controls_visible(False)
+        return group
+
+    # ------------------------------------------------------------------
+    # Autofocus helpers
+    # ------------------------------------------------------------------
+
+    def _set_autofocus_controls_visible(self, running: bool) -> None:
+        """Show pause/stop/status controls only while a routine is active."""
+        self._af_pause_btn.setVisible(running)
+        self._af_stop_btn.setVisible(running)
+        self._af_status_label.setVisible(running)
+        self._af_btn.setEnabled(not running)
+        self._af_descent_btn.setEnabled(not running)
+        self._af_fine_btn.setEnabled(not running)
+
+    def _enter_autofocus_running_state(self) -> None:
+        self._set_autofocus_controls_visible(True)
+        self._af_pause_btn.setText("Pause")
+        self._af_status_label.setText("Starting…")
+        self._autofocus_poll_timer.start()
+
+    def _exit_autofocus_running_state(self) -> None:
+        self._autofocus_poll_timer.stop()
+        self._set_autofocus_controls_visible(False)
+
+    def _poll_autofocus_state(self) -> None:
+        """Called every 250 ms to keep the status label current and detect completion."""
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.routine_running:
+            self._exit_autofocus_running_state()
+            return
+
+        routine = motion.active_routine
+        if routine is None:
+            self._exit_autofocus_running_state()
+            return
+
+        # Reflect pause state on the toggle button
+        self._af_pause_btn.setText("Resume" if motion.routine_paused else "Pause")
+
+        # Update status label with live activity text from the routine
+        activity = routine.activity
+        current = routine.progress_current
+        total = routine.progress_total
+        if total > 0:
+            self._af_status_label.setText(f"{activity}  ({current}/{total})")
+        else:
+            self._af_status_label.setText(activity)
+
+    def _check_motion_ready(self) -> bool:
+        """Return True if motion is available and ready; show a toast if not."""
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.is_ready():
+            warning("CameraControlsWidget: motion controller not ready")
+            if ctx.toast:
+                ctx.toast.warning("Motion controller not ready", title="Autofocus")
+            return False
+        if motion.routine_running:
+            if ctx.toast:
+                ctx.toast.warning("A routine is already running", title="Autofocus")
+            return False
+        if not ctx.has_camera:
+            if ctx.toast:
+                ctx.toast.warning("No camera available", title="Autofocus")
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Autofocus slots
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def _start_autofocus(self) -> None:
+        """Start the bidirectional Autofocus routine."""
+        if not self._check_motion_ready():
+            return
+        ctx = get_app_context()
+        motion = ctx.motion
+        try:
+            routine = Autofocus(motion=motion)
+            motion.start_routine(routine)
+        except Exception as exc:
+            error(f"CameraControlsWidget: failed to start Autofocus — {exc}")
+            if ctx.toast:
+                ctx.toast.error(str(exc), title="Autofocus Failed")
+            return
+        self._enter_autofocus_running_state()
+
+    @Slot()
+    def _start_autofocus_descent(self) -> None:
+        """Start the descent-only AutofocusDescent routine."""
+        if not self._check_motion_ready():
+            return
+        ctx = get_app_context()
+        motion = ctx.motion
+        try:
+            routine = AutofocusDescent(motion=motion)
+            motion.start_routine(routine)
+        except Exception as exc:
+            error(f"CameraControlsWidget: failed to start AutofocusDescent — {exc}")
+            if ctx.toast:
+                ctx.toast.error(str(exc), title="Autofocus Failed")
+            return
+        self._enter_autofocus_running_state()
+
+    @Slot()
+    def _start_autofocus_fine(self) -> None:
+        """Start the fine-only AutofocusFine routine."""
+        if not self._check_motion_ready():
+            return
+        ctx = get_app_context()
+        motion = ctx.motion
+        try:
+            routine = AutofocusFine(motion=motion)
+            motion.start_routine(routine)
+        except Exception as exc:
+            error(f"CameraControlsWidget: failed to start AutofocusFine — {exc}")
+            if ctx.toast:
+                ctx.toast.error(str(exc), title="Autofocus Failed")
+            return
+        self._enter_autofocus_running_state()
+
+    @Slot()
+    def _pause_or_resume_autofocus(self) -> None:
+        """Toggle pause/resume on the active autofocus routine."""
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None:
+            return
+        if motion.routine_paused:
+            motion.resume_routine()
+            self._af_pause_btn.setText("Pause")
+        else:
+            motion.pause_routine()
+            self._af_pause_btn.setText("Resume")
+
+    @Slot()
+    def _stop_autofocus(self) -> None:
+        """Stop the active autofocus routine."""
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is not None:
+            motion.stop_routine()
+        self._exit_autofocus_running_state()
 
     def _create_capture_group(self) -> QGroupBox:
         """Create the photo capture control group"""
