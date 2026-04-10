@@ -151,36 +151,10 @@ class ZStackScan(AutomationRoutine):
             info(f"[ZStackScan] Step {idx + 1}/{total}: moving to Z={target_z_mm:.6f} mm")
             self.motion.move_to_position(target_pos)
 
-            # Wait for the move to finish by polling position
-            # We yield between polling so the pause/stop checks stay responsive
-            yield  # pause/stop point: after enqueuing the move
+            yield  # pause/stop point: after move
 
             if self._check_stop():
                 break
-
-            # Poll until Z reaches the target (within 1 µm tolerance)
-            _tolerance_nm = 1_000
-            _poll_interval = 0.05
-            _move_timeout = 30.0
-            elapsed = 0.0
-            while elapsed < _move_timeout:
-                actual_z = self.motion.get_position().z
-                if abs(actual_z - target_z_nm) <= _tolerance_nm:
-                    break
-                time.sleep(_poll_interval)
-                elapsed += _poll_interval
-                if self._check_stop():
-                    break
-            else:
-                warning(
-                    f"[ZStackScan] Timed out waiting for Z to reach {target_z_nm} nm "
-                    f"(actual: {self.motion.get_position().z} nm)"
-                )
-
-            if self._check_stop():
-                break
-
-            yield  # pause/stop point: after settling at position
 
             # Capture image
             actual_pos = self.motion.get_position()

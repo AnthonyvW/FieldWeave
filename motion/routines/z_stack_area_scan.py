@@ -244,38 +244,12 @@ class ZStackAreaScan(AutomationRoutine):
             )
             self.motion.move_to_position(xy_target)
 
-            yield  # pause/stop point: after dispatching XY move
-
+            yield  # pause/stop point: after XY move
+            
             if self._check_stop():
                 break
 
-            # Poll until XY settles (1 µm tolerance)
-            _tol = 1_000
-            _poll = 0.05
-            _timeout = 30.0
-            elapsed_poll = 0.0
-            while elapsed_poll < _timeout:
-                pos = self.motion.get_position()
-                if abs(pos.x - target_x_nm) <= _tol and abs(pos.y - target_y_nm) <= _tol:
-                    break
-                time.sleep(_poll)
-                elapsed_poll += _poll
-                if self._check_stop():
-                    break
-            else:
-                pos = self.motion.get_position()
-                warning(
-                    f"[ZStackAreaScan] Timed out waiting for XY:"
-                    f" actual X={pos.x} nm  Y={pos.y} nm"
-                )
-
-            if self._check_stop():
-                break
-
-            # Allow the motion system to settle before starting the Z-stack.
-            time.sleep(0.2)
-
-            yield  # pause/stop point: XY settled
+            time.sleep(0.2) # Allow motion system to settle for the stack
 
             # ----------------------------------------------------------
             # Prepare subfolder for this XY position
@@ -333,31 +307,10 @@ class ZStackAreaScan(AutomationRoutine):
                 )
                 self.motion.move_to_position(z_target_pos)
 
-                yield  # pause/stop point: after dispatching Z move
+                yield  # pause/stop point: after Z move
 
                 if self._check_stop():
                     break
-
-                # Poll until Z settles
-                elapsed_z_poll = 0.0
-                while elapsed_z_poll < _timeout:
-                    actual_z = self.motion.get_position().z
-                    if abs(actual_z - target_z_nm) <= _tol:
-                        break
-                    time.sleep(_poll)
-                    elapsed_z_poll += _poll
-                    if self._check_stop():
-                        break
-                else:
-                    warning(
-                        f"[ZStackAreaScan]   Timed out waiting for Z={target_z_nm} nm"
-                        f" (actual: {self.motion.get_position().z} nm)"
-                    )
-
-                if self._check_stop():
-                    break
-
-                yield  # pause/stop point: Z settled
 
                 # Capture
                 actual_pos = self.motion.get_position()

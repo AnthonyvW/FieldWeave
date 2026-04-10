@@ -276,35 +276,52 @@ class MotionControllerManager:
     # Public motion API
     # ------------------------------------------------------------------
 
-    def move_axis(self, axis: str, amount_nm: int) -> bool:
+    def move_axis(self, axis: str, amount_nm: int, *, wait: bool = False) -> bool:
         """Jog *axis* by *amount_nm* nanometres (signed relative move).
 
+        If *wait* is True, blocks until the printer acknowledges the move.
         Returns False if the move would exceed axis limits.
         """
         self._emit_interaction()
-        return self._get_controller().move_axis(axis, amount_nm)
+        return self._get_controller().move_axis(axis, amount_nm, wait=wait)
 
-    def move(self, axis: str, amount_nm: int, *, is_relative: bool = True) -> bool:
+    def move(self, axis: str, amount_nm: int, *, is_relative: bool = True, wait: bool = False) -> bool:
         """Move *axis* by *amount_nm* nanometres.
 
         When *is_relative* is True (the default) *amount_nm* is a delta from
         the current position.  When False it is an absolute target in
         nanometres.
 
+        If *wait* is True, blocks until the printer acknowledges the move.
         Returns False if the move would exceed axis limits.
         """
         self._emit_interaction()
-        return self._get_controller().move(axis, amount_nm, is_relative=is_relative)
+        return self._get_controller().move(axis, amount_nm, is_relative=is_relative, wait=wait)
 
-    def move_to_position(self, position: Position) -> None:
-        """Enqueue an absolute move to *position* (coordinates in nanometres)."""
-        self._emit_interaction()
-        self._get_controller().move_to_position(position)
+    def move_to_position(self, position: Position, *, wait: bool = False) -> None:
+        """Enqueue an absolute move to *position* (coordinates in nanometres).
 
-    def home(self) -> None:
-        """Enqueue a homing sequence."""
+        If *wait* is True, blocks until the printer acknowledges the move.
+        """
         self._emit_interaction()
-        self._get_controller().home()
+        self._get_controller().move_to_position(position, wait=wait)
+
+    def home(self, *, wait: bool = False) -> None:
+        """Enqueue a homing sequence.
+
+        If *wait* is True, blocks until the full homing sequence has been
+        acknowledged by the printer.
+        """
+        self._emit_interaction()
+        self._get_controller().home(wait=wait)
+
+    def wait_for_idle(self, timeout: float | None = None) -> bool:
+        """Block until all currently queued commands have been executed.
+
+        Returns True if the queue drained in time, False on timeout.
+        Returns True immediately if the controller is faulted.
+        """
+        return self._get_controller().wait_for_idle(timeout)
 
     def get_position(self) -> Position:
         """Return the current position (coordinates in nanometres)."""

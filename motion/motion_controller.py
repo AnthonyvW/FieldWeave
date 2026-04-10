@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from queue import Queue
 from typing import Callable
 
@@ -16,6 +16,11 @@ from motion.models import Position
 from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
 
 _NM_PER_MM = 1_000_000
+
+
+def _is_move(gc: str) -> bool:
+    """Return True if *gc* is a G-code command that produces physical motion."""
+    return gc.upper().split()[0] in ("G0", "G1", "G28")
 
 
 def _probe_port(
@@ -37,7 +42,7 @@ def _probe_port(
     ser: serial.Serial | None = None
     success = False
     try:
-        ser = serial.Serial(port_device, baudrate=baud, timeout=0.25, write_timeout=1)
+        ser = serial.Serial(port_device, baudrate=baud, timeout=1, write_timeout=1)
 
         # Some controllers reset on open due to DTR; allow them to chatter.
         start = time.time()
@@ -104,6 +109,7 @@ class _Command:
     gcode: str
     message: str | None = None
     log: bool = False
+    done: threading.Event = field(default_factory=threading.Event)
 
 
 class MotionController:
@@ -228,13 +234,18 @@ class MotionController:
 
             try:
                 self._exec(cmd)
+                cmd.done.set()
             except (MotionFault, MotionTimeout) as exc:
                 self.faulted = True
+                cmd.done.set()
+                self._drain_queue()
                 error(f"[FAULT] {exc}")
                 self._emit(f"[FAULT] {exc}", log=True)
                 break
             except Exception as exc:
                 self.faulted = True
+                cmd.done.set()
+                self._drain_queue()
                 error(f"[UNHANDLED ERROR] {exc}")
                 self._emit(f"[UNHANDLED ERROR] {exc}", log=True)
                 break
@@ -249,7 +260,10 @@ class MotionController:
 
         gc = cmd.gcode.strip()
         self._track_position(gc)
+        self._serial.reset_input_buffer()
         self._send_and_wait(gc)
+        if _is_move(gc):
+            self._send_and_wait("M400")
 
     def _send_and_wait(self, gc: str) -> None:
         self._serial.write(f"{gc}\n".encode())
@@ -264,12 +278,12 @@ class MotionController:
             if not line:
                 time.sleep(0.02)
                 continue
-            low = line.lower()
-            if low in ("ok", "processing"):
+            debug(f"[printer] {line}")
+            if line.lower().startswith("ok"):
                 return
             if line.lower().startswith("error"):
                 raise MotionFault(f"Printer error: {line}")
-            debug(f"[printer] {line}")
+            
 
     def _track_position(self, gc: str) -> None:
         upper = gc.upper()
@@ -299,11 +313,46 @@ class MotionController:
         self._exec(_Command("G90", message="Setting absolute positioning"))
         self._exec(_Command("G28", message="Homing..."))
 
-    def _enqueue(self, gc: str, message: str = "", log: bool = False) -> None:
+    def _enqueue(self, gc: str, message: str = "", log: bool = False) -> threading.Event:
+        """Enqueue a G-code command and return its completion event.
+
+        The returned :class:`threading.Event` is set once the printer has
+        acknowledged the command with ``ok``.  If the controller is faulted
+        the event is set immediately (so callers never block forever).
+        """
+        cmd = _Command(gc, message or None, log)
         if self.faulted:
             warning("Ignoring command: controller is faulted")
-            return
-        self._command_queue.put(_Command(gc, message or None, log))
+            cmd.done.set()
+            return cmd.done
+        self._command_queue.put(cmd)
+        return cmd.done
+
+    def _drain_queue(self) -> None:
+        """Set all pending commands' done events so waiters are unblocked."""
+        while not self._command_queue.empty():
+            try:
+                cmd = self._command_queue.get_nowait()
+                cmd.done.set()
+            except Exception:
+                break
+
+    def wait_for_idle(self, timeout: float | None = None) -> bool:
+        """Block until all currently queued commands have been executed.
+
+        Works by appending a no-op sentinel to the queue and waiting for its
+        done event, which is set only after every command ahead of it has
+        been processed.
+
+        Returns True if the queue drained within *timeout* seconds, False if
+        it timed out.  Returns True immediately if the controller is faulted
+        (the queue will never progress further).
+        """
+        if self.faulted:
+            return True
+        sentinel = _Command("M115", message=None, log=False)  # lightweight no-op
+        self._command_queue.put(sentinel)
+        return sentinel.done.wait(timeout)
 
     def _emit(self, text: str, log: bool = False) -> None:
         if log:
@@ -338,20 +387,27 @@ class MotionController:
         """Return the machine's maximum extents as a Position (nanometres)."""
         return Position.from_mm(self.config.max_x, self.config.max_y, self.config.max_z)
 
-    def move_to_position(self, position: Position) -> None:
-        """Enqueue an absolute move to *position* (coordinates in nanometres)."""
-        self._enqueue(
+    def move_to_position(self, position: Position, *, wait: bool = False) -> None:
+        """Enqueue an absolute move to *position* (coordinates in nanometres).
+
+        If *wait* is True, blocks until the printer acknowledges the move.
+        """
+        event = self._enqueue(
             f"G0 {position.to_gcode()}",
             message=f"Moving to {position}",
         )
+        if wait:
+            event.wait()
 
-    def move(self, axis: str, amount_nm: int, *, is_relative: bool = True) -> bool:
+    def move(self, axis: str, amount_nm: int, *, is_relative: bool = True, wait: bool = False) -> bool:
         """
         Move *axis* by *amount_nm* nanometres.
 
         When *is_relative* is True (the default) *amount_nm* is treated as a
         delta from the current position.  When False it is treated as an
         absolute target position in nanometres.
+
+        If *wait* is True, blocks until the printer acknowledges the move.
 
         Returns False (and does not enqueue) if the resulting position would
         exceed the configured axis limits.
@@ -364,22 +420,32 @@ class MotionController:
             return False
 
         mm = new_nm / _NM_PER_MM
-        self._enqueue(f"G1 {axis.upper()}{mm:.6f}")
+        event = self._enqueue(f"G1 {axis.upper()}{mm:.6f}")
+        if wait:
+            event.wait()
         return True
 
-    def move_axis(self, axis: str, amount_nm: int) -> bool:
+    def move_axis(self, axis: str, amount_nm: int, *, wait: bool = False) -> bool:
         """
         Jog *axis* by *amount_nm* nanometres (signed relative move).
+
+        If *wait* is True, blocks until the printer acknowledges the move.
 
         Returns False (and does not enqueue) if the resulting position would
         exceed the configured axis limits.
         """
-        return self.move(axis, amount_nm)
+        return self.move(axis, amount_nm, wait=wait)
 
-    def home(self) -> None:
-        """Enqueue a homing sequence (G90 + G28)."""
+    def home(self, *, wait: bool = False) -> None:
+        """Enqueue a homing sequence (G90 + G28).
+
+        If *wait* is True, blocks until both commands have been acknowledged
+        by the printer.
+        """
         self._enqueue("G90", message="Set absolute positioning")
-        self._enqueue("G28", message="Homing...")
+        event = self._enqueue("G28", message="Homing...")
+        if wait:
+            event.wait()
 
     def reset_fault(self) -> None:
         """Clear a faulted state so the controller can accept commands again."""

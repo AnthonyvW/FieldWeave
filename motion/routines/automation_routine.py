@@ -273,6 +273,14 @@ class AutomationRoutine(ABC):
                     info(f"[{type(self).__name__}] Completed successfully")
                     break
 
+                # Re-check pause immediately after the step completes.
+                # Without this, a pause issued during a step is not honoured
+                # until after the *next* step has already run.
+                self._pause_event.wait()
+                if self._stop_event.is_set():
+                    info(f"[{type(self).__name__}] Stopped while paused")
+                    break
+
         except Exception as exc:
             error(f"[{type(self).__name__}] Unhandled exception: {exc}")
             import traceback

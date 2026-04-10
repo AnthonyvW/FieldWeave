@@ -39,22 +39,13 @@ from __future__ import annotations
 import time
 from typing import Callable, Generator
 
-from common.logger import info, warning, error
+from common.logger import info
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 
 from motion.routines.automation_routine import AutomationRoutine
 
 _NM_PER_MM: int = 1_000_000
-
-# Tolerance used when polling for move completion (1 µm).
-_SETTLE_TOLERANCE_NM: int = 1_000
-
-# How long to wait for any single leg of the square to complete (seconds).
-_MOVE_TIMEOUT_S: float = 60.0
-
-# Interval between position polls (seconds).
-_POLL_INTERVAL_S: float = 0.05
 
 
 class SquareMove(AutomationRoutine):
@@ -83,12 +74,6 @@ class SquareMove(AutomationRoutine):
     repeats:
         Number of times to trace the full square pattern.  Must be >= 1.
         Defaults to ``5``.
-    move_timeout_s:
-        Maximum time (seconds) to wait for each leg to complete before
-        logging a warning and continuing.  Defaults to ``60.0``.
-    dwell_s:
-        Time (seconds) to wait at each corner after the stage has settled
-        before issuing the next move command.  Defaults to ``0.3``.
     """
     job_name = "Square Move"
 
@@ -98,8 +83,6 @@ class SquareMove(AutomationRoutine):
         on_confirm: Callable[[float], bool] | None = None,
         side_mm: float = 10.0,
         repeats: int = 5,
-        move_timeout_s: float = _MOVE_TIMEOUT_S,
-        dwell_s: float = 0.3,
     ) -> None:
         super().__init__(motion)
 
@@ -107,16 +90,10 @@ class SquareMove(AutomationRoutine):
             raise ValueError(f"side_mm must be positive, got {side_mm!r}")
         if repeats < 1:
             raise ValueError(f"repeats must be >= 1, got {repeats!r}")
-        if move_timeout_s <= 0:
-            raise ValueError(f"move_timeout_s must be positive, got {move_timeout_s!r}")
-        if dwell_s < 0:
-            raise ValueError(f"dwell_s must be >= 0, got {dwell_s!r}")
 
         self._side_nm: int = round(side_mm * _NM_PER_MM)
         self._side_mm: float = side_mm
         self._repeats: int = repeats
-        self._move_timeout_s: float = move_timeout_s
-        self._dwell_s: float = dwell_s
         self._on_confirm: Callable[[float], bool] = on_confirm or (lambda _: True)
 
     # ------------------------------------------------------------------
@@ -191,6 +168,11 @@ class SquareMove(AutomationRoutine):
                 if self._check_stop():
                     break
 
+                yield  # pause/stop point: before each move
+
+                if self._check_stop():
+                    break
+
                 target_mm_x = target.x / _NM_PER_MM
                 target_mm_y = target.y / _NM_PER_MM
 
@@ -203,52 +185,10 @@ class SquareMove(AutomationRoutine):
                     f"({target_mm_x:.6f}, {target_mm_y:.6f}) mm"
                 )
 
-                self.motion.move_to_position(target)
-
-                timed_out = self._wait_for_position(target)
-                if timed_out:
-                    warning(
-                        f"[SquareMove] Leg {leg_index + 1} timed out — "
-                        f"continuing anyway"
-                    )
-
-                if self._dwell_s > 0 and not self._check_stop():
-                    self._set_activity(
-                        f"Rep {repeat_index + 1}/{self._repeats}  —  {label}  (dwell)"
-                    )
-                    time.sleep(self._dwell_s)
+                self.motion.move_to_position(target, wait=True)
 
                 legs_done += 1
                 self._set_progress(legs_done, total_legs)
 
-                if self._check_stop():
-                    break
-
-                yield  # pause/stop point: position settled
-
         total_elapsed = time.monotonic() - start_time
         info(f"[SquareMove] Routine complete in {total_elapsed:.3f} s")
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _wait_for_position(self, target: Position) -> bool:
-        """
-        Block until the stage reaches *target* within :data:`_SETTLE_TOLERANCE_NM`.
-
-        Returns ``True`` if the wait timed out, ``False`` if the position
-        was reached in time.  The loop exits early if a stop is requested.
-        """
-        elapsed = 0.0
-        while elapsed < self._move_timeout_s:
-            if self._check_stop():
-                return False
-            actual = self.motion.get_position()
-            x_ok = abs(actual.x - target.x) <= _SETTLE_TOLERANCE_NM
-            y_ok = abs(actual.y - target.y) <= _SETTLE_TOLERANCE_NM
-            if x_ok and y_ok:
-                return False
-            time.sleep(_POLL_INTERVAL_S)
-            elapsed += _POLL_INTERVAL_S
-        return True  # timed out
