@@ -45,6 +45,8 @@ _DEFAULT_PRESETS_MM = (0.04, 0.4, 2.0, 10.0)
 # Nanometres per millimetre conversion constant.
 _NM_PER_MM = 1_000_000
 
+_DEFAULT_STARTING_HEIGHT_MM: float = 0.0
+
 
 def _mm_to_nm(mm: float) -> int:
     return round(mm * _NM_PER_MM)
@@ -266,6 +268,54 @@ class NavigationSettingsWidget(QWidget):
 
         vbox.addWidget(presets_box)
 
+        # ---- Starting height ----
+        starting_height_box = QGroupBox("Starting Height")
+        starting_height_vbox = QVBoxLayout(starting_height_box)
+        starting_height_vbox.setSpacing(6)
+
+        starting_height_desc = QLabel(
+            "Z position to move to automatically after every home sequence.\n"
+            "Set to 0 to stay at the homed position."
+        )
+        starting_height_desc.setStyleSheet("color: #5f6368; font-size: 11px;")
+        starting_height_vbox.addWidget(starting_height_desc)
+
+        starting_height_form = QFormLayout()
+        starting_height_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        height_spin = QDoubleSpinBox()
+        height_spin.setMinimum(0.0)
+        height_spin.setMaximum(10_000.0)
+        height_spin.setDecimals(3)
+        height_spin.setSingleStep(0.1)
+        height_spin.setSuffix(" mm")
+        height_spin.setFixedWidth(130)
+        height_spin.setToolTip(
+            "Z axis position (in millimetres) to move to after homing.\n"
+            "0 means no post-home move."
+        )
+        starting_height_form.addRow("Height:", height_spin)
+        self._w["starting_height"] = height_spin
+        starting_height_vbox.addLayout(starting_height_form)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        set_current_btn = QPushButton("Set to current height")
+        set_current_btn.setToolTip("Set the starting height to the stage's current Z position.")
+        btn_row.addWidget(set_current_btn)
+        self._w["starting_height_set_current"] = set_current_btn
+
+        reset_btn = QPushButton("Reset to 0")
+        reset_btn.setToolTip("Clear the starting height (no post-home Z move).")
+        btn_row.addWidget(reset_btn)
+        self._w["starting_height_reset"] = reset_btn
+
+        btn_row.addStretch()
+        starting_height_vbox.addLayout(btn_row)
+
+        vbox.addWidget(starting_height_box)
+
         return group
 
     # ------------------------------------------------------------------
@@ -303,6 +353,12 @@ class NavigationSettingsWidget(QWidget):
                 lambda v, k=key: self._on_field_changed(k, v)
             )
 
+        w["starting_height"].valueChanged.connect(
+            lambda v: self._on_field_changed("starting_height", v)
+        )
+        w["starting_height_set_current"].clicked.connect(self._on_set_current_height)
+        w["starting_height_reset"].clicked.connect(self._on_reset_height)
+
     # ------------------------------------------------------------------
     # Populate from settings
     # ------------------------------------------------------------------
@@ -332,6 +388,10 @@ class NavigationSettingsWidget(QWidget):
             presets_nm = (presets_nm + defaults_nm)[:4]
             for i, nm in enumerate(presets_nm, start=1):
                 self._w[f"preset_{i}"].setValue(_nm_to_mm(nm))
+
+            self._w["starting_height"].setValue(
+                _nm_to_mm(getattr(s, "starting_height_nm", 0))
+            )
 
         finally:
             self._block_all_signals(False)
@@ -365,6 +425,7 @@ class NavigationSettingsWidget(QWidget):
             "preset_2": _nm_to_mm(presets_nm[1]),
             "preset_3": _nm_to_mm(presets_nm[2]),
             "preset_4": _nm_to_mm(presets_nm[3]),
+            "starting_height": _nm_to_mm(getattr(s, "starting_height_nm", 0)),
         }
 
     def _check_modified(self, key: str, current_value: object) -> bool:
@@ -418,6 +479,8 @@ class NavigationSettingsWidget(QWidget):
             presets = (presets + defaults_nm)[:4]
             presets[idx] = _mm_to_nm(float(value))  # type: ignore[arg-type]
             s.step_presets = presets  # type: ignore[attr-defined]
+        elif key == "starting_height":
+            s.starting_height_nm = _mm_to_nm(float(value))  # type: ignore[arg-type]
 
         orange = self._check_modified(key, value)
         w = self._w.get(key)
@@ -425,6 +488,30 @@ class NavigationSettingsWidget(QWidget):
             self._apply_orange(w, orange)
 
         self._set_unsaved(True)
+
+    # ------------------------------------------------------------------
+    # Starting height helpers
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def _on_set_current_height(self) -> None:
+        """Set the starting height spin box to the stage's current Z position."""
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None:
+            return
+        position = motion.get_position()
+        current_z_mm = _nm_to_mm(position.z)
+        spin: QDoubleSpinBox = self._w["starting_height"]  # type: ignore[assignment]
+        spin.setValue(current_z_mm)
+        # _on_field_changed is triggered automatically via the valueChanged signal.
+
+    @Slot()
+    def _on_reset_height(self) -> None:
+        """Reset the starting height to 0 (no post-home move)."""
+        spin: QDoubleSpinBox = self._w["starting_height"]  # type: ignore[assignment]
+        spin.setValue(0.0)
+        # _on_field_changed is triggered automatically via the valueChanged signal.
 
     # ------------------------------------------------------------------
     # Save

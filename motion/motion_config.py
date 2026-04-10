@@ -34,6 +34,10 @@ class MotionSystemSettings:
     invert_y: bool = False  # Invert Y direction in the navigation widget
     invert_z: bool = False  # Invert Z direction in the navigation widget
 
+    # Starting height: Z position (nanometres) to move to after every home sequence.
+    # 0 means stay at the homed position (no post-home move).
+    starting_height_nm: int = 0
+
     # Navigation widget — jog-step presets (nanometres)
     # Four buttons shown in the navigation widget; default: 0.04, 0.4, 2.0, 10.0 mm.
     step_presets: list[int] = field(
@@ -57,6 +61,8 @@ class MotionSystemSettings:
             raise ValueError("step_presets must contain exactly 4 values")
         if any(p <= 0 for p in self.step_presets):
             raise ValueError("all step_presets values must be positive")
+        if self.starting_height_nm < 0:
+            raise ValueError("starting_height_nm must be non-negative")
 
 
 class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):

@@ -312,6 +312,10 @@ class MotionController:
     def _home(self) -> None:
         self._exec(_Command("G90", message="Setting absolute positioning"))
         self._exec(_Command("G28", message="Homing..."))
+        starting_height_nm = self.config.starting_height_nm
+        if starting_height_nm > 0:
+            mm = starting_height_nm / _NM_PER_MM
+            self._exec(_Command(f"G0 Z{mm:.6f}", message=f"Moving to starting height ({mm:.3f} mm)"))
 
     def _enqueue(self, gc: str, message: str = "", log: bool = False) -> threading.Event:
         """Enqueue a G-code command and return its completion event.
@@ -437,15 +441,23 @@ class MotionController:
         return self.move(axis, amount_nm, wait=wait)
 
     def home(self, *, wait: bool = False) -> None:
-        """Enqueue a homing sequence (G90 + G28).
+        """Enqueue a homing sequence (G90 + G28), then move to the configured
+        starting height if one is set.
 
-        If *wait* is True, blocks until both commands have been acknowledged
+        If *wait* is True, blocks until all commands have been acknowledged
         by the printer.
         """
         self._enqueue("G90", message="Set absolute positioning")
-        event = self._enqueue("G28", message="Homing...")
+        self._enqueue("G28", message="Homing...")
+        starting_height_nm = self.config.starting_height_nm
+        if starting_height_nm > 0:
+            mm = starting_height_nm / _NM_PER_MM
+            self._enqueue(
+                f"G0 Z{mm:.6f}",
+                message=f"Moving to starting height ({mm:.3f} mm)",
+            )
         if wait:
-            event.wait()
+            self.wait_for_idle()
 
     def reset_fault(self) -> None:
         """Clear a faulted state so the controller can accept commands again."""
