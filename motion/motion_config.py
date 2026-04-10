@@ -26,9 +26,6 @@ class MotionSystemSettings:
     calibration_y: float = 220.0  # Y position for calibration checks (mm)
     calibration_z: float = 26.0   # Z position for calibration checks (mm)
 
-    # Camera calibration data
-    camera_calibration: dict[str, Any] = field(default_factory=dict)  # Stores M_est, M_inv, reference position, etc.
-
     # Navigation widget — axis inversion
     invert_x: bool = False  # Invert X direction in the navigation widget
     invert_y: bool = False  # Invert Y direction in the navigation widget

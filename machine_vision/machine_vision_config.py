@@ -16,6 +16,7 @@ from typing import Any, Literal, Union
 
 from common.generic_config import ConfigManager
 from common.logger import info
+from machine_vision.camera_calibration import CameraCalibration
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +192,43 @@ class FocusDetectionSettings:
 
 
 # ---------------------------------------------------------------------------
+# Camera calibration settings
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CameraCalibrationSettings:
+    """
+    Persistent camera-calibration configuration.
+
+    ``move_x_ticks`` and ``move_y_ticks`` are the distances (in 0.01 mm tick
+    units) that the stage moves during the calibration routine.  They are
+    persisted here so that the UI can edit them and the printer controller can
+    read them without hard-coding defaults.
+
+    ``calibration`` holds the last successfully computed
+    ``CameraCalibration``, serialised to/from a plain dict via
+    ``CameraCalibration.to_dict`` / ``CameraCalibration.from_dict``.  It is
+    ``None`` when no calibration has been performed yet or after
+    ``clear_calibration`` is called.
+    """
+
+    move_x_ticks: int = 100
+    """Distance to move in +X during calibration (0.01 mm units; 100 = 1 mm)."""
+
+    move_y_ticks: int = 100
+    """Distance to move in +Y during calibration (0.01 mm units; 100 = 1 mm)."""
+
+    calibration: CameraCalibration | None = None
+    """Most recently computed calibration, or None if uncalibrated."""
+
+    def validate(self) -> None:
+        if self.move_x_ticks <= 0:
+            raise ValueError("move_x_ticks must be > 0")
+        if self.move_y_ticks <= 0:
+            raise ValueError("move_y_ticks must be > 0")
+
+
+# ---------------------------------------------------------------------------
 # Top-level settings
 # ---------------------------------------------------------------------------
 
@@ -199,9 +237,13 @@ class MachineVisionSettings:
     """Top-level machine-vision configuration."""
 
     focus: FocusDetectionSettings = field(default_factory=FocusDetectionSettings)
+    camera_calibration: CameraCalibrationSettings = field(
+        default_factory=CameraCalibrationSettings
+    )
 
     def validate(self) -> None:
         self.focus.validate()
+        self.camera_calibration.validate()
 
 
 # ---------------------------------------------------------------------------
@@ -288,13 +330,30 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             laplacian=_load_laplacian(focus_data.get("laplacian", {})),
             focus_region=_load_focus_region(focus_data.get("focus_region", {})),
         )
-        return MachineVisionSettings(focus=focus)
+
+        cal_data: dict[str, Any] = data.get("camera_calibration", {})
+        D = CameraCalibrationSettings
+        cal_dict = cal_data.get("calibration")
+        calibration: CameraCalibration | None = None
+        if cal_dict:
+            try:
+                calibration = CameraCalibration.from_dict(cal_dict)
+            except Exception:
+                pass  # Corrupt saved calibration; start uncalibrated.
+        camera_calibration = CameraCalibrationSettings(
+            move_x_ticks=cal_data.get("move_x_ticks", D.move_x_ticks),
+            move_y_ticks=cal_data.get("move_y_ticks", D.move_y_ticks),
+            calibration=calibration,
+        )
+
+        return MachineVisionSettings(focus=focus, camera_calibration=camera_calibration)
 
     def to_dict(self, settings: MachineVisionSettings) -> dict[str, Any]:
         f = settings.focus
         t = f.tenengrad
         lap = f.laplacian
         fr = f.focus_region
+        cc = settings.camera_calibration
         return {
             "focus": {
                 "method": f.method,
@@ -323,5 +382,10 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                     "top": fr.top,
                     "bottom": fr.bottom,
                 },
+            },
+            "camera_calibration": {
+                "move_x_ticks": cc.move_x_ticks,
+                "move_y_ticks": cc.move_y_ticks,
+                "calibration": cc.calibration.to_dict() if cc.calibration is not None else None,
             },
         }

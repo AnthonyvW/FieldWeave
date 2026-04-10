@@ -16,6 +16,12 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
 from common.logger import debug, error
+from machine_vision.camera_calibration import (
+    CameraCalibration,
+    build_calibration,
+    compute_edge_map,
+    rgb_to_gray,
+)
 from machine_vision.machine_vision_config import (
     FOCUS_METHOD_TENENGRAD,
     FOCUS_METHOD_LAPLACIAN,
@@ -84,6 +90,8 @@ class MachineVisionWorker(QObject):
 
     focus_result_ready = Signal(object)   # FocusResult
     analysis_error = Signal(str)
+    calibration_ready = Signal(object)    # CameraCalibration
+    calibration_error = Signal(str)
 
     # Active method — controls which parameter block is used.
     focus_method: FocusMethod = FOCUS_METHOD_LAPLACIAN
@@ -176,6 +184,67 @@ class MachineVisionWorker(QObject):
             msg = traceback.format_exc()
             error(f"MachineVisionWorker: focus analysis failed:\n{msg}")
             self.analysis_error.emit(msg)
+
+    @Slot(bytes, int, int, bytes, int, int, bytes, int, int, int, int, int, int, int)
+    def run_calibration_build(
+        self,
+        base_bytes: bytes,
+        base_width: int,
+        base_height: int,
+        x_bytes: bytes,
+        x_width: int,
+        x_height: int,
+        y_bytes: bytes,
+        y_width: int,
+        y_height: int,
+        move_x_ticks: int,
+        move_y_ticks: int,
+        ref_x: int,
+        ref_y: int,
+        ref_z: int,
+    ) -> None:
+        """
+        Build a ``CameraCalibration`` from three RGB888 frame buffers.
+
+        Each frame is an RGB888 byte string with stride == width * 3, matching
+        the format passed to ``run_focus_analysis``.  The three frames must
+        have been captured at the base position, after a +X move, and after a
+        +Y move respectively (with the stage returned to base between the X
+        and Y captures).
+
+        Emits ``calibration_ready(CameraCalibration)`` on success or
+        ``calibration_error(str)`` on failure.  All frames are converted to
+        greyscale edge maps here on the worker thread so the GUI thread is
+        never blocked.
+        """
+        try:
+            def _to_edge(frame_bytes: bytes, w: int, h: int) -> np.ndarray:
+                arr = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((h, w, 3))
+                gray = rgb_to_gray(arr)
+                return compute_edge_map(gray)
+
+            edges_base = _to_edge(base_bytes, base_width, base_height)
+            edges_x    = _to_edge(x_bytes,    x_width,    x_height)
+            edges_y    = _to_edge(y_bytes,    y_width,    y_height)
+
+            calibration = build_calibration(
+                edges_base=edges_base,
+                edges_x=edges_x,
+                edges_y=edges_y,
+                move_x_ticks=move_x_ticks,
+                move_y_ticks=move_y_ticks,
+                ref_x=ref_x,
+                ref_y=ref_y,
+                ref_z=ref_z,
+                image_width=base_width,
+                image_height=base_height,
+            )
+            self.calibration_ready.emit(calibration)
+
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"MachineVisionWorker: calibration build failed:\n{msg}")
+            self.calibration_error.emit(msg)
 
     # ------------------------------------------------------------------
     # Private per-method helpers

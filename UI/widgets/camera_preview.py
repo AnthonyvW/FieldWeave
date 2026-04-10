@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt, Slot, QRect
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent
+from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy,
 )
@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info, error, warning
 from UI.widgets.preview_overlay.channel import ChannelButton, ChannelOverlay
+from UI.widgets.preview_overlay.click_to_move import ClickToMoveButton, ClickToMoveOverlay
 from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverlay
 from UI.widgets.preview_overlay.focus import FocusButton, FocusOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
@@ -22,9 +23,51 @@ class OverlayLabel(QLabel):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._overlays: list[Overlay] = []
+        # Optional click handler: callable(widget_x, widget_y, image_rect) or None.
+        self._click_handler: "ClickToMoveOverlay | None" = None
 
     def add_overlay(self, overlay: Overlay) -> None:
         self._overlays.append(overlay)
+
+    def set_click_handler(self, handler: "ClickToMoveOverlay | None") -> None:
+        """
+        Register the overlay that should receive mouse clicks.
+
+        Pass ``None`` to stop forwarding clicks (e.g. when click-to-move is
+        disabled).  The label enables ``Qt.WA_Cursor`` only while a handler
+        is active so the cursor gives visual feedback.
+        """
+        self._click_handler = handler
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if handler is not None
+            else Qt.CursorShape.ArrowCursor
+        )
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._click_handler is not None
+            and self._click_handler.enabled
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.pixmap() is not None
+            and not self.pixmap().isNull()
+        ):
+            image_rect = self._image_rect(self.pixmap())
+            # full_width/height are stored on the parent CameraPreview so the
+            # handler can scale display coordinates to camera-sensor coordinates.
+            parent = self.parent()
+            full_w = getattr(parent, "_current_full_width", 0)
+            full_h = getattr(parent, "_current_full_height", 0)
+            if full_w > 0 and full_h > 0:
+                self._click_handler.handle_click(
+                    event.position().toPoint().x(),
+                    event.position().toPoint().y(),
+                    image_rect,
+                    full_w,
+                    full_h,
+                )
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def notify_full(self, frame: np.ndarray) -> None:
         """Forward the full-resolution frame to every enabled overlay."""
@@ -104,6 +147,11 @@ class CameraPreview(QFrame):
         self._still_height: int = 0
         self._still_seq: int = 0
 
+        # Most recent full-sensor resolution; read by OverlayLabel.mousePressEvent
+        # to scale display-space clicks back to calibration-image space.
+        self._current_full_width: int = 0
+        self._current_full_height: int = 0
+
         self._video_label = OverlayLabel()
         self._video_label.setObjectName("VideoLabel")
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -122,10 +170,12 @@ class CameraPreview(QFrame):
         self._grid_overlay = GridOverlay()
         self._focus_overlay = FocusOverlay()
         self._channel_overlay = ChannelOverlay()
+        self._click_to_move_overlay = ClickToMoveOverlay(self._video_label)
 
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
         self._video_label.add_overlay(self._focus_overlay)
+        self._video_label.add_overlay(self._click_to_move_overlay)
 
         # Buttons
         self._crosshair_button = CrosshairButton(self)
@@ -151,6 +201,16 @@ class CameraPreview(QFrame):
         self._channel_button.raise_()
         self._channel_button.menu.raise_()
         self._channel_button.channel_changed.connect(self._on_channel_changed)
+
+        self._click_to_move_button = ClickToMoveButton(self)
+        self._click_to_move_button.move(10, 150)
+        self._click_to_move_button.raise_()
+        self._click_to_move_button.toggled_click_to_move.connect(self._on_click_to_move_toggled)
+
+        # Refresh the click-to-move button whenever calibration changes.
+        get_app_context().machine_vision.calibration_changed.connect(
+            lambda _cal: self._click_to_move_button.refresh_calibration_state()
+        )
 
         # Also connect repaint so the label refreshes after each result.
         get_app_context().machine_vision.focus_result_ready.connect(
@@ -191,6 +251,13 @@ class CameraPreview(QFrame):
         self._channel_overlay.show_green = show_green
         self._channel_overlay.show_blue = show_blue
         self._channel_overlay.show_grayscale = show_grayscale
+
+    @Slot(bool)
+    def _on_click_to_move_toggled(self, enabled: bool) -> None:
+        self._click_to_move_overlay.set_enabled(enabled)
+        self._video_label.set_click_handler(
+            self._click_to_move_overlay if enabled else None
+        )
 
     # ------------------------------------------------------------------
     # Frame slots
@@ -289,6 +356,11 @@ class CameraPreview(QFrame):
             stride: Row stride in bytes (>= width * 3).
         """
         try:
+            # Keep full-sensor dimensions up to date so OverlayLabel.mousePressEvent
+            # can scale display-space clicks to camera-sensor coordinates.
+            self._current_full_width = width
+            self._current_full_height = height
+
             image = QImage(buf, width, height, stride, QImage.Format.Format_RGB888)
 
             if self._channel_overlay.needs_filter:

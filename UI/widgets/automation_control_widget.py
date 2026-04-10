@@ -18,6 +18,7 @@ from UI.widgets.automation.focus_stack_widget import FocusStackWidget
 from UI.widgets.automation.focus_stack_area_scan_widget import ZStackAreaScanWidget
 from UI.widgets.automation.square_move_widget import SquareMoveWidget
 from UI.widgets.automation.tree_core_widget import TreeCoreWidget
+from UI.widgets.automation.camera_calibration_widget import CameraCalibrationWidget
 
 class _ArrowComboBox(QComboBox):
     """QComboBox that draws a ▼ character in the drop-down button area."""
@@ -56,7 +57,7 @@ class _CollapsibleStack(QStackedWidget):
 # Automation widget
 # ---------------------------------------------------------------------------
 
-_MODES: list[str] = ["Tree Core Imaging", "Focus Stacking", "Z-Stack Area Scan", "(DEV) Square Move"]
+_MODES: list[str] = ["Tree Core Imaging", "Focus Stacking", "Z-Stack Area Scan", "(DEV) Square Move", "Camera Calibration"]
 
 
 class AutomationWidget(QWidget):
@@ -157,11 +158,13 @@ class AutomationWidget(QWidget):
         self._area_scan_widget = ZStackAreaScanWidget()
         self._tree_core_widget = TreeCoreWidget()
         self._square_move_widget = SquareMoveWidget()
+        self._camera_calibration_widget = CameraCalibrationWidget()
 
         self._stack.addWidget(self._tree_core_widget)     # Tree Core Imaging
         self._stack.addWidget(self._focus_stack_widget)   # Focus Stacking
         self._stack.addWidget(self._area_scan_widget)     # Z-Stack Area Scan
         self._stack.addWidget(self._square_move_widget)   # Square Move
+        self._stack.addWidget(self._camera_calibration_widget)   # Square Move
 
         outer_layout.addWidget(self._stack)
 

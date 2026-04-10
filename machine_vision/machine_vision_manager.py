@@ -14,8 +14,10 @@ import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from common.logger import info, error, warning
+from machine_vision.camera_calibration import CameraCalibration
 from machine_vision.machine_vision_worker import MachineVisionWorker, FocusResult
 from machine_vision.machine_vision_config import (
+    CameraCalibrationSettings,
     FocusDetectionSettings,
     FocusRegionSettings,
     LaplacianSettings,
@@ -32,6 +34,26 @@ class _PendingRequest:
     width: int
     height: int
     future: Future[FocusResult]
+
+
+@dataclass
+class _PendingCalibration:
+    """A queued calibration-build request paired with its future."""
+    base_bytes: bytes
+    base_width: int
+    base_height: int
+    x_bytes: bytes
+    x_width: int
+    x_height: int
+    y_bytes: bytes
+    y_width: int
+    y_height: int
+    move_x_ticks: int
+    move_y_ticks: int
+    ref_x: int
+    ref_y: int
+    ref_z: int
+    future: Future[CameraCalibration]
 
 
 class MachineVisionManager(QObject):
@@ -68,8 +90,16 @@ class MachineVisionManager(QObject):
     focus_result_ready = Signal(object)   # FocusResult
     analysis_error = Signal(str)
     settings_changed = Signal()
+    calibration_changed = Signal(object)  # CameraCalibration | None
 
     _request_focus = Signal(bytes, int, int)
+    _request_calibration_build = Signal(
+        bytes, int, int,   # base frame
+        bytes, int, int,   # x frame
+        bytes, int, int,   # y frame
+        int, int,          # move_x_ticks, move_y_ticks
+        int, int, int,     # ref_x, ref_y, ref_z
+    )
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -80,8 +110,18 @@ class MachineVisionManager(QObject):
         self._current_pending: _PendingRequest | None = None
         self._busy: bool = False
 
+        # Calibration build runs exclusively (not interleaved with focus jobs).
+        self._pending_calibration: _PendingCalibration | None = None
+        self._current_calibration: _PendingCalibration | None = None
+        self._calibration_busy: bool = False
+
         self._settings_manager = MachineVisionSettingsManager()
         self._settings: MachineVisionSettings = self._load_settings()
+
+        # Calibration is loaded from settings; can also be set at runtime.
+        self._calibration: CameraCalibration | None = (
+            self._settings.camera_calibration.calibration
+        )
 
         self._thread = QThread(self)
         self._thread.setObjectName("MachineVisionThread")
@@ -92,6 +132,10 @@ class MachineVisionManager(QObject):
         self._request_focus.connect(self._worker.run_focus_analysis)
         self._worker.focus_result_ready.connect(self._on_focus_result)
         self._worker.analysis_error.connect(self._on_analysis_error)
+
+        self._request_calibration_build.connect(self._worker.run_calibration_build)
+        self._worker.calibration_ready.connect(self._on_calibration_ready)
+        self._worker.calibration_error.connect(self._on_calibration_error)
 
         self._thread.start()
         self._apply_settings(self._settings)
@@ -123,6 +167,161 @@ class MachineVisionManager(QObject):
             info("MachineVisionManager: settings saved")
         except Exception as exc:
             error(f"MachineVisionManager: failed to save settings — {exc}")
+
+    # ------------------------------------------------------------------
+    # Calibration API
+    # ------------------------------------------------------------------
+
+    @property
+    def calibration(self) -> CameraCalibration | None:
+        """The most recently completed calibration, or ``None`` if uncalibrated."""
+        return self._calibration
+
+    @property
+    def is_calibrated(self) -> bool:
+        """``True`` when a valid calibration is available."""
+        return self._calibration is not None
+
+    def pixel_to_world_delta(
+        self,
+        pixel_x: float,
+        pixel_y: float,
+        image_center_x: float | None = None,
+        image_center_y: float | None = None,
+    ) -> tuple[float, float] | None:
+        """
+        Convert a pixel coordinate to a stage delta in tick units.
+
+        Delegates to ``CameraCalibration.pixel_to_world_delta``.  Returns
+        ``None`` when no calibration is available.
+
+        Parameters
+        ----------
+        pixel_x, pixel_y:
+            Target pixel coordinates (origin top-left).
+        image_center_x, image_center_y:
+            Override the image centre used for the conversion.  Defaults to
+            the image dimensions recorded at calibration time.
+        """
+        if self._calibration is None:
+            return None
+        return self._calibration.pixel_to_world_delta(
+            pixel_x, pixel_y, image_center_x, image_center_y
+        )
+
+    def submit_calibration_frames_async(
+        self,
+        base_frame: np.ndarray,
+        base_width: int,
+        base_height: int,
+        x_frame: np.ndarray,
+        x_width: int,
+        x_height: int,
+        y_frame: np.ndarray,
+        y_width: int,
+        y_height: int,
+        ref_x: int,
+        ref_y: int,
+        ref_z: int,
+        move_x_ticks: int | None = None,
+        move_y_ticks: int | None = None,
+    ) -> Future[CameraCalibration]:
+        """
+        Submit three RGB888 frames for calibration and return a
+        ``Future[CameraCalibration]``.
+
+        The three frames must have been captured at the base (reference)
+        position, after a +X move, and after a +Y move respectively.  The
+        stage must have returned to the base position between the X and Y
+        captures — this is the caller's (printer controller's) responsibility.
+
+        Each frame is copied immediately so camera buffers may be reused.
+
+        ``move_x_ticks`` and ``move_y_ticks`` default to the values stored in
+        ``settings.camera_calibration`` if not supplied.
+
+        If a calibration build is already in progress the new request replaces
+        it (latest-request-wins, consistent with the focus analysis policy).
+        The future is always resolved: set to the ``CameraCalibration`` on
+        success, or to an exception on failure.  On success the manager's
+        ``_calibration`` attribute is updated and ``calibration_changed`` is
+        emitted automatically.
+
+        This method is safe to call from the GUI thread only.
+        """
+        cc = self._settings.camera_calibration
+        mx = move_x_ticks if move_x_ticks is not None else cc.move_x_ticks
+        my = move_y_ticks if move_y_ticks is not None else cc.move_y_ticks
+
+        future: Future[CameraCalibration] = Future()
+        pending = _PendingCalibration(
+            base_bytes=bytes(base_frame),
+            base_width=base_width,
+            base_height=base_height,
+            x_bytes=bytes(x_frame),
+            x_width=x_width,
+            x_height=x_height,
+            y_bytes=bytes(y_frame),
+            y_width=y_width,
+            y_height=y_height,
+            move_x_ticks=mx,
+            move_y_ticks=my,
+            ref_x=ref_x,
+            ref_y=ref_y,
+            ref_z=ref_z,
+            future=future,
+        )
+
+        if self._pending_calibration is not None:
+            self._pending_calibration.future.cancel()
+        self._pending_calibration = pending
+        self._try_dispatch_calibration()
+        return future
+
+    def submit_calibration_frames(
+        self,
+        base_frame: np.ndarray,
+        base_width: int,
+        base_height: int,
+        x_frame: np.ndarray,
+        x_width: int,
+        x_height: int,
+        y_frame: np.ndarray,
+        y_width: int,
+        y_height: int,
+        ref_x: int,
+        ref_y: int,
+        ref_z: int,
+        move_x_ticks: int | None = None,
+        move_y_ticks: int | None = None,
+    ) -> None:
+        """
+        Fire-and-forget wrapper around ``submit_calibration_frames_async``.
+
+        On success the manager stores the new calibration, persists it, and
+        emits ``calibration_changed``.  On failure ``analysis_error`` is
+        emitted with the traceback string.
+        """
+        future = self.submit_calibration_frames_async(
+            base_frame, base_width, base_height,
+            x_frame, x_width, x_height,
+            y_frame, y_width, y_height,
+            ref_x, ref_y, ref_z,
+            move_x_ticks, move_y_ticks,
+        )
+        future.add_done_callback(self._signal_from_calibration_future)
+
+    def clear_calibration(self) -> None:
+        """
+        Discard the current calibration from memory and from persisted settings.
+
+        Emits ``calibration_changed(None)`` and saves settings to disk.
+        """
+        self._calibration = None
+        self._settings.camera_calibration.calibration = None
+        self.save_settings()
+        self.calibration_changed.emit(None)
+        info("MachineVisionManager: calibration cleared")
 
     # ------------------------------------------------------------------
     # Analysis API
@@ -209,6 +408,32 @@ class MachineVisionManager(QObject):
         else:
             self.focus_result_ready.emit(future.result())
 
+    def _try_dispatch_calibration(self) -> None:
+        """Dispatch the pending calibration build if the worker is free."""
+        if self._calibration_busy or self._pending_calibration is None:
+            return
+        pending = self._pending_calibration
+        self._pending_calibration = None
+        self._calibration_busy = True
+        self._current_calibration = pending
+        self._request_calibration_build.emit(
+            pending.base_bytes, pending.base_width, pending.base_height,
+            pending.x_bytes,    pending.x_width,    pending.x_height,
+            pending.y_bytes,    pending.y_width,    pending.y_height,
+            pending.move_x_ticks, pending.move_y_ticks,
+            pending.ref_x, pending.ref_y, pending.ref_z,
+        )
+
+    def _signal_from_calibration_future(self, future: Future[CameraCalibration]) -> None:
+        """Done-callback that fans out a resolved calibration future to signals."""
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is not None:
+            self.analysis_error.emit(str(exc))
+        else:
+            self.calibration_changed.emit(future.result())
+
     def _load_settings(self) -> MachineVisionSettings:
         try:
             s = self._settings_manager.load()
@@ -255,6 +480,7 @@ class MachineVisionManager(QObject):
         f = self._settings.focus
         t, lap = f.tenengrad, f.laplacian
         fr = f.focus_region
+        cc = self._settings.camera_calibration
         return MachineVisionSettings(
             focus=FocusDetectionSettings(
                 method=f.method,
@@ -283,7 +509,12 @@ class MachineVisionManager(QObject):
                     top=fr.top,
                     bottom=fr.bottom,
                 ),
-            )
+            ),
+            camera_calibration=CameraCalibrationSettings(
+                move_x_ticks=cc.move_x_ticks,
+                move_y_ticks=cc.move_y_ticks,
+                calibration=cc.calibration,  # CameraCalibration is immutable; no need to copy.
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -305,6 +536,26 @@ class MachineVisionManager(QObject):
         pending.future.set_exception(RuntimeError(msg))
         self._try_dispatch()
 
+    @Slot(object)
+    def _on_calibration_ready(self, calibration: CameraCalibration) -> None:
+        pending = self._current_calibration
+        self._calibration_busy = False
+        self._calibration = calibration
+        self._settings.camera_calibration.calibration = calibration
+        self.save_settings()
+        pending.future.set_result(calibration)
+        dpi_str = f" (DPI: {calibration.dpi:.1f})" if calibration.dpi is not None else ""
+        info(f"MachineVisionManager: calibration complete{dpi_str}")
+        self._try_dispatch_calibration()
+
+    @Slot(str)
+    def _on_calibration_error(self, msg: str) -> None:
+        pending = self._current_calibration
+        self._calibration_busy = False
+        error(f"MachineVisionManager: calibration error: {msg}")
+        pending.future.set_exception(RuntimeError(msg))
+        self._try_dispatch_calibration()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -314,10 +565,14 @@ class MachineVisionManager(QObject):
             return
         info("MachineVisionManager: shutting down worker thread...")
 
-        # Cancel any waiting request that will never be dispatched.
+        # Cancel any waiting requests that will never be dispatched.
         if self._pending is not None:
             self._pending.future.cancel()
             self._pending = None
+
+        if self._pending_calibration is not None:
+            self._pending_calibration.future.cancel()
+            self._pending_calibration = None
 
         self._thread.quit()
         if not self._thread.wait(3000):
