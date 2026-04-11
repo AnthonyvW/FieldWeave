@@ -90,7 +90,6 @@ class MachineVisionManager(QObject):
     focus_result_ready = Signal(object)   # FocusResult
     analysis_error = Signal(str)
     settings_changed = Signal()
-    calibration_changed = Signal(object)  # CameraCalibration | None
 
     _request_focus = Signal(bytes, int, int)
     _request_calibration_build = Signal(
@@ -244,8 +243,7 @@ class MachineVisionManager(QObject):
         it (latest-request-wins, consistent with the focus analysis policy).
         The future is always resolved: set to the ``CameraCalibration`` on
         success, or to an exception on failure.  On success the manager's
-        ``_calibration`` attribute is updated and ``calibration_changed`` is
-        emitted automatically.
+        ``_calibration`` attribute is updated automatically.
 
         This method is safe to call from the GUI thread only.
         """
@@ -298,9 +296,8 @@ class MachineVisionManager(QObject):
         """
         Fire-and-forget wrapper around ``submit_calibration_frames_async``.
 
-        On success the manager stores the new calibration, persists it, and
-        emits ``calibration_changed``.  On failure ``analysis_error`` is
-        emitted with the traceback string.
+        On success the manager stores the new calibration and persists it.
+        On failure ``analysis_error`` is emitted with the traceback string.
         """
         future = self.submit_calibration_frames_async(
             base_frame, base_width, base_height,
@@ -315,12 +312,11 @@ class MachineVisionManager(QObject):
         """
         Discard the current calibration from memory and from persisted settings.
 
-        Emits ``calibration_changed(None)`` and saves settings to disk.
+        Saves settings to disk.
         """
         self._calibration = None
         self._settings.camera_calibration.calibration = None
         self.save_settings()
-        self.calibration_changed.emit(None)
         info("MachineVisionManager: calibration cleared")
 
     # ------------------------------------------------------------------
@@ -431,8 +427,6 @@ class MachineVisionManager(QObject):
         exc = future.exception()
         if exc is not None:
             self.analysis_error.emit(str(exc))
-        else:
-            self.calibration_changed.emit(future.result())
 
     def _load_settings(self) -> MachineVisionSettings:
         try:

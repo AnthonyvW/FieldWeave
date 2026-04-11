@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info, error, warning
 from UI.widgets.preview_overlay.channel import ChannelButton, ChannelOverlay
-from UI.widgets.preview_overlay.click_to_move import ClickToMoveButton, ClickToMoveOverlay
+from UI.widgets.preview_overlay.click_to_move import ClickToMoveOverlay
 from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverlay
 from UI.widgets.preview_overlay.focus import FocusButton, FocusOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
@@ -170,7 +170,7 @@ class CameraPreview(QFrame):
         self._grid_overlay = GridOverlay()
         self._focus_overlay = FocusOverlay()
         self._channel_overlay = ChannelOverlay()
-        self._click_to_move_overlay = ClickToMoveOverlay(self._video_label)
+        self._click_to_move_overlay = ClickToMoveOverlay()
 
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
@@ -202,15 +202,8 @@ class CameraPreview(QFrame):
         self._channel_button.menu.raise_()
         self._channel_button.channel_changed.connect(self._on_channel_changed)
 
-        self._click_to_move_button = ClickToMoveButton(self)
-        self._click_to_move_button.move(10, 150)
-        self._click_to_move_button.raise_()
-        self._click_to_move_button.toggled_click_to_move.connect(self._on_click_to_move_toggled)
-
-        # Refresh the click-to-move button whenever calibration changes.
-        get_app_context().machine_vision.calibration_changed.connect(
-            lambda _cal: self._click_to_move_button.refresh_calibration_state()
-        )
+        # Always register the overlay as click handler; it gates itself on calibration.
+        self._video_label.set_click_handler(self._click_to_move_overlay)
 
         # Also connect repaint so the label refreshes after each result.
         get_app_context().machine_vision.focus_result_ready.connect(
@@ -251,13 +244,6 @@ class CameraPreview(QFrame):
         self._channel_overlay.show_green = show_green
         self._channel_overlay.show_blue = show_blue
         self._channel_overlay.show_grayscale = show_grayscale
-
-    @Slot(bool)
-    def _on_click_to_move_toggled(self, enabled: bool) -> None:
-        self._click_to_move_overlay.set_enabled(enabled)
-        self._video_label.set_click_handler(
-            self._click_to_move_overlay if enabled else None
-        )
 
     # ------------------------------------------------------------------
     # Frame slots
