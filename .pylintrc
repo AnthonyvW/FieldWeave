@@ -2,6 +2,7 @@
 ignored-modules=cv2
 disable=
     C0301, # Line too long
+    C0303, # Trailing whitespace
     C0103, # snake case
     C0114, # missing-module-docstring
     C0115, # missing-class-docstring
