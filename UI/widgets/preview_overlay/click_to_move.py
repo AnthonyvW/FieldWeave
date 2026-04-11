@@ -6,7 +6,10 @@ from PySide6.QtWidgets import QPushButton, QWidget
 
 
 from common.logger import info, warning
+from common.app_context import get_app_context
+
 from UI.widgets.preview_overlay.overlay_base import Overlay
+from motion.models import Position
 
 # Fade duration and tick interval for the click indicator.
 _FADE_DURATION_MS: int = 800
@@ -94,8 +97,6 @@ class ClickToMoveOverlay(Overlay):
         if not image_rect.contains(QPoint(widget_x, widget_y)):
             return
 
-        from common.app_context import get_app_context
-        from motion.models import Position
 
         ctx = get_app_context()
         mv = ctx.machine_vision
@@ -248,7 +249,6 @@ class ClickToMoveButton(QPushButton):
         Call this after a calibration completes or is cleared so the button
         reflects reality without requiring a restart.
         """
-        from common.app_context import get_app_context
         try:
             calibrated = get_app_context().machine_vision.is_calibrated
         except Exception:

@@ -6,11 +6,13 @@ Provides plugin architecture for multiple camera types and manages frame acquisi
 from __future__ import annotations
 
 from typing import Callable, Any
+import traceback
+
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot, Qt
 
 from camera.cameras.base_camera import BaseCamera
-from camera.cameras.amscope_camera import AmscopeCamera
+from camera.cameras.amscope_camera import AmscopeCamera, _HRESULT_NAMES
 from camera.threaded_camera import ThreadedCamera
 from camera.camera_enumerator import (
     CameraEnumerator,
@@ -348,7 +350,6 @@ class CameraManager(QObject):
             
         except Exception as e:
             error(f"Camera start streaming error: {e}")
-            import traceback
             error(traceback.format_exc())
             return False
     
@@ -607,7 +608,6 @@ class CameraManager(QObject):
                     # get_LastError returns the HRESULT of the most recent failure
                     hr = amcam.Amcam.get_LastError()
                     hr_unsigned = hr & 0xFFFFFFFF
-                    from camera.cameras.amscope_camera import _HRESULT_NAMES
                     description = _HRESULT_NAMES.get(hr_unsigned, f"0x{hr_unsigned:08X}")
                 except Exception:
                     pass

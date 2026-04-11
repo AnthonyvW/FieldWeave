@@ -290,14 +290,11 @@ def compute_dpi_from_matrix(M_est: np.ndarray) -> float | None:
     -------
     DPI as a float, or ``None`` if the calculation raises an exception.
     """
-    try:
-        px_per_tick_x = abs(M_est[0, 0])
-        px_per_tick_y = abs(M_est[1, 1])
-        px_per_tick_avg = (px_per_tick_x + px_per_tick_y) / 2.0
-        px_per_mm = px_per_tick_avg * 100.0   # 1 tick = 0.01 mm
-        return px_per_mm * 25.4
-    except Exception:
-        return None
+    px_per_tick_x = abs(M_est[0, 0])
+    px_per_tick_y = abs(M_est[1, 1])
+    px_per_tick_avg = (px_per_tick_x + px_per_tick_y) / 2.0
+    px_per_mm = px_per_tick_avg * 100.0   # 1 tick = 0.01 mm
+    return px_per_mm * 25.4
 
 
 # ---------------------------------------------------------------------------

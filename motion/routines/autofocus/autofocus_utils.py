@@ -13,7 +13,7 @@ import numpy as np
 
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
-from common.logger import error, info
+from common.logger import error
 
 _NM_PER_MM = 1_000_000
 

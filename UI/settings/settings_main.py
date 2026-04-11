@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -135,7 +135,6 @@ class SettingsDialog(QDialog):
     
     def set_category_modified(self, category: str, modified: bool) -> None:
         """Update category text color to indicate modifications"""
-        from PySide6.QtGui import QColor
         for i in range(self.sidebar.topLevelItemCount()):
             item = self.sidebar.topLevelItem(i)
             if item and item.text(0) == category:

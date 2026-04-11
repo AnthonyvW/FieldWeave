@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import time
 from typing import Generator
+import numpy as np
 
 from common.app_context import get_app_context
 from common.logger import info, error
@@ -143,8 +144,6 @@ class CameraCalibrationRoutine(AutomationRoutine):
         # ----------------------------------------------------------------
         # Capture helper
         # ----------------------------------------------------------------
-
-        import numpy as np
 
         def capture(label: str) -> np.ndarray | None:
             if self._settle_s > 0:
