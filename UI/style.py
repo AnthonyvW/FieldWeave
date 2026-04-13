@@ -129,8 +129,6 @@ def apply_style(app: QApplication) -> None:
             border-radius: 4px;
         }}
 
-        
-
 
         /* Collapsible section box */
         QFrame#CollapsibleSection {{
@@ -148,7 +146,7 @@ def apply_style(app: QApplication) -> None:
             font-weight: 800;
         }}
 
-        /* When collapsed: header rounds bottom corners too (prevents “sticking out” corners) */
+        /* When collapsed: header rounds bottom corners too (prevents "sticking out" corners) */
         QFrame#SectionHeader[collapsed="true"] {{
             border-bottom: none;
         }}
@@ -225,6 +223,53 @@ def apply_style(app: QApplication) -> None:
             font-weight: normal;
         }}
 
-        
+        /* Automation control bar — Pause button */
+        QPushButton#AutomationPause {{
+            background-color: rgb(208, 211, 214);
+            border: 1px solid rgb(150, 150, 150);
+            border-radius: 0px;
+            font-size: 13px;
+            font-weight: normal;
+            color: #2c2c2c;
+        }}
+        QPushButton#AutomationPause:hover:enabled {{
+            background-color: rgb(187, 190, 193);
+        }}
+        QPushButton#AutomationPause:pressed:enabled {{
+            background-color: rgb(170, 173, 175);
+        }}
+        QPushButton#AutomationPause:checked {{
+            background-color: #f28c28;
+            border: 1px solid #c97220;
+            color: white;
+            font-weight: bold;
+        }}
+        QPushButton#AutomationPause:disabled {{
+            background-color: rgb(225, 227, 229);
+            border: 1px solid rgb(190, 190, 190);
+            color: rgb(170, 170, 170);
+        }}
+
+        /* Automation control bar — Stop button */
+        QPushButton#AutomationStop {{
+            background-color: rgb(200, 60, 60);
+            border: 1px solid rgb(160, 40, 40);
+            border-radius: 0px;
+            font-size: 13px;
+            font-weight: bold;
+            color: white;
+        }}
+        QPushButton#AutomationStop:hover:enabled {{
+            background-color: rgb(220, 70, 70);
+        }}
+        QPushButton#AutomationStop:pressed:enabled {{
+            background-color: rgb(170, 40, 40);
+        }}
+        QPushButton#AutomationStop:disabled {{
+            background-color: rgb(210, 150, 150);
+            border: 1px solid rgb(190, 130, 130);
+            color: rgb(240, 210, 210);
+        }}
+
         """
     )

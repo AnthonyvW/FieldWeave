@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
 )
 from PySide6.QtGui import QPainter, QColor, QFont
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 
 from common.app_context import get_app_context
 
@@ -19,6 +19,7 @@ from UI.widgets.automation.focus_stack_area_scan_widget import ZStackAreaScanWid
 from UI.widgets.automation.square_move_widget import SquareMoveWidget
 from UI.widgets.automation.tree_core_widget import TreeCoreWidget
 from UI.widgets.automation.camera_calibration_widget import CameraCalibrationWidget
+
 
 class _ArrowComboBox(QComboBox):
     """QComboBox that draws a ▼ character in the drop-down button area."""
@@ -44,6 +45,7 @@ class _ArrowComboBox(QComboBox):
         painter.setPen(QColor(60, 60, 60))
         painter.drawText(panel_x, 0, arrow_w, self.height(), Qt.AlignmentFlag.AlignCenter, "▼")
 
+
 class _CollapsibleStack(QStackedWidget):
     def sizeHint(self) -> QSize:
         w = self.currentWidget()
@@ -53,11 +55,21 @@ class _CollapsibleStack(QStackedWidget):
         w = self.currentWidget()
         return w.minimumSizeHint() if w else super().minimumSizeHint()
 
+
 # ---------------------------------------------------------------------------
 # Automation widget
 # ---------------------------------------------------------------------------
 
-_MODES: list[str] = ["Tree Core Imaging", "Focus Stacking", "Z-Stack Area Scan", "(DEV) Square Move", "Camera Calibration"]
+_MODES: list[str] = [
+    "Tree Core Imaging",
+    "Focus Stacking",
+    "Z-Stack Area Scan",
+    "(DEV) Square Move",
+    "Camera Calibration",
+]
+
+# How often (ms) to poll the manager for routine state changes.
+_POLL_INTERVAL_MS: int = 250
 
 
 class AutomationWidget(QWidget):
@@ -66,21 +78,23 @@ class AutomationWidget(QWidget):
 
     Contains a mode selector drop-down, pause/stop controls, and a stacked
     content area that swaps between automation-specific sub-widgets.
+
+    Pause and Stop are disabled whenever no routine is running.  A QTimer
+    polls the MotionControllerManager every 250 ms so the buttons stay in
+    sync without coupling the manager to Qt signals.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._running: bool = False
         self._paused: bool = False
         self._setup_ui()
+        self._setup_poll_timer()
 
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
 
     def _setup_ui(self) -> None:
-        self.setStyleSheet("AutomationWidget { background: white; }")
-
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(8)
@@ -99,48 +113,25 @@ class AutomationWidget(QWidget):
         self._mode_combo.addItems(_MODES)
         self._mode_combo.setFixedHeight(30)
         self._mode_combo.setFixedWidth(155)
-        self._mode_combo.setStyleSheet("""
-            QComboBox {
-                font-size: 13px;
-                padding: 2px 28px 2px 6px;
-                border: 1px solid rgb(140, 140, 140);
-                border-radius: 0px;
-                background: white;
-            }
-            QComboBox:hover {
-                border: 1px solid rgb(80, 80, 80);
-                background: rgb(245, 245, 245);
-            }
-            QComboBox::drop-down {
-                width: 0px;
-                border: none;
-                background: transparent;
-            }
-            QComboBox QAbstractItemView {
-                font-size: 13px;
-                border: 1px solid rgb(140, 140, 140);
-                selection-background-color: #f28c28;
-                selection-color: white;
-                outline: none;
-            }
-        """)
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         control_layout.addWidget(self._mode_combo)
 
         control_layout.addStretch(1)
 
-        # Pause button
+        # Pause button — disabled until a routine is running
         self._pause_btn = QPushButton("Pause")
+        self._pause_btn.setObjectName("AutomationPause")
         self._pause_btn.setFixedSize(70, 30)
         self._pause_btn.setCheckable(True)
-        self._pause_btn.setStyleSheet(self._action_button_style(checked_color="rgb(230, 180, 60)"))
+        self._pause_btn.setEnabled(False)
         self._pause_btn.clicked.connect(self._on_pause_clicked)
         control_layout.addWidget(self._pause_btn)
 
-        # Stop button
+        # Stop button — red, disabled until a routine is running
         self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setObjectName("AutomationStop")
         self._stop_btn.setFixedSize(70, 30)
-        self._stop_btn.setStyleSheet(self._action_button_style(checked_color="rgb(210, 80, 80)"))
+        self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._on_stop_clicked)
         control_layout.addWidget(self._stop_btn)
 
@@ -160,48 +151,38 @@ class AutomationWidget(QWidget):
         self._square_move_widget = SquareMoveWidget()
         self._camera_calibration_widget = CameraCalibrationWidget()
 
-        self._stack.addWidget(self._tree_core_widget)     # Tree Core Imaging
-        self._stack.addWidget(self._focus_stack_widget)   # Focus Stacking
-        self._stack.addWidget(self._area_scan_widget)     # Z-Stack Area Scan
-        self._stack.addWidget(self._square_move_widget)   # Square Move
-        self._stack.addWidget(self._camera_calibration_widget)   # Square Move
+        self._stack.addWidget(self._tree_core_widget)           # Tree Core Imaging
+        self._stack.addWidget(self._focus_stack_widget)         # Focus Stacking
+        self._stack.addWidget(self._area_scan_widget)           # Z-Stack Area Scan
+        self._stack.addWidget(self._square_move_widget)         # Square Move
+        self._stack.addWidget(self._camera_calibration_widget)  # Camera Calibration
 
         outer_layout.addWidget(self._stack)
 
         # Reflect default selection
         self._stack.setCurrentIndex(0)
 
+    def _setup_poll_timer(self) -> None:
+        """Start a timer that syncs button state with the manager's routine state."""
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(_POLL_INTERVAL_MS)
+        self._poll_timer.timeout.connect(self._sync_button_state)
+        self._poll_timer.start()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _action_button_style(*, checked_color: str) -> str:
-        return f"""
-            QPushButton {{
-                background-color: rgb(208, 211, 214);
-                border: 1px solid rgb(150, 150, 150);
-                border-radius: 0px;
-                font-size: 13px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: rgb(187, 190, 193);
-            }}
-            QPushButton:pressed {{
-                background-color: rgb(170, 173, 175);
-            }}
-            QPushButton:checked {{
-                background-color: {checked_color};
-                border: 1px solid rgb(120, 120, 120);
-                color: white;
-                font-weight: bold;
-            }}
-        """
+    def _sync_button_state(self) -> None:
+        """Enable/disable controls based on whether a routine is running."""
+        manager = get_app_context().motion
+        running = manager is not None and manager.routine_running
 
-    def _set_running(self, running: bool) -> None:
-        self._running = running
+        self._pause_btn.setEnabled(running)
+        self._stop_btn.setEnabled(running)
+
         if not running:
+            # Reset pause visual state when no routine is active.
             self._paused = False
             self._pause_btn.setChecked(False)
             self._pause_btn.setText("Pause")
@@ -225,10 +206,10 @@ class AutomationWidget(QWidget):
             manager.resume_routine()
 
     def _on_stop_clicked(self) -> None:
-        self._set_running(False)
         manager = get_app_context().motion
         if manager is not None:
             manager.stop_routine()
+        # _sync_button_state will clean up button visuals on the next tick.
 
     # ------------------------------------------------------------------
     # Public accessors
