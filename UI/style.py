@@ -218,6 +218,47 @@ def apply_style(app: QApplication) -> None:
             padding-bottom: 4px;
         }}
         
+        /* Hide-preview eye toggle button — matches overlay button style */
+        QPushButton#HidePreviewButton {{
+            background-color: rgba(240, 240, 240, 180);
+            color: #000000;
+            border: 1px solid rgba(200, 200, 200, 255);
+            border-radius: 4px;
+            font-size: 18px;
+            font-weight: bold;
+            padding: 0px;
+        }}
+        QPushButton#HidePreviewButton:hover {{
+            background-color: rgba(255, 255, 255, 200);
+        }}
+
+        /* Preview-disabled overlay */
+        QLabel#PreviewHiddenLabel {{
+            color: #ffffff;
+            font-size: 15px;
+            font-weight: 600;
+            background-color: rgba(0, 0, 0, 160);
+            border-radius: 6px;
+            padding: 6px 14px;
+        }}
+        QPushButton#PreviewReenableButton {{
+            background-color: rgba(240, 240, 240, 210);
+            border: 1px solid rgba(200, 200, 200, 255);
+            border-radius: 0px;
+            font-size: 13px;
+            font-weight: bold;
+            color: #2c2c2c;
+            padding: 6px 18px;
+            min-width: 130px;
+            min-height: 28px;
+        }}
+        QPushButton#PreviewReenableButton:hover {{
+            background-color: rgba(255, 255, 255, 230);
+        }}
+        QPushButton#PreviewReenableButton:pressed {{
+            background-color: rgba(210, 213, 216, 230);
+        }}
+        
         QLabel#FocusOverlayLabel, QLabel#VennOverlayLabel {{
             font-size: 18px;
             font-weight: normal;

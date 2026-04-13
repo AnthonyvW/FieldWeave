@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Slot, QRect
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent, QMouseEvent
+from PySide6.QtCore import Qt, Slot, QRect, QPoint, QRectF
+from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent, QMouseEvent, QPainterPath
 from PySide6.QtWidgets import (
-    QFrame, QLabel, QVBoxLayout, QWidget, QSizePolicy,
+    QFrame, QLabel, QPushButton, QVBoxLayout, QWidget, QSizePolicy,
 )
 
 from common.app_context import get_app_context
@@ -15,6 +15,76 @@ from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverl
 from UI.widgets.preview_overlay.focus import FocusButton, FocusOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
+
+
+class EyeToggleButton(QPushButton):
+    """
+    Overlay button that draws a monochrome eye icon and an optional diagonal
+    slash using QPainter — no emoji, so color is fully controlled.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._slashed: bool = False
+        self.setObjectName("HidePreviewButton")
+        self.setFixedSize(30, 30)
+
+    @property
+    def slashed(self) -> bool:
+        return self._slashed
+
+    @slashed.setter
+    def slashed(self, value: bool) -> None:
+        if self._slashed != value:
+            self._slashed = value
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+        cx, cy = w / 2, h / 2
+
+        # Eye outline: two arcs forming a lens/almond shape
+        pen = QPen(QColor(0, 0, 0))
+        pen.setWidth(1)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        ew, eh = w * 0.72, h * 0.42
+        ex, ey = cx - ew / 2, cy - eh / 2
+
+        path = QPainterPath()
+        path.moveTo(cx - ew / 2, cy)
+        path.quadTo(cx, cy - eh, cx + ew / 2, cy)
+        path.quadTo(cx, cy + eh, cx - ew / 2, cy)
+        painter.drawPath(path)
+
+        # Pupil
+        pr = h * 0.13
+        painter.setBrush(QColor(0, 0, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QRectF(cx - pr, cy - pr, pr * 2, pr * 2))
+
+        # Slash
+        if self._slashed:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            slash_pen = QPen(QColor(0, 0, 0))
+            slash_pen.setWidth(1)
+            slash_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(slash_pen)
+            margin = 5
+            painter.drawLine(
+                QPoint(w - margin, margin),
+                QPoint(margin, h - margin),
+            )
+
+        painter.end()
 
 
 class OverlayLabel(QLabel):
@@ -152,6 +222,8 @@ class CameraPreview(QFrame):
         self._current_full_width: int = 0
         self._current_full_height: int = 0
 
+        self._preview_hidden: bool = False
+
         self._video_label = OverlayLabel()
         self._video_label.setObjectName("VideoLabel")
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -164,6 +236,16 @@ class CameraPreview(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._video_label, 1)
+
+        self._hidden_label = QLabel("Camera preview disabled", self)
+        self._hidden_label.setObjectName("PreviewHiddenLabel")
+        self._hidden_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hidden_label.hide()
+
+        self._reenable_button = QPushButton("Enable Preview", self)
+        self._reenable_button.setObjectName("PreviewReenableButton")
+        self._reenable_button.clicked.connect(self._show_preview)
+        self._reenable_button.hide()
 
         # Overlays
         self._crosshair_overlay = CrosshairOverlay()
@@ -201,6 +283,11 @@ class CameraPreview(QFrame):
         self._channel_button.raise_()
         self._channel_button.menu.raise_()
         self._channel_button.channel_changed.connect(self._on_channel_changed)
+
+        self._hide_preview_button = EyeToggleButton(self)
+        self._hide_preview_button.move(10, 150)
+        self._hide_preview_button.raise_()
+        self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
         # Always register the overlay as click handler; it gates itself on calibration.
         self._video_label.set_click_handler(self._click_to_move_overlay)
@@ -244,6 +331,51 @@ class CameraPreview(QFrame):
         self._channel_overlay.show_green = show_green
         self._channel_overlay.show_blue = show_blue
         self._channel_overlay.show_grayscale = show_grayscale
+
+    def _toggle_preview_visibility(self) -> None:
+        if self._preview_hidden:
+            self._show_preview()
+        else:
+            self._hide_preview()
+
+    def _hide_preview(self) -> None:
+        self._preview_hidden = True
+        self._video_label.hide()
+        self._hidden_label.show()
+        self._reenable_button.show()
+        self._hide_preview_button.slashed = True
+        self._reposition_overlay_widgets()
+
+    def _show_preview(self) -> None:
+        self._preview_hidden = False
+        self._video_label.show()
+        self._hidden_label.hide()
+        self._reenable_button.hide()
+        self._hide_preview_button.slashed = False
+        self._reposition_overlay_widgets()
+
+    def _reposition_overlay_widgets(self) -> None:
+        w = self.width()
+        h = self.height()
+        label_hint = self._hidden_label.sizeHint()
+        self._hidden_label.setGeometry(
+            (w - label_hint.width()) // 2,
+            (h - label_hint.height()) // 2 - 20,
+            label_hint.width(),
+            label_hint.height(),
+        )
+        btn_hint = self._reenable_button.sizeHint()
+        self._reenable_button.setGeometry(
+            (w - btn_hint.width()) // 2,
+            (h - label_hint.height()) // 2 + label_hint.height() - 10,
+            btn_hint.width(),
+            btn_hint.height(),
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._preview_hidden:
+            self._reposition_overlay_widgets()
 
     # ------------------------------------------------------------------
     # Frame slots
@@ -327,20 +459,8 @@ class CameraPreview(QFrame):
         height: int,
         stride: int,
     ) -> None:
-        """
-        Convert *buf* to a QPixmap and push it to the video label.
-
-        The buffer is wrapped by QImage without copying (the bytearray stays
-        alive for the duration of this method).  A ``.copy()`` is taken only
-        if the channel overlay needs to modify pixel data; otherwise the image
-        is scaled directly from the original memory.
-
-        Args:
-            buf:    Raw RGB888 pixel data (may be stride-padded).
-            width:  Frame width in pixels.
-            height: Frame height in pixels.
-            stride: Row stride in bytes (>= width * 3).
-        """
+        if self._preview_hidden:
+            return
         try:
             # Keep full-sensor dimensions up to date so OverlayLabel.mousePressEvent
             # can scale display-space clicks to camera-sensor coordinates.
