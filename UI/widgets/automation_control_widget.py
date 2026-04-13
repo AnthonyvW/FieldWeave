@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QLabel,
     QComboBox,
+    QSizePolicy,
     QStackedWidget,
 )
 from PySide6.QtGui import QPainter, QColor, QFont
@@ -47,6 +48,33 @@ class _ArrowComboBox(QComboBox):
 
 
 class _CollapsibleStack(QStackedWidget):
+    """QStackedWidget whose size tracks only the current page, not the largest page."""
+
+    def addWidget(self, widget: QWidget) -> int:
+        index = super().addWidget(widget)
+        if widget is not self.currentWidget():
+            widget.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Ignored,
+            )
+        return index
+
+    def setCurrentIndex(self, index: int) -> None:
+        prev = self.currentWidget()
+        super().setCurrentIndex(index)
+        curr = self.currentWidget()
+        if prev is not None and prev is not curr:
+            prev.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Ignored,
+            )
+        if curr is not None:
+            curr.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Preferred,
+            )
+        self.adjustSize()
+
     def sizeHint(self) -> QSize:
         w = self.currentWidget()
         return w.sizeHint() if w else super().sizeHint()

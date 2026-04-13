@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from ..settings.settings_main import SettingsButton
+from UI.settings.settings_main import SettingsButton
 
 class CollapsibleSection(QFrame):
     """
