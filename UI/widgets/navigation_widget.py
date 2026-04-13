@@ -347,7 +347,7 @@ class NavigationWidget(QWidget):
         self._overlay.show()
 
         self._overlay_label = QLabel(
-            "Motion System Not Connected", self._overlay)
+            "Connecting to Motion System...", self._overlay)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._overlay_label.setStyleSheet("""
             QLabel {
@@ -406,6 +406,11 @@ class NavigationWidget(QWidget):
         super().moveEvent(event)
         self._reposition_overlay()
 
+    def _set_overlay_message(self, message: str) -> None:
+        """Update the overlay label text if the overlay has been created."""
+        if self._overlay_label is not None:
+            self._overlay_label.setText(message)
+
     def _check_motion_ready(self) -> None:
         """Poll every 500 ms until the controller is ready or has reached a terminal state."""
         ctx = get_app_context()
@@ -420,6 +425,9 @@ class NavigationWidget(QWidget):
             self.refresh_from_settings()
         elif state in (MotionState.FAILED, MotionState.FAULTED):
             self._ready_timer.stop()  # Terminal failure — stay overlaid
+            self._set_overlay_message("Motion System Not Connected")
+        else:
+            self._set_overlay_message("Connecting to Motion System...")
 
     def _set_motion_available(self, available: bool) -> None:
         """Show or hide the tinted overlay without touching button enabled state.
