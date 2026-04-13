@@ -264,6 +264,21 @@ def apply_style(app: QApplication) -> None:
             font-weight: normal;
         }}
 
+        /* Automation mode combo box */
+        QComboBox {{
+            background-color: #ffffff;
+            border: 1px solid #b0b3b6;
+            border-radius: 0px;
+            padding: 2px 28px 2px 6px;
+            color: #2c2c2c;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: #ffffff;
+            border: 1px solid #b0b3b6;
+            selection-background-color: #d0d3d6;
+            color: #2c2c2c;
+        }}
+
         /* Automation control bar — Pause button */
         QPushButton#AutomationPause {{
             background-color: rgb(208, 211, 214);
