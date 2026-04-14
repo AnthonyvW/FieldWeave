@@ -142,9 +142,6 @@ class ZStackAreaScan(AutomationRoutine):
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
 
-        if z_start_nm == z_end_nm:
-            raise ValueError("z_start_nm and z_end_nm must be different")
-
         self._x_start_nm = x_start_nm
         self._x_end_nm = x_end_nm
         self._x_step_nm = x_step_nm
@@ -269,12 +266,15 @@ class ZStackAreaScan(AutomationRoutine):
                 z_near = z_far_base
                 z_far = z_near_base
 
-            direction = 1 if z_far > z_near else -1
             z_positions: list[int] = []
-            z = z_near
-            while (direction == 1 and z <= z_far) or (direction == -1 and z >= z_far):
-                z_positions.append(z)
-                z += direction * self._z_step_nm
+            if z_near == z_far:
+                z_positions = [z_near]
+            else:
+                direction = 1 if z_far > z_near else -1
+                z = z_near
+                while (direction == 1 and z <= z_far) or (direction == -1 and z >= z_far):
+                    z_positions.append(z)
+                    z += direction * self._z_step_nm
 
             total_z = len(z_positions)
             info(

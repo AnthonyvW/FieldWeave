@@ -4,7 +4,7 @@ import threading
 from typing import Callable, TYPE_CHECKING
 import time
 
-from common.logger import info, warning, error
+from common.logger import info, warning
 from motion.motion_controller import MotionController, MotionState
 from motion.models import Position
 from motion.motion_config import MotionSystemSettings

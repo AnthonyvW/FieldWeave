@@ -81,9 +81,6 @@ class ZStackScan(AutomationRoutine):
 
         if step_nm <= 0:
             raise ValueError(f"step_nm must be positive, got {step_nm}")
-        if z_start_nm == z_end_nm:
-            raise ValueError("z_start_nm and z_end_nm must be different")
-
         self._z_start_nm = z_start_nm
         self._z_end_nm = z_end_nm
         self._step_nm = step_nm
@@ -116,14 +113,16 @@ class ZStackScan(AutomationRoutine):
             z_near = self._z_end_nm
             z_far = self._z_start_nm
 
-        direction = 1 if z_far > z_near else -1
-
         # Build list of Z positions to visit
         z_positions: list[int] = []
-        z = z_near
-        while (direction == 1 and z <= z_far) or (direction == -1 and z >= z_far):
-            z_positions.append(z)
-            z += direction * self._step_nm
+        if z_near == z_far:
+            z_positions = [z_near]
+        else:
+            direction = 1 if z_far > z_near else -1
+            z = z_near
+            while (direction == 1 and z <= z_far) or (direction == -1 and z >= z_far):
+                z_positions.append(z)
+                z += direction * self._step_nm
 
         total = len(z_positions)
         info(f"[ZStackScan] {total} positions from {z_near} nm to {z_far} nm, step {self._step_nm} nm")
