@@ -5,7 +5,7 @@ from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from common.logger import info
-from .overlay_base import Overlay
+from UI.widgets.preview_overlay.overlay_base import Overlay
 
 
 class CrosshairOverlay(Overlay):

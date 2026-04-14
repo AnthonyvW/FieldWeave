@@ -48,7 +48,6 @@ class EyeToggleButton(QPushButton):
         w, h = self.width(), self.height()
         cx, cy = w / 2, h / 2
 
-        # Eye outline: two arcs forming a lens/almond shape
         pen = QPen(QColor(0, 0, 0))
         pen.setWidth(1)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -57,7 +56,6 @@ class EyeToggleButton(QPushButton):
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
         ew, eh = w * 0.72, h * 0.42
-        ex, ey = cx - ew / 2, cy - eh / 2
 
         path = QPainterPath()
         path.moveTo(cx - ew / 2, cy)
@@ -65,13 +63,11 @@ class EyeToggleButton(QPushButton):
         path.quadTo(cx, cy + eh, cx - ew / 2, cy)
         painter.drawPath(path)
 
-        # Pupil
         pr = h * 0.13
         painter.setBrush(QColor(0, 0, 0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QRectF(cx - pr, cy - pr, pr * 2, pr * 2))
 
-        # Slash
         if self._slashed:
             painter.setBrush(Qt.BrushStyle.NoBrush)
             slash_pen = QPen(QColor(0, 0, 0))
@@ -93,18 +89,17 @@ class OverlayLabel(QLabel):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._overlays: list[Overlay] = []
-        # Optional click handler: callable(widget_x, widget_y, image_rect) or None.
-        self._click_handler: "ClickToMoveOverlay | None" = None
+        self._click_handler: ClickToMoveOverlay | None = None
 
     def add_overlay(self, overlay: Overlay) -> None:
         self._overlays.append(overlay)
 
-    def set_click_handler(self, handler: "ClickToMoveOverlay | None") -> None:
+    def set_click_handler(self, handler: ClickToMoveOverlay | None) -> None:
         """
         Register the overlay that should receive mouse clicks.
 
-        Pass ``None`` to stop forwarding clicks (e.g. when click-to-move is
-        disabled).  The label enables ``Qt.WA_Cursor`` only while a handler
+        Pass None to stop forwarding clicks (e.g. when click-to-move is
+        disabled). The label enables Qt.WA_Cursor only while a handler
         is active so the cursor gives visual feedback.
         """
         self._click_handler = handler
@@ -122,8 +117,6 @@ class OverlayLabel(QLabel):
             and not self.pixmap().isNull()
         ):
             image_rect = self._image_rect(self.pixmap())
-            # full_width/height are stored on the parent CameraPreview so the
-            # handler can scale display coordinates to camera-sensor coordinates.
             parent = self.parent()
             full_w = getattr(parent, "_current_full_width", 0)
             full_h = getattr(parent, "_current_full_height", 0)
@@ -190,16 +183,90 @@ class OverlayLabel(QLabel):
         return QRect(x, y, scaled_width, scaled_height)
 
 
+class OverlayController:
+    """
+    Programmatic control surface for CameraPreview overlays.
+
+    Obtained via CameraPreview.overlays or get_app_context().camera_preview.overlays.
+    Each setter mirrors the corresponding toolbar button so external modules
+    can drive overlay state without importing widget internals.
+    """
+
+    def __init__(self, preview: CameraPreview) -> None:
+        self._preview = preview
+
+    @property
+    def crosshair(self) -> bool:
+        return self._preview._crosshair_overlay.enabled
+
+    @crosshair.setter
+    def crosshair(self, enabled: bool) -> None:
+        self._preview._crosshair_button.setChecked(enabled)
+        self._preview._crosshair_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    @property
+    def grid(self) -> bool:
+        return self._preview._grid_overlay.enabled
+
+    @grid.setter
+    def grid(self, enabled: bool) -> None:
+        self._preview._grid_button.setChecked(enabled)
+        self._preview._grid_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    @property
+    def focus(self) -> bool:
+        return self._preview._focus_overlay.enabled
+
+    @focus.setter
+    def focus(self, enabled: bool) -> None:
+        self._preview._focus_button.setChecked(enabled)
+        self._preview._focus_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    @property
+    def click_to_move(self) -> bool:
+        return self._preview._click_to_move_overlay.enabled
+
+    @click_to_move.setter
+    def click_to_move(self, enabled: bool) -> None:
+        self._preview._click_to_move_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    def set_channel(
+        self,
+        *,
+        red: bool = True,
+        green: bool = True,
+        blue: bool = True,
+        grayscale: bool = False,
+    ) -> None:
+        """Set channel filter state directly, bypassing the toolbar menu."""
+        overlay = self._preview._channel_overlay
+        overlay.show_red = red
+        overlay.show_green = green
+        overlay.show_blue = blue
+        overlay.show_grayscale = grayscale
+
+
 class CameraPreview(QFrame):
     """
     Camera preview widget that displays frames from the camera manager.
 
-    Whichever frame type has the higher sequence number (``preview_frame_seq``
-    vs ``still_frame_seq`` on the camera manager) is considered more recent
-    and is shown on screen.  This means the display keeps updating from still
+    Whichever frame type has the higher sequence number (preview_frame_seq
+    vs still_frame_seq on the camera manager) is considered more recent
+    and is shown on screen. This means the display keeps updating from still
     frames during automation even when the live preview stream is paused.
 
     This widget only handles display - it does not manage camera lifecycle.
+
+    A single instance should be created by the main window and registered with
+    AppContext via register_camera_preview(). Other pages embed it directly
+    rather than constructing their own instances. Overlay state is accessible
+    from any module through the overlays property or via AppContext:
+
+        get_app_context().camera_preview.overlays.crosshair = True
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -217,8 +284,6 @@ class CameraPreview(QFrame):
         self._still_height: int = 0
         self._still_seq: int = 0
 
-        # Most recent full-sensor resolution; read by OverlayLabel.mousePressEvent
-        # to scale display-space clicks back to calibration-image space.
         self._current_full_width: int = 0
         self._current_full_height: int = 0
 
@@ -247,7 +312,6 @@ class CameraPreview(QFrame):
         self._reenable_button.clicked.connect(self._show_preview)
         self._reenable_button.hide()
 
-        # Overlays
         self._crosshair_overlay = CrosshairOverlay()
         self._grid_overlay = GridOverlay()
         self._focus_overlay = FocusOverlay()
@@ -259,7 +323,6 @@ class CameraPreview(QFrame):
         self._video_label.add_overlay(self._focus_overlay)
         self._video_label.add_overlay(self._click_to_move_overlay)
 
-        # Buttons
         self._crosshair_button = CrosshairButton(self)
         self._crosshair_button.move(10, 10)
         self._crosshair_button.raise_()
@@ -289,15 +352,28 @@ class CameraPreview(QFrame):
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
-        # Always register the overlay as click handler; it gates itself on calibration.
+        self._overlays = OverlayController(self)
+
         self._video_label.set_click_handler(self._click_to_move_overlay)
 
-        # Also connect repaint so the label refreshes after each result.
         get_app_context().machine_vision.focus_result_ready.connect(
             lambda _result: self._video_label.update()
         )
 
         self._connect_to_camera_manager()
+
+    @property
+    def overlays(self) -> OverlayController:
+        """
+        Programmatic control surface for overlay state.
+
+        Use this from other modules instead of manipulating overlay objects directly:
+
+            preview = get_app_context().camera_preview
+            if preview is not None:
+                preview.overlays.crosshair = True
+        """
+        return self._overlays
 
     def _connect_to_camera_manager(self) -> None:
         ctx = get_app_context()
@@ -399,18 +475,14 @@ class CameraPreview(QFrame):
             stride = type(camera.underlying_camera).calculate_stride(width, 24)
             required = stride * height
 
-            # Reallocate only when dimensions change
             if width != self._preview_width or height != self._preview_height:
                 self._preview_buf = bytearray(required)
                 self._preview_width = width
                 self._preview_height = height
 
-            # Copy into persistent buffer (avoids keeping a reference to the
-            # camera manager's buffer which may be replaced between frames)
             self._preview_buf[:required] = src[:required]
             self._preview_seq = camera_manager.preview_frame_seq
 
-            # Only render if this is the most recent frame type
             if self._preview_seq >= self._still_seq:
                 self._render_display(self._preview_buf, width, height, stride)
 
@@ -433,7 +505,6 @@ class CameraPreview(QFrame):
             stride = type(camera.underlying_camera).calculate_stride(width, 24)
             required = stride * height
 
-            # Reallocate only when dimensions change
             if width != self._still_width or height != self._still_height:
                 self._still_buf = bytearray(required)
                 self._still_width = width
@@ -442,7 +513,6 @@ class CameraPreview(QFrame):
             self._still_buf[:required] = src[:required]
             self._still_seq = camera_manager.still_frame_seq
 
-            # Stills always take priority — they are only produced intentionally
             self._render_display(self._still_buf, width, height, stride)
 
         except Exception as e:
@@ -462,8 +532,6 @@ class CameraPreview(QFrame):
         if self._preview_hidden:
             return
         try:
-            # Keep full-sensor dimensions up to date so OverlayLabel.mousePressEvent
-            # can scale display-space clicks to camera-sensor coordinates.
             self._current_full_width = width
             self._current_full_height = height
 
@@ -472,7 +540,6 @@ class CameraPreview(QFrame):
             if self._channel_overlay.needs_filter:
                 image = self._channel_overlay.apply(image.copy())
 
-            # Notify overlays at full resolution
             ptr = image.bits()
             full_arr = (
                 np.frombuffer(ptr, dtype=np.uint8)
@@ -518,7 +585,6 @@ class CameraPreview(QFrame):
     @Slot()
     def _on_streaming_stopped(self) -> None:
         info("Preview: Streaming stopped")
-        # Discard buffered frames and reset sequence tracking
         self._preview_buf = bytearray()
         self._preview_width = 0
         self._preview_height = 0
@@ -550,7 +616,7 @@ class CameraPreview(QFrame):
             if not ctx.camera_manager.is_streaming:
                 self._video_label.setText("Camera ready - not streaming")
 
-    _SCROLL_STEP_NM: int = 40_000  # 0.04 mm in nanometres
+    _SCROLL_STEP_NM: int = 40_000
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         ctx = get_app_context()

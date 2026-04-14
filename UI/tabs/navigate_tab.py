@@ -4,21 +4,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QScrollArea,
-    QFrame
+    QFrame,
 )
 from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
 
-from UI.widgets.camera_preview import CameraPreview
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.camera_controls_widget import CameraControlsWidget
 from UI.widgets.navigation_widget import NavigationWidget
 
 from common.app_context import open_settings
 
+
 class NavigateTab(CameraWithSidebarPage):
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(CameraPreview(), self._make_sidebar(), parent)
+        super().__init__(self._make_sidebar(), parent)
 
     def _make_sidebar(self) -> QWidget:
         sidebar_container = QWidget()
@@ -33,8 +33,6 @@ class NavigateTab(CameraWithSidebarPage):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(10)
 
-        # Start Widgets
-
         navigation = CollapsibleSection("Navigation", on_settings=lambda: open_settings("Navigation"))
         navigation.layout_for_content().addWidget(NavigationWidget())
         content_layout.addWidget(navigation)
@@ -43,12 +41,10 @@ class NavigateTab(CameraWithSidebarPage):
         camera_controls.layout_for_content().addWidget(CameraControlsWidget())
         content_layout.addWidget(camera_controls)
 
-        # End Widgets
-
         content_layout.addStretch(1)
         sidebar_layout.addWidget(self._wrap_scroll(content), 1)
         return sidebar_container
-    
+
     def _wrap_scroll(self, widget: QWidget) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

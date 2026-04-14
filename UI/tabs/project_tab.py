@@ -7,10 +7,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
 )
-from UI.style import RIGHT_SIDEBAR_WIDTH, OUTER_MARGIN
+from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
 
-from UI.widgets.camera_preview import CameraPreview
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.automation_control_widget import AutomationWidget
 from UI.widgets.navigation_widget import NavigationWidget
@@ -20,7 +19,7 @@ from common.app_context import open_settings
 
 class ProjectTab(CameraWithSidebarPage):
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(CameraPreview(), self._make_sidebar(), parent)
+        super().__init__(self._make_sidebar(), parent)
 
     def _make_sidebar(self) -> QWidget:
         sidebar_container = QWidget()
@@ -35,8 +34,6 @@ class ProjectTab(CameraWithSidebarPage):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(10)
 
-        # Start Widgets
-
         navigation = CollapsibleSection("Navigation", on_settings=lambda: open_settings("Navigation"))
         navigation.layout_for_content().addWidget(NavigationWidget())
         content_layout.addWidget(navigation)
@@ -44,8 +41,6 @@ class ProjectTab(CameraWithSidebarPage):
         automation = CollapsibleSection("Automation", on_settings=lambda: open_settings("Automation"))
         automation.layout_for_content().addWidget(AutomationWidget())
         content_layout.addWidget(automation)
-
-        # End Widgets
 
         content_layout.addStretch(1)
 

@@ -22,18 +22,16 @@ from .settings.settings_main import SettingsButton, SettingsDialog
 
 from common.app_context import get_app_context
 from motion.motion_controller import MotionState
+from UI.widgets.camera_preview import CameraPreview
 
 
-# Map MotionState strings to the MachineState enum values shown in the status bar.
 _MOTION_TO_MACHINE_STATE: dict[str, str] = {
     MotionState.CONNECTING: MachineState.CONNECTING,
     MotionState.READY:      MachineState.CONNECTED,
-    MotionState.FAULTED:    MachineState.CONNECTED,   # still physically connected
+    MotionState.FAULTED:    MachineState.CONNECTED,
     MotionState.FAILED:     MachineState.DISCONNECTED,
 }
 
-# Map AutomationState enum values to the "kind" attribute strings used by the
-# stylesheet to colour the status bar (see style.py).
 _AUTOMATION_STATE_KIND: dict[str, str] = {
     AutomationState.IDLE:     "idle",
     AutomationState.RUNNING:  "active",
@@ -46,20 +44,14 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        # Get app context
         self.app_context = get_app_context()
-
-        # Register this main window with app context (initializes toast manager)
         self.app_context.register_main_window(self)
 
-        # Set window title with version
         self.setWindowTitle(f"FieldWeave - v{self.app_context.current_version}")
         self.resize(1920, 1080)
         self.move(500, 200)
         self._state = State()
 
-        # Pending state fields updated from background threads; applied on the
-        # main thread via a QTimer to keep Qt widget access thread-safe.
         self._pending_machine_state: str = MachineState.DISCONNECTED
         self._pending_job_name: str = "-"
         self._pending_activity: str = "-"
@@ -67,35 +59,30 @@ class MainWindow(QMainWindow):
         self._pending_progress_total: int = 0
         self._pending_eta_seconds: int = 0
 
-        # When a routine finishes this latches True so the COMPLETE state is
-        # held in the status bar.  It is cleared when:
-        #   - a new routine starts (detected via _on_routine_state_changed), or
-        #   - the user interacts with the motion system directly (jog, home, etc.)
-        #     which is detected via the interaction listener registered below.
         self._completed_latch: bool = False
-        # The job name preserved while the latch is held so the status bar can
-        # show "Completed  |  <job>" even after the routine has cleaned up.
         self._completed_job_name: str = "-"
 
-        # Create and register settings dialog
         self.settings_dialog = SettingsDialog(self)
         self.app_context.register_settings_dialog(self.settings_dialog)
 
-        # Header Bar
+        # Create and register the single shared camera preview before any tab
+        # is constructed, so tabs can reference it during their own __init__.
+        self._camera_preview = CameraPreview(self)
+        self.app_context.register_camera_preview(self._camera_preview)
+
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
 
-        # Create tabs
         self.navigate_tab = NavigateTab()
+        self.project_tab = ProjectTab()
         self.tabs.addTab(self.navigate_tab, "Navigate")
-        self.tabs.addTab(ProjectTab(), "Project")
+        self.tabs.addTab(self.project_tab, "Project")
         self.tabs.addTab(CalibrationTab(), "Calibration")
         self.tabs.addTab(LogsTab(), "Logs")
 
         self._setup_header_right()
         self.setCentralWidget(self.tabs)
 
-        # Wire up motion state callbacks and start the flush timer.
         self._wire_motion_state()
         self._start_state_flush_timer()
 
@@ -113,14 +100,11 @@ class MainWindow(QMainWindow):
         motion.add_routine_state_listener(self._on_routine_state_changed)
         motion.add_interaction_listener(self._on_motion_interaction)
 
-        # Seed the pending state with whatever the controller reports right now
-        # so the status bar is correct even before the first callback fires.
         self._pending_machine_state = _MOTION_TO_MACHINE_STATE.get(
             motion.get_state(), MachineState.DISCONNECTED
         )
 
     def _on_motion_state_changed(self, new_state: str) -> None:
-        """Called on the poll thread when MotionState transitions."""
         self._pending_machine_state = _MOTION_TO_MACHINE_STATE.get(
             new_state, MachineState.DISCONNECTED
         )
@@ -128,10 +112,7 @@ class MainWindow(QMainWindow):
     def _on_routine_state_changed(
         self, job_name: str, activity: str, progress_current: int, progress_total: int, eta_seconds: int
     ) -> None:
-        """Called on the routine thread when job/activity/progress updates."""
         if job_name != "-" or activity != "-":
-            # A routine is actively reporting — clear any stale latch so the
-            # live job info is shown instead of the previous completion.
             self._completed_latch = False
 
         self._pending_job_name = job_name
@@ -141,11 +122,6 @@ class MainWindow(QMainWindow):
         self._pending_eta_seconds = eta_seconds
 
     def _on_motion_interaction(self) -> None:
-        """Called when the user issues a direct motion command (jog, home, etc.).
-
-        Any manual interaction signals the operator has moved on, so the
-        COMPLETE latch is cleared and the status bar returns to IDLE.
-        """
         self._completed_latch = False
 
     # ------------------------------------------------------------------
@@ -153,13 +129,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _start_state_flush_timer(self) -> None:
-        """
-        Poll pending state fields every 250 ms on the main thread and rebuild
-        the status bar if anything has changed.
-
-        Using a timer (rather than Qt signals emitted from callbacks) keeps the
-        motion module free of any Qt dependency.
-        """
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(250)
         self._flush_timer.timeout.connect(self._flush_state)
@@ -170,7 +139,6 @@ class MainWindow(QMainWindow):
         motion = self.app_context.motion
 
         if motion is not None and motion.routine_running:
-            # A routine is actively executing.
             automation_state = (
                 AutomationState.PAUSED if motion.routine_paused else AutomationState.RUNNING
             )
@@ -181,8 +149,6 @@ class MainWindow(QMainWindow):
             eta_seconds = self._pending_eta_seconds
 
         elif self._state.automation_state in (AutomationState.RUNNING, AutomationState.PAUSED):
-            # Routine just finished on this flush tick — set the latch and
-            # capture the job name before the pending fields are cleared.
             self._completed_latch = True
             self._completed_job_name = self._state.job_name
             automation_state = AutomationState.COMPLETE
@@ -193,7 +159,6 @@ class MainWindow(QMainWindow):
             eta_seconds = 0
 
         elif self._completed_latch:
-            # Latch is held from a previous completion — keep showing COMPLETE.
             automation_state = AutomationState.COMPLETE
             job_name = self._completed_job_name
             activity = "-"
@@ -238,10 +203,8 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # Status
         self.status_bar = self._build_status_bar()
 
-        # Settings Button
         self.settingsButton = SettingsButton("Settings")
         self.settingsButton.clicked.connect(lambda: self._open_settings("Camera"))
 
@@ -250,8 +213,6 @@ class MainWindow(QMainWindow):
 
         self.tabs.setCornerWidget(header_edge, Qt.Corner.TopRightCorner)
 
-        # Pin every element to the exact tab bar height so the coloured status
-        # frame fills the full header strip rather than only wrapping its text.
         h = self.tabs.tabBar().sizeHint().height()
 
         header_edge.setFixedHeight(h)
@@ -270,7 +231,6 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(10, 0, 10, 0)
         row.setSpacing(10)
 
-        # Status Text
         self.status_line = QLabel("-")
         self.status_line.setObjectName("StatusLine")
         self.status_line.setWordWrap(False)
@@ -279,7 +239,6 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
 
-        # Progress Bar | Optional
         self.progress = QProgressBar()
         self.progress.setObjectName("CornerStatusProgress")
         self.progress.setRange(0, 100)
@@ -317,11 +276,6 @@ class MainWindow(QMainWindow):
         self.status_bar.style().polish(self.status_bar)
 
     def closeEvent(self, event) -> None:
-        """Handle application close - cleanup resources."""
         self._flush_timer.stop()
-
-        # Cleanup camera preview
-        if hasattr(self.navigate_tab, 'camera_preview'):
-            self.navigate_tab.camera_preview.cleanup()
-
+        self._camera_preview.cleanup()
         super().closeEvent(event)

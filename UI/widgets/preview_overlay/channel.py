@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from common.logger import info
-from .overlay_base import Overlay
+from UI.widgets.preview_overlay.overlay_base import Overlay
 
 
 class ChannelOverlay(Overlay):

@@ -18,6 +18,7 @@ from motion.motion_controller_manager import MotionState
 if TYPE_CHECKING:
     from UI.settings.settings_main import SettingsDialog
     from UI.widgets.toast_widget import ToastManager
+    from UI.widgets.camera_preview import CameraPreview
 
 FIELDWEAVE_VERSION = "1.2"
 
@@ -45,23 +46,16 @@ class AppContext:
         self._toast_manager: ToastManager | None = None
         self._main_window = None
         self._motion_manager: MotionControllerManager | None = None
-        self._machine_vision_manager: MachineVisionManager | None = None  # set by _initialize_machine_vision_manager
+        self._machine_vision_manager: MachineVisionManager | None = None
+        self._camera_preview: CameraPreview | None = None
         self._initialized = True
         self._cleaned_up: bool = False
 
-        # Load settings
         self._load_settings()
-
-        # Initialize motion controller manager
         self._initialize_motion_manager()
-
-        # Initialize camera manager
         self._initialize_camera_manager()
-
-        # Initialize machine vision manager
         self._initialize_machine_vision_manager()
 
-        # Guarantee cleanup runs before Qt tears down its object tree.
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.cleanup)
@@ -100,6 +94,29 @@ class AppContext:
     def has_camera(self) -> bool:
         """Check if there is an active camera."""
         return self.camera is not None
+
+    # ------------------------------------------------------------------
+    # Camera preview
+    # ------------------------------------------------------------------
+
+    @property
+    def camera_preview(self) -> CameraPreview | None:
+        """
+        Get the single shared camera preview widget.
+
+        Returns None until register_camera_preview() has been called.
+        The preview is created by the UI layer after the main window is set up;
+        other modules should treat None as "not yet available" rather than an error.
+        """
+        return self._camera_preview
+
+    def register_camera_preview(self, preview: CameraPreview) -> None:
+        """
+        Register the application-wide camera preview widget.
+
+        Should be called exactly once by the main window during UI setup.
+        """
+        self._camera_preview = preview
 
     # ------------------------------------------------------------------
     # Motion
@@ -246,8 +263,6 @@ class AppContext:
         try:
             info("Initializing motion controller manager...")
             self._motion_manager = MotionControllerManager()
-            # Connection and homing happen on the controller's worker thread.
-            # Callers can await readiness via app_context.motion.wait_until_ready().
             info("Motion controller manager started (connecting in background...)")
         except Exception as e:
             error(f"Failed to start motion controller manager: {e}")
@@ -285,6 +300,7 @@ class AppContext:
         self._camera_manager = None
         self._motion_manager = None
         self._machine_vision_manager = None
+        self._camera_preview = None
         self._settings_dialog = None
         self._settings_manager = None
         self._settings = None
