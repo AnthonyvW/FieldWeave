@@ -493,10 +493,13 @@ class ZStackAreaScanWidget(QWidget):
 
     def _resolve_output_folder(self) -> str:
         text = self._output_edit.text().strip()
-        if text:
+        if not text:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            return str(Path("output") / timestamp)
+        p = Path(text)
+        if p.is_absolute():
             return text
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return str(Path("output") / timestamp)
+        return str(Path("output") / p)
 
     def _update_summary(self) -> None:
         x, y, z = self._x_axis, self._y_axis, self._z_axis

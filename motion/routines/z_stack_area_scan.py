@@ -239,7 +239,7 @@ class ZStackAreaScan(AutomationRoutine):
                 f" moving to X={target_x_nm / _NM_PER_MM:.6f} mm"
                 f"  Y={target_y_nm / _NM_PER_MM:.6f} mm"
             )
-            self.motion.move_to_position(xy_target)
+            self.motion.move_to_position(xy_target, wait=True)
 
             yield  # pause/stop point: after XY move
             
@@ -305,7 +305,7 @@ class ZStackAreaScan(AutomationRoutine):
                     f"[ZStackAreaScan]   Z slice {z_idx + 1}/{total_z}:"
                     f" moving to Z={target_z_nm / _NM_PER_MM:.6f} mm"
                 )
-                self.motion.move_to_position(z_target_pos)
+                self.motion.move_to_position(z_target_pos, wait=True)
 
                 yield  # pause/stop point: after Z move
 

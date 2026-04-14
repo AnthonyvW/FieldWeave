@@ -298,7 +298,7 @@ class MotionControllerManager:
         self._emit_interaction()
         return self._get_controller().move(axis, amount_nm, is_relative=is_relative, wait=wait)
 
-    def move_to_position(self, position: Position, *, wait: bool = False) -> None:
+    def move_to_position(self, position: Position, *, wait: bool = True) -> None:
         """Enqueue an absolute move to *position* (coordinates in nanometres).
 
         If *wait* is True, blocks until the printer acknowledges the move.

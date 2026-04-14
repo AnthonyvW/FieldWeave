@@ -391,7 +391,7 @@ class MotionController:
         """Return the machine's maximum extents as a Position (nanometres)."""
         return Position.from_mm(self.config.max_x, self.config.max_y, self.config.max_z)
 
-    def move_to_position(self, position: Position, *, wait: bool = False) -> None:
+    def move_to_position(self, position: Position, *, wait: bool = True) -> None:
         """Enqueue an absolute move to *position* (coordinates in nanometres).
 
         If *wait* is True, blocks until the printer acknowledges the move.

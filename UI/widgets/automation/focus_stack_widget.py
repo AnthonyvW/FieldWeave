@@ -378,10 +378,13 @@ class FocusStackWidget(QWidget):
     def _resolve_output_folder(self) -> str:
         """Return the user-specified folder, or generate the default timestamped path."""
         text = self._output_edit.text().strip()
-        if text:
+        if not text:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            return str(Path("output") / timestamp)
+        p = Path(text)
+        if p.is_absolute():
             return text
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return str(Path("output") / timestamp)
+        return str(Path("output") / p)
 
     def _update_summary(self) -> None:
         """Refresh the summary label and enable/disable the start button."""

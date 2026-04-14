@@ -148,7 +148,7 @@ class ZStackScan(AutomationRoutine):
 
             self._set_status(f"Step {idx + 1}/{total}  —  Z={target_z_mm:.3f} mm", idx, total)
             info(f"[ZStackScan] Step {idx + 1}/{total}: moving to Z={target_z_mm:.6f} mm")
-            self.motion.move_to_position(target_pos)
+            self.motion.move_to_position(target_pos, wait=True)
 
             yield  # pause/stop point: after move
 
