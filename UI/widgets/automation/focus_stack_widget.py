@@ -117,6 +117,7 @@ class _ConfirmAutomationDialog(QDialog):
 class FocusStackWidget(QWidget):
     """Widget for configuring and running a Z-axis focus stack."""
 
+    mode_name: str = "Focus Stacking"
     _SECS_PER_FRAME: float = 3.15
     _DEFAULT_OUTPUT_PLACEHOLDER: str = "Default: ./output/<timestamp>"
 

@@ -88,14 +88,6 @@ class _CollapsibleStack(QStackedWidget):
 # Automation widget
 # ---------------------------------------------------------------------------
 
-_MODES: list[str] = [
-    "Tree Core Imaging",
-    "Focus Stacking",
-    "Z-Stack Area Scan",
-    "(DEV) Square Move",
-    "Camera Calibration",
-]
-
 # How often (ms) to poll the manager for routine state changes.
 _POLL_INTERVAL_MS: int = 250
 
@@ -138,7 +130,6 @@ class AutomationWidget(QWidget):
         control_layout.addWidget(mode_label)
 
         self._mode_combo = _ArrowComboBox()
-        self._mode_combo.addItems(_MODES)
         self._mode_combo.setFixedHeight(30)
         self._mode_combo.setFixedWidth(155)
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
@@ -173,21 +164,19 @@ class AutomationWidget(QWidget):
 
         # ---- Stacked content area ----
         self._stack = _CollapsibleStack()
-        self._focus_stack_widget = FocusStackWidget()
-        self._area_scan_widget = ZStackAreaScanWidget()
-        self._tree_core_widget = TreeCoreWidget()
-        self._square_move_widget = SquareMoveWidget()
-        self._camera_calibration_widget = CameraCalibrationWidget()
+        self._sub_widgets: list[QWidget] = [
+            TreeCoreWidget(),
+            FocusStackWidget(),
+            ZStackAreaScanWidget(),
+            SquareMoveWidget(),
+            CameraCalibrationWidget(),
+        ]
 
-        self._stack.addWidget(self._tree_core_widget)           # Tree Core Imaging
-        self._stack.addWidget(self._focus_stack_widget)         # Focus Stacking
-        self._stack.addWidget(self._area_scan_widget)           # Z-Stack Area Scan
-        self._stack.addWidget(self._square_move_widget)         # Square Move
-        self._stack.addWidget(self._camera_calibration_widget)  # Camera Calibration
+        for widget in self._sub_widgets:
+            self._stack.addWidget(widget)
+            self._mode_combo.addItem(widget.mode_name)
 
         outer_layout.addWidget(self._stack)
-
-        # Reflect default selection
         self._stack.setCurrentIndex(0)
 
     def _setup_poll_timer(self) -> None:
@@ -238,23 +227,3 @@ class AutomationWidget(QWidget):
         if manager is not None:
             manager.stop_routine()
         # _sync_button_state will clean up button visuals on the next tick.
-
-    # ------------------------------------------------------------------
-    # Public accessors
-    # ------------------------------------------------------------------
-
-    @property
-    def current_mode(self) -> str:
-        return self._mode_combo.currentText()
-
-    @property
-    def focus_stack_widget(self) -> FocusStackWidget:
-        return self._focus_stack_widget
-
-    @property
-    def area_scan_widget(self) -> ZStackAreaScanWidget:
-        return self._area_scan_widget
-
-    @property
-    def tree_core_widget(self) -> TreeCoreWidget:
-        return self._tree_core_widget

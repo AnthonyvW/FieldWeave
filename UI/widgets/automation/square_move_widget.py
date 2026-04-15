@@ -94,6 +94,7 @@ class _ConfirmSquareMoveDialog(QDialog):
 class SquareMoveWidget(QWidget):
     """Widget for configuring and running a square move automation routine."""
 
+    mode_name: str = "(DEV) Square Move"
     _DEFAULT_SIDE_MM: float = 10.0
     _MIN_SIDE_MM: float = 0.1
     _MAX_SIDE_MM: float = 200.0

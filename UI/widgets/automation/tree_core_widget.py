@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from common.app_context import get_app_context
-from common.logger import error, warning, info
+from common.logger import error, warning
 
 
 NUM_SLOTS = 20
@@ -271,6 +271,7 @@ class _SampleRowWidget(QWidget):
 
 class TreeCoreWidget(QWidget):
     """Widget for configuring and running the Tree Core Imaging automation."""
+    mode_name: str = "Tree Core Imaging"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

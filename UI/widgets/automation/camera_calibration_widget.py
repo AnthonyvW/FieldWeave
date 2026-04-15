@@ -106,6 +106,7 @@ class CameraCalibrationWidget(QWidget):
     Move distance settings are edited elsewhere (e.g. a settings page);
     this widget is intentionally read-only with respect to those values.
     """
+    mode_name: str = "Camera Calibration"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

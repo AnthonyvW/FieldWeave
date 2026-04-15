@@ -338,9 +338,10 @@ def _button_style() -> str:
 # ---------------------------------------------------------------------------
 
 class ZStackAreaScanWidget(QWidget):
-    """Widget for configuring and running a Z-stack area scan across an XY grid."""
+    """Widget for configuring and running a area scan across an XY grid."""
 
     _DEFAULT_OUTPUT_PLACEHOLDER: str = "Default: ./output/<timestamp>"
+    mode_name: str = "Area Scan"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
