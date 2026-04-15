@@ -75,6 +75,7 @@ def apply_style(app: QApplication) -> None:
             border: 1px solid #b0b3b6;
             border-radius: 0px;
             padding: 2px 8px;
+            font-size: 13px;
             color: #2c2c2c;
         }}
         QPushButton:hover {{
@@ -325,6 +326,83 @@ def apply_style(app: QApplication) -> None:
             background-color: rgb(210, 150, 150);
             border: 1px solid rgb(190, 130, 130);
             color: rgb(240, 210, 210);
+        }}
+
+        /* Group boxes */
+        QGroupBox {{
+            font-size: 13px;
+            font-weight: normal;
+            border: 1px solid rgb(180, 180, 180);
+            border-radius: 0px;
+            margin-top: 6px;
+            padding-top: 4px;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 3px;
+        }}
+
+        /* Spin boxes */
+        QDoubleSpinBox {{
+            font-size: 13px;
+            padding: 2px 4px;
+            border: 1px solid rgb(180, 180, 180);
+            border-radius: 0px;
+        }}
+
+        /* Line edits */
+        QLineEdit {{
+            font-size: 13px;
+            padding: 2px 4px;
+            border: 1px solid rgb(180, 180, 180);
+            border-radius: 0px;
+        }}
+
+        /* Area scan — start automation button */
+        QPushButton#AreaScanStart {{
+            background-color: #f28c28;
+            color: white;
+            border: 1px solid #c97020;
+            font-weight: bold;
+        }}
+        QPushButton#AreaScanStart:hover {{
+            background-color: #d97a20;
+        }}
+        QPushButton#AreaScanStart:pressed {{
+            background-color: #bf6a18;
+        }}
+        QPushButton#AreaScanStart:disabled {{
+            background-color: rgb(208, 211, 214);
+            color: rgb(150, 153, 156);
+            border: 1px solid rgb(170, 173, 176);
+        }}
+
+        /* Area scan — label roles */
+        QLabel#AreaScanDialogTitle {{
+            font-size: 14px;
+            font-weight: bold;
+        }}
+        QLabel#AreaScanRowLabel {{
+            font-size: 13px;
+            color: #555;
+        }}
+        QLabel#AreaScanRowValue {{
+            font-size: 13px;
+            font-weight: bold;
+        }}
+        QLabel#AreaScanAxisReadout {{
+            font-size: 13px;
+            color: #555;
+        }}
+        QLabel#AreaScanMinLabel {{
+            font-size: 11px;
+            color: #777;
+        }}
+        QLabel#AreaScanSummary {{
+            font-size: 12px;
+            color: #444;
+            padding: 2px 0;
         }}
 
         """

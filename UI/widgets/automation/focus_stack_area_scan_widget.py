@@ -83,12 +83,11 @@ class _ConfirmAreaScanDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("Ready to start area scan?")
-        title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        title.setObjectName("AreaScanDialogTitle")
         layout.addWidget(title)
 
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgb(200, 200, 200);")
         layout.addWidget(line)
 
         info_widget = QWidget()
@@ -116,12 +115,12 @@ class _ConfirmAreaScanDialog(QDialog):
             row_layout.setSpacing(8)
 
             lbl = QLabel(label_text + ":")
-            lbl.setStyleSheet("font-size: 13px; color: #555;")
+            lbl.setObjectName("AreaScanRowLabel")
             lbl.setFixedWidth(150)
             row_layout.addWidget(lbl)
 
             val = QLabel(value_text)
-            val.setStyleSheet("font-size: 13px; font-weight: bold;")
+            val.setObjectName("AreaScanRowValue")
             val.setWordWrap(True)
             row_layout.addWidget(val, 1)
 
@@ -160,28 +159,11 @@ class _AxisRangeWidget(QWidget):
         self._end_mm: float | None = None
         self._axis_label = axis_label
 
-        group_style = """
-            QGroupBox {
-                font-size: 13px;
-                font-weight: normal;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-                margin-top: 6px;
-                padding-top: 4px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 3px;
-            }
-        """
-
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         group = QGroupBox(f"{axis_label} Axis")
-        group.setStyleSheet(group_style)
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(10, 8, 10, 8)
         group_layout.setSpacing(6)
@@ -194,13 +176,12 @@ class _AxisRangeWidget(QWidget):
 
         self._set_start_btn = QPushButton(f"Set {axis_label} Start")
         self._set_start_btn.setFixedHeight(30)
-        self._set_start_btn.setStyleSheet(_button_style())
         start_layout.addWidget(self._set_start_btn)
 
         self._start_label = QLabel("Not set")
+        self._start_label.setObjectName("AreaScanAxisReadout")
         self._start_label.setMinimumWidth(110)
         self._start_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._start_label.setStyleSheet("font-size: 13px; color: #555;")
         start_layout.addWidget(self._start_label)
 
         group_layout.addWidget(start_row)
@@ -213,13 +194,12 @@ class _AxisRangeWidget(QWidget):
 
         self._set_end_btn = QPushButton(f"Set {axis_label} End")
         self._set_end_btn.setFixedHeight(30)
-        self._set_end_btn.setStyleSheet(_button_style())
         end_layout.addWidget(self._set_end_btn)
 
         self._end_label = QLabel("Not set")
+        self._end_label.setObjectName("AreaScanAxisReadout")
         self._end_label.setMinimumWidth(110)
         self._end_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._end_label.setStyleSheet("font-size: 13px; color: #555;")
         end_layout.addWidget(self._end_label)
 
         group_layout.addWidget(end_row)
@@ -231,7 +211,6 @@ class _AxisRangeWidget(QWidget):
         step_layout.setSpacing(8)
 
         step_lbl = QLabel("Step (mm):")
-        step_lbl.setStyleSheet("font-size: 13px;")
         step_layout.addWidget(step_lbl)
 
         self._step_spin = QDoubleSpinBox()
@@ -242,19 +221,11 @@ class _AxisRangeWidget(QWidget):
         self._step_spin.setMaximum(300.0)
         self._step_spin.setSingleStep(step_mm)
         self._step_spin.setValue(step_mm)
-        self._step_spin.setStyleSheet("""
-            QDoubleSpinBox {
-                font-size: 13px;
-                padding: 2px 4px;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-            }
-        """)
         step_layout.addWidget(self._step_spin)
 
         fmt = f".{step_decimals}f"
         min_label = QLabel(f"(min: {step_mm:{fmt}} mm)")
-        min_label.setStyleSheet("font-size: 11px; color: #777;")
+        min_label.setObjectName("AreaScanMinLabel")
         step_layout.addWidget(min_label)
         step_layout.addStretch(1)
 
@@ -312,28 +283,6 @@ class _AxisRangeWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Shared style helpers
-# ---------------------------------------------------------------------------
-
-def _button_style() -> str:
-    return """
-        QPushButton {
-            background-color: rgb(208, 211, 214);
-            border: 1px solid rgb(150, 150, 150);
-            border-radius: 0px;
-            font-size: 13px;
-            padding: 0 8px;
-        }
-        QPushButton:hover {
-            background-color: rgb(187, 190, 193);
-        }
-        QPushButton:pressed {
-            background-color: rgb(170, 173, 175);
-        }
-    """
-
-
-# ---------------------------------------------------------------------------
 # Main widget
 # ---------------------------------------------------------------------------
 
@@ -379,23 +328,7 @@ class ZStackAreaScanWidget(QWidget):
         main_layout.addWidget(self._z_axis)
 
         # ---- Output folder ----
-        output_group_style = """
-            QGroupBox {
-                font-size: 13px;
-                font-weight: normal;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-                margin-top: 6px;
-                padding-top: 4px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 3px;
-            }
-        """
         output_group = QGroupBox("Output Folder")
-        output_group.setStyleSheet(output_group_style)
         output_layout = QHBoxLayout(output_group)
         output_layout.setContentsMargins(10, 8, 10, 8)
         output_layout.setSpacing(8)
@@ -403,19 +336,10 @@ class ZStackAreaScanWidget(QWidget):
         self._output_edit = QLineEdit()
         self._output_edit.setFixedHeight(30)
         self._output_edit.setPlaceholderText(self._DEFAULT_OUTPUT_PLACEHOLDER)
-        self._output_edit.setStyleSheet("""
-            QLineEdit {
-                font-size: 13px;
-                padding: 2px 4px;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-            }
-        """)
         output_layout.addWidget(self._output_edit, 1)
 
         browse_btn = QPushButton("Browse...")
         browse_btn.setFixedHeight(30)
-        browse_btn.setStyleSheet(_button_style())
         browse_btn.clicked.connect(self._browse_output_folder)
         output_layout.addWidget(browse_btn)
 
@@ -423,8 +347,8 @@ class ZStackAreaScanWidget(QWidget):
 
         # ---- Summary label ----
         self._summary_label = QLabel("")
+        self._summary_label.setObjectName("AreaScanSummary")
         self._summary_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._summary_label.setStyleSheet("font-size: 12px; color: #444; padding: 2px 0;")
         self._summary_label.setWordWrap(True)
         main_layout.addWidget(self._summary_label)
 
@@ -432,28 +356,8 @@ class ZStackAreaScanWidget(QWidget):
 
         # ---- Start button ----
         self._start_btn = QPushButton("Start Automation")
+        self._start_btn.setObjectName("AreaScanStart")
         self._start_btn.setFixedHeight(34)
-        self._start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f28c28;
-                color: white;
-                border: 1px solid #c97020;
-                border-radius: 0px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #d97a20;
-            }
-            QPushButton:pressed {
-                background-color: #bf6a18;
-            }
-            QPushButton:disabled {
-                background-color: rgb(208, 211, 214);
-                color: rgb(150, 153, 156);
-                border: 1px solid rgb(170, 173, 176);
-            }
-        """)
         self._start_btn.setEnabled(False)
         self._start_btn.clicked.connect(self._on_start_clicked)
         main_layout.addWidget(self._start_btn)
