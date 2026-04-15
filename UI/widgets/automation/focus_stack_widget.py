@@ -59,12 +59,11 @@ class _ConfirmAutomationDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("Ready to start focus stack?")
-        title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        title.setObjectName("AreaScanDialogTitle")
         layout.addWidget(title)
 
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgb(200, 200, 200);")
         layout.addWidget(line)
 
         info_widget = QWidget()
@@ -88,12 +87,12 @@ class _ConfirmAutomationDialog(QDialog):
             row_layout.setSpacing(8)
 
             lbl = QLabel(label_text + ":")
-            lbl.setStyleSheet("font-size: 13px; color: #555;")
+            lbl.setObjectName("AreaScanRowLabel")
             lbl.setFixedWidth(130)
             row_layout.addWidget(lbl)
 
             val = QLabel(value_text)
-            val.setStyleSheet("font-size: 13px; font-weight: bold;")
+            val.setObjectName("AreaScanRowValue")
             val.setWordWrap(True)
             row_layout.addWidget(val, 1)
 
@@ -136,25 +135,8 @@ class FocusStackWidget(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(12)
 
-        group_style = """
-            QGroupBox {
-                font-size: 13px;
-                font-weight: normal;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-                margin-top: 6px;
-                padding-top: 4px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 3px;
-            }
-        """
-
         # Z positions group
         z_group = QGroupBox("Z Positions")
-        z_group.setStyleSheet(group_style)
         z_layout = QVBoxLayout(z_group)
         z_layout.setContentsMargins(10, 8, 10, 8)
         z_layout.setSpacing(8)
@@ -166,14 +148,13 @@ class FocusStackWidget(QWidget):
 
         self._set_start_btn = QPushButton("Set Start Position")
         self._set_start_btn.setFixedHeight(32)
-        self._set_start_btn.setStyleSheet(self._button_style())
         self._set_start_btn.clicked.connect(self._set_start_position)
         start_layout.addWidget(self._set_start_btn)
 
         self._start_label = QLabel("Not set")
         self._start_label.setMinimumWidth(100)
         self._start_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._start_label.setStyleSheet("font-size: 13px; color: #555;")
+        self._start_label.setObjectName("AreaScanAxisReadout")
         start_layout.addWidget(self._start_label)
 
         z_layout.addWidget(start_row)
@@ -185,14 +166,13 @@ class FocusStackWidget(QWidget):
 
         self._set_end_btn = QPushButton("Set End Position")
         self._set_end_btn.setFixedHeight(32)
-        self._set_end_btn.setStyleSheet(self._button_style())
         self._set_end_btn.clicked.connect(self._set_end_position)
         end_layout.addWidget(self._set_end_btn)
 
         self._end_label = QLabel("Not set")
         self._end_label.setMinimumWidth(100)
         self._end_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._end_label.setStyleSheet("font-size: 13px; color: #555;")
+        self._end_label.setObjectName("AreaScanAxisReadout")
         end_layout.addWidget(self._end_label)
 
         z_layout.addWidget(end_row)
@@ -201,13 +181,11 @@ class FocusStackWidget(QWidget):
 
         # Step size group
         step_group = QGroupBox("Step Size")
-        step_group.setStyleSheet(group_style)
         step_layout = QHBoxLayout(step_group)
         step_layout.setContentsMargins(10, 8, 10, 8)
         step_layout.setSpacing(8)
 
         step_label = QLabel("Step (mm):")
-        step_label.setStyleSheet("font-size: 13px;")
         step_layout.addWidget(step_label)
 
         printer_step = self._get_printer_step_mm()
@@ -221,20 +199,12 @@ class FocusStackWidget(QWidget):
         self._step_spin.setMaximum(10.0)
         self._step_spin.setSingleStep(printer_step)
         self._step_spin.setValue(printer_step)
-        self._step_spin.setStyleSheet("""
-            QDoubleSpinBox {
-                font-size: 13px;
-                padding: 2px 4px;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-            }
-        """)
         self._step_spin.valueChanged.connect(self._update_summary)
         step_layout.addWidget(self._step_spin)
 
         fmt = f".{step_decimals}f"
         min_step_label = QLabel(f"(min: {printer_step:{fmt}} mm)")
-        min_step_label.setStyleSheet("font-size: 11px; color: #777;")
+        min_step_label.setObjectName("AreaScanMinLabel")
         step_layout.addWidget(min_step_label)
         step_layout.addStretch(1)
 
@@ -242,7 +212,6 @@ class FocusStackWidget(QWidget):
 
         # Output folder group
         output_group = QGroupBox("Output Folder")
-        output_group.setStyleSheet(group_style)
         output_layout = QHBoxLayout(output_group)
         output_layout.setContentsMargins(10, 8, 10, 8)
         output_layout.setSpacing(8)
@@ -250,19 +219,10 @@ class FocusStackWidget(QWidget):
         self._output_edit = QLineEdit()
         self._output_edit.setFixedHeight(30)
         self._output_edit.setPlaceholderText(self._DEFAULT_OUTPUT_PLACEHOLDER)
-        self._output_edit.setStyleSheet("""
-            QLineEdit {
-                font-size: 13px;
-                padding: 2px 4px;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-            }
-        """)
         output_layout.addWidget(self._output_edit, 1)
 
         browse_btn = QPushButton("Browse...")
         browse_btn.setFixedHeight(30)
-        browse_btn.setStyleSheet(self._button_style())
         browse_btn.clicked.connect(self._browse_output_folder)
         output_layout.addWidget(browse_btn)
 
@@ -270,35 +230,15 @@ class FocusStackWidget(QWidget):
 
         # Summary label
         self._summary_label = QLabel("")
+        self._summary_label.setObjectName("AreaScanSummary")
         self._summary_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._summary_label.setStyleSheet("font-size: 12px; color: #444; padding: 2px 0;")
         self._summary_label.setWordWrap(True)
         main_layout.addWidget(self._summary_label)
 
         # Start automation button
         self._start_btn = QPushButton("Start Automation")
+        self._start_btn.setObjectName("AreaScanStart")
         self._start_btn.setFixedHeight(34)
-        self._start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f28c28;
-                color: white;
-                border: 1px solid #c97020;
-                border-radius: 0px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #d97a20;
-            }
-            QPushButton:pressed {
-                background-color: #bf6a18;
-            }
-            QPushButton:disabled {
-                background-color: rgb(208, 211, 214);
-                color: rgb(150, 153, 156);
-                border: 1px solid rgb(170, 173, 176);
-            }
-        """)
         self._start_btn.setEnabled(False)
         self._start_btn.clicked.connect(self._on_start_clicked)
         main_layout.addWidget(self._start_btn)
@@ -311,24 +251,6 @@ class FocusStackWidget(QWidget):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _button_style() -> str:
-        return """
-            QPushButton {
-                background-color: rgb(208, 211, 214);
-                border: 1px solid rgb(150, 150, 150);
-                border-radius: 0px;
-                font-size: 13px;
-                padding: 0 8px;
-            }
-            QPushButton:hover {
-                background-color: rgb(187, 190, 193);
-            }
-            QPushButton:pressed {
-                background-color: rgb(170, 173, 175);
-            }
-        """
 
     @staticmethod
     def _decimals_for_step(step_mm: float) -> int:

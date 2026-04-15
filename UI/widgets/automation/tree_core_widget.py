@@ -26,73 +26,6 @@ NUM_SLOTS = 20
 
 
 # ---------------------------------------------------------------------------
-# Shared style helpers
-# ---------------------------------------------------------------------------
-
-def _button_style() -> str:
-    return """
-        QPushButton {
-            background-color: rgb(208, 211, 214);
-            border: 1px solid rgb(150, 150, 150);
-            border-radius: 0px;
-            font-size: 13px;
-            padding: 0 8px;
-        }
-        QPushButton:hover {
-            background-color: rgb(187, 190, 193);
-        }
-        QPushButton:pressed {
-            background-color: rgb(170, 173, 175);
-        }
-        QPushButton:disabled {
-            background-color: rgb(225, 227, 229);
-            color: rgb(160, 163, 166);
-            border: 1px solid rgb(190, 193, 196);
-        }
-    """
-
-
-# ---------------------------------------------------------------------------
-# Single sample row
-# ---------------------------------------------------------------------------
-
-_ROW_BG_INACTIVE = "rgb(245, 246, 247)"
-_ROW_BG_ACTIVE   = "rgb(242, 140, 40)"   # orange
-
-_EDIT_INACTIVE = """
-    QLineEdit {
-        font-size: 13px;
-        padding: 2px 4px;
-        border: 1px solid rgb(180, 180, 180);
-        border-radius: 0px;
-        background-color: rgb(235, 237, 239);
-        color: rgb(100, 102, 104);
-    }
-"""
-# Inactive row but the field has content — white background so it stands out.
-_EDIT_INACTIVE_FILLED = """
-    QLineEdit {
-        font-size: 13px;
-        padding: 2px 4px;
-        border: 1px solid rgb(160, 160, 160);
-        border-radius: 0px;
-        background-color: rgb(255, 255, 255);
-        color: rgb(40, 40, 40);
-    }
-"""
-_EDIT_ACTIVE = """
-    QLineEdit {
-        font-size: 13px;
-        padding: 2px 4px;
-        border: 1px solid rgb(200, 100, 0);
-        border-radius: 0px;
-        background-color: rgb(255, 210, 160);
-        color: rgb(60, 30, 0);
-    }
-"""
-
-
-# ---------------------------------------------------------------------------
 # QLineEdit subclass that distributes multi-line pastes across slots
 # ---------------------------------------------------------------------------
 
@@ -189,18 +122,20 @@ class _SampleRowWidget(QWidget):
         layout.setSpacing(8)
 
         self._toggle = QCheckBox()
+        self._toggle.setObjectName("SampleToggleInactive")
         self._toggle.setChecked(False)
         self._toggle.setFixedWidth(20)
         layout.addWidget(self._toggle)
 
         self._id_label = QLabel(f"{sample_number:02d}")
+        self._id_label.setObjectName("SampleIdInactive")
         self._id_label.setFixedWidth(28)
         self._id_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self._id_label)
 
-        # Bind slot_index into the callback so the parent always knows the source
         bound_overflow: Callable[[list[str]], None] = lambda lines: overflow_callback(slot_index, lines)
         self._name_edit = _MultilinePasteEdit(bound_overflow)
+        self._name_edit.setObjectName("SampleEditInactive")
         self._name_edit.setFixedHeight(26)
         self._name_edit.setPlaceholderText(f"Sample {sample_number} name...")
         layout.addWidget(self._name_edit, 1)
@@ -216,22 +151,25 @@ class _SampleRowWidget(QWidget):
 
     def _apply_style(self) -> None:
         active = self._toggle.isChecked()
-        self.setStyleSheet(
-            f"_SampleRowWidget {{ background-color: {_ROW_BG_ACTIVE}; }}"
-            if active else
-            f"_SampleRowWidget {{ background-color: {_ROW_BG_INACTIVE}; }}"
-        )
-        self._id_label.setStyleSheet(
-            "font-size: 13px; color: rgb(60, 30, 0);"
-            if active else
-            "font-size: 13px; color: #666;"
-        )
+        self.setProperty("active", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        toggle_name = "SampleToggleActive" if active else "SampleToggleInactive"
+        self._toggle.setObjectName(toggle_name)
+        self._toggle.style().unpolish(self._toggle)
+        self._toggle.style().polish(self._toggle)
+        self._id_label.setObjectName("SampleIdActive" if active else "SampleIdInactive")
+        self._id_label.style().unpolish(self._id_label)
+        self._id_label.style().polish(self._id_label)
         if active:
-            self._name_edit.setStyleSheet(_EDIT_ACTIVE)
+            edit_name = "SampleEditActive"
         elif self._name_edit.text().strip():
-            self._name_edit.setStyleSheet(_EDIT_INACTIVE_FILLED)
+            edit_name = "SampleEditInactiveFilled"
         else:
-            self._name_edit.setStyleSheet(_EDIT_INACTIVE)
+            edit_name = "SampleEditInactive"
+        self._name_edit.setObjectName(edit_name)
+        self._name_edit.style().unpolish(self._name_edit)
+        self._name_edit.style().polish(self._name_edit)
 
     def _on_toggle_changed(self, _checked: bool) -> None:
         self._apply_style()
@@ -297,28 +235,12 @@ class TreeCoreWidget(QWidget):
 
     def _build_controls_group(self) -> QGroupBox:
         group = QGroupBox("Controls")
-        group.setStyleSheet("""
-            QGroupBox {
-                font-size: 13px;
-                font-weight: normal;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-                margin-top: 6px;
-                padding-top: 4px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 3px;
-            }
-        """)
 
         layout = QHBoxLayout(group)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
         slot_label = QLabel("Slot:")
-        slot_label.setStyleSheet("font-size: 13px;")
         layout.addWidget(slot_label)
 
         self._slot_spin = QSpinBox()
@@ -327,48 +249,19 @@ class TreeCoreWidget(QWidget):
         self._slot_spin.setMaximum(NUM_SLOTS)
         self._slot_spin.setValue(1)
         self._slot_spin.setFixedWidth(60)
-        self._slot_spin.setStyleSheet("""
-            QSpinBox {
-                font-size: 13px;
-                padding: 2px 4px;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-            }
-        """)
         layout.addWidget(self._slot_spin)
 
         go_btn = QPushButton("Go to Slot")
+        go_btn.setObjectName("GoToSlot")
         go_btn.setFixedHeight(30)
-        go_btn.setStyleSheet(_button_style())
         go_btn.clicked.connect(self._on_go_to_slot_clicked)
         layout.addWidget(go_btn)
 
         layout.addStretch(1)
 
         self._start_btn = QPushButton("Start Automation")
+        self._start_btn.setObjectName("AreaScanStart")
         self._start_btn.setFixedHeight(30)
-        self._start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f28c28;
-                color: white;
-                border: 1px solid #c97020;
-                border-radius: 0px;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 0 12px;
-            }
-            QPushButton:hover {
-                background-color: #d97a20;
-            }
-            QPushButton:pressed {
-                background-color: #bf6a18;
-            }
-            QPushButton:disabled {
-                background-color: rgb(208, 211, 214);
-                color: rgb(150, 153, 156);
-                border: 1px solid rgb(170, 173, 176);
-            }
-        """)
         self._start_btn.clicked.connect(self._on_start_clicked)
         layout.addWidget(self._start_btn)
 
@@ -376,53 +269,37 @@ class TreeCoreWidget(QWidget):
 
     def _build_sample_list_group(self) -> QGroupBox:
         group = QGroupBox("Samples")
-        group.setStyleSheet("""
-            QGroupBox {
-                font-size: 13px;
-                font-weight: normal;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-                margin-top: 6px;
-                padding-top: 4px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 3px;
-            }
-        """)
 
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(6, 6, 6, 6)
         group_layout.setSpacing(0)
 
-        # Header row
         header = QWidget()
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(6, 2, 6, 4)
         header_layout.setSpacing(8)
 
         enabled_hdr = QLabel("On")
+        enabled_hdr.setObjectName("SampleListHeader")
         enabled_hdr.setFixedWidth(20)
         enabled_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        enabled_hdr.setStyleSheet("font-size: 11px; color: #666; font-weight: bold;")
         header_layout.addWidget(enabled_hdr)
 
         id_hdr = QLabel("ID")
+        id_hdr.setObjectName("SampleListHeader")
         id_hdr.setFixedWidth(28)
         id_hdr.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        id_hdr.setStyleSheet("font-size: 11px; color: #666; font-weight: bold;")
         header_layout.addWidget(id_hdr)
 
         name_hdr = QLabel("Sample Name")
-        name_hdr.setStyleSheet("font-size: 11px; color: #666; font-weight: bold;")
+        name_hdr.setObjectName("SampleListHeader")
         header_layout.addWidget(name_hdr, 1)
 
         group_layout.addWidget(header)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet("color: rgb(200, 200, 200);")
+        divider.setObjectName("SampleDivider")
         group_layout.addWidget(divider)
 
         for i in range(1, NUM_SLOTS + 1):
@@ -433,7 +310,7 @@ class TreeCoreWidget(QWidget):
             if i < NUM_SLOTS:
                 sep = QFrame()
                 sep.setFrameShape(QFrame.Shape.HLine)
-                sep.setStyleSheet("color: rgb(220, 222, 224);")
+                sep.setObjectName("SampleSeparator")
                 group_layout.addWidget(sep)
 
         return group

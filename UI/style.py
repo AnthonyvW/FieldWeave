@@ -344,7 +344,7 @@ def apply_style(app: QApplication) -> None:
         }}
 
         /* Spin boxes */
-        QDoubleSpinBox {{
+        QDoubleSpinBox, QSpinBox {{
             font-size: 13px;
             padding: 2px 4px;
             border: 1px solid rgb(180, 180, 180);
@@ -403,6 +403,80 @@ def apply_style(app: QApplication) -> None:
             font-size: 12px;
             color: #444;
             padding: 2px 0;
+        }}
+
+        /* Sample list column headers */
+        QLabel#SampleListHeader {{
+            font-size: 11px;
+            color: #666;
+            font-weight: bold;
+        }}
+
+        /* Sample row — name edit states */
+        QLineEdit#SampleEditInactive {{
+            font-size: 13px;
+            padding: 2px 4px;
+            border: 1px solid rgb(180, 180, 180);
+            border-radius: 0px;
+            background-color: rgb(235, 237, 239);
+            color: rgb(100, 102, 104);
+        }}
+        QLineEdit#SampleEditInactiveFilled {{
+            font-size: 13px;
+            padding: 2px 4px;
+            border: 1px solid rgb(160, 160, 160);
+            border-radius: 0px;
+            background-color: rgb(255, 255, 255);
+            color: rgb(40, 40, 40);
+        }}
+        QLineEdit#SampleEditActive {{
+            font-size: 13px;
+            padding: 2px 4px;
+            border: 1px solid rgb(200, 100, 0);
+            border-radius: 0px;
+            background-color: rgb(255, 210, 160);
+            color: rgb(60, 30, 0);
+        }}
+
+        /* Sample row — ID label states */
+        QLabel#SampleIdActive {{
+            font-size: 13px;
+            color: rgb(60, 30, 0);
+        }}
+        QLabel#SampleIdInactive {{
+            font-size: 13px;
+            color: #666;
+        }}
+
+        /* Sample list separators */
+        QFrame#SampleDivider {{
+            color: rgb(200, 200, 200);
+        }}
+        QFrame#SampleSeparator {{
+            color: rgb(220, 222, 224);
+        }}
+
+        /* Tree Core — Go to Slot button */
+        QPushButton#GoToSlot {{
+            font-size: 13px;
+        }}
+
+        /* Sample row backgrounds driven by the active dynamic property */
+        _SampleRowWidget[active="false"] {{
+            background-color: rgb(245, 246, 247);
+        }}
+        _SampleRowWidget[active="true"] {{
+            background-color: rgb(242, 140, 40);
+        }}
+
+        /* Sample row — toggle checkbox */
+        QCheckBox#SampleToggleInactive::indicator {{
+            width: 14px;
+            height: 14px;
+        }}
+        QCheckBox#SampleToggleActive::indicator {{
+            width: 14px;
+            height: 14px;
         }}
 
         """
