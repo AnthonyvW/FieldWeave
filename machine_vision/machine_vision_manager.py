@@ -538,8 +538,7 @@ class MachineVisionManager(QObject):
         self._settings.camera_calibration.calibration = calibration
         self.save_settings()
         pending.future.set_result(calibration)
-        dpi_str = f" (DPI: {calibration.dpi:.1f})" if calibration.dpi is not None else ""
-        info(f"MachineVisionManager: calibration complete{dpi_str}")
+        info("MachineVisionManager: calibration complete")
         self._try_dispatch_calibration()
 
     @Slot(str)

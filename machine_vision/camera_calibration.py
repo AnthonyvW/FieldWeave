@@ -269,35 +269,6 @@ def phase_correlation_shift(
 
 
 # ---------------------------------------------------------------------------
-# DPI calculation
-# ---------------------------------------------------------------------------
-
-def compute_dpi_from_matrix(M_est: np.ndarray) -> float | None:
-    """
-    Derive an approximate camera DPI from a calibration matrix.
-
-    The matrix ``M_est`` maps stage deltas in tick units (0.01 mm) to pixel
-    deltas.  The diagonal entries give pixels-per-tick for each axis.  This
-    function averages the two diagonal magnitudes, converts to pixels-per-mm,
-    then to DPI (pixels per inch, 1 in = 25.4 mm).
-
-    Parameters
-    ----------
-    M_est:
-        2×2 calibration matrix, dtype float64.
-
-    Returns
-    -------
-    DPI as a float, or ``None`` if the calculation raises an exception.
-    """
-    px_per_tick_x = abs(M_est[0, 0])
-    px_per_tick_y = abs(M_est[1, 1])
-    px_per_tick_avg = (px_per_tick_x + px_per_tick_y) / 2.0
-    px_per_mm = px_per_tick_avg * 100.0   # 1 tick = 0.01 mm
-    return px_per_mm * 25.4
-
-
-# ---------------------------------------------------------------------------
 # Calibration builder
 # ---------------------------------------------------------------------------
 
@@ -379,8 +350,6 @@ def build_calibration(
             "Ensure the X and Y moves produced distinct pixel shifts."
         ) from exc
 
-    dpi = compute_dpi_from_matrix(M_est)
-
     return CameraCalibration(
         M_est=M_est,
         M_inv=M_inv,
@@ -391,5 +360,4 @@ def build_calibration(
         image_height=image_height,
         move_x_ticks=move_x_ticks,
         move_y_ticks=move_y_ticks,
-        dpi=dpi,
     )

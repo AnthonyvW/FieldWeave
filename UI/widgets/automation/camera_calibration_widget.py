@@ -149,10 +149,6 @@ class CameraCalibrationWidget(QWidget):
         self._cal_status_label.setStyleSheet("font-size: 13px; font-weight: bold;")
         status_form.addRow("Status:", self._cal_status_label)
 
-        self._cal_dpi_label = QLabel("—")
-        self._cal_dpi_label.setStyleSheet("font-size: 13px;")
-        status_form.addRow("DPI:", self._cal_dpi_label)
-
         self._cal_ref_label = QLabel("—")
         self._cal_ref_label.setStyleSheet("font-size: 13px;")
         status_form.addRow("Reference XY:", self._cal_ref_label)
@@ -277,7 +273,6 @@ class CameraCalibrationWidget(QWidget):
                 self._cal_status_label.setStyleSheet(
                     "font-size: 13px; font-weight: bold; color: #999;"
                 )
-                self._cal_dpi_label.setText("—")
                 self._cal_ref_label.setText("—")
                 self._clear_btn.setEnabled(False)
             else:
@@ -285,8 +280,6 @@ class CameraCalibrationWidget(QWidget):
                 self._cal_status_label.setStyleSheet(
                     "font-size: 13px; font-weight: bold; color: #2a8a2a;"
                 )
-                dpi_str = f"{cal.dpi:.1f}" if cal.dpi is not None else "—"
-                self._cal_dpi_label.setText(dpi_str)
                 ref_x_mm = cal.ref_x * _NM_PER_TICK / _NM_PER_MM
                 ref_y_mm = cal.ref_y * _NM_PER_TICK / _NM_PER_MM
                 self._cal_ref_label.setText(f"{ref_x_mm:.3f} mm, {ref_y_mm:.3f} mm")

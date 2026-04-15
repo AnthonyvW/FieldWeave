@@ -317,14 +317,9 @@ class CameraCalibrationRoutine(AutomationRoutine):
             self._set_status("Failed — see log for details", _TOTAL_STEPS, _TOTAL_STEPS)
             return
 
-        dpi_str = f"  DPI={calibration.dpi:.1f}" if calibration.dpi is not None else ""
-        self._set_status(
-            f"Done{dpi_str}",
-            _TOTAL_STEPS, _TOTAL_STEPS,
-        )
+        self._set_status("Done", _TOTAL_STEPS, _TOTAL_STEPS)
         info(
             f"[CameraCalibration] Complete: "
             f"ref=({ref.x // _NM_PER_TICK}, {ref.y // _NM_PER_TICK}) ticks"
             f"  move_x={move_x_ticks} ticks  move_y={move_y_ticks} ticks"
-            f"{dpi_str}"
         )
