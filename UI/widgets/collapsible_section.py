@@ -58,10 +58,13 @@ class CollapsibleSection(QFrame):
         header_layout.addWidget(self.title_lbl)
         header_layout.addStretch(1)
 
+        gear = SettingsButton("Section settings")
         if on_settings is not None:
-            gear = SettingsButton("Section settings")
             gear.clicked.connect(on_settings)
-            header_layout.addWidget(gear)
+        else:
+            gear = SettingsButton(text=" ")
+            gear.setEnabled(False)
+        header_layout.addWidget(gear)
 
         root.addWidget(self.header)
 
@@ -81,6 +84,9 @@ class CollapsibleSection(QFrame):
 
     def _on_header_click(self, event) -> None:
         self.set_collapsed(not self._collapsed)
+
+    def set_title(self, title: str) -> None:
+        self.title_lbl.setText(title)
 
     def set_collapsed(self, collapsed: bool) -> None:
         if self._collapsed == collapsed:
@@ -103,6 +109,8 @@ class CollapsibleSection(QFrame):
         else:
             self.setMinimumHeight(0)
             self.setMaximumHeight(16777215)
+
+        self.updateGeometry()
 
         if self._on_collapsed_changed is not None:
             self._on_collapsed_changed(collapsed)

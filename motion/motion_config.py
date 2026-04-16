@@ -11,6 +11,27 @@ _DEFAULT_STEP_PRESETS_NM: list[int] = [40_000, 400_000, 2_000_000, 10_000_000]
 
 
 @dataclass
+class CameraCalibrationPosition:
+    """Saved stage position used as the starting point for camera calibration.
+
+    Coordinates are stored in nanometres.  ``last_calibrated_iso`` holds the
+    ISO-8601 timestamp of the most recent successful calibration, or an empty
+    string if no calibration has been completed yet.
+    """
+
+    x_nm: int = 0
+    y_nm: int = 0
+    z_nm: int = 0
+    last_calibrated_iso: str = ""
+    is_set: bool = False
+
+    @property
+    def has_been_calibrated(self) -> bool:
+        """True if a successful calibration has been recorded."""
+        return bool(self.last_calibrated_iso)
+
+
+@dataclass
 class MotionSystemSettings:
     FIRMWARE_NAME: str = "Marlin"
     MACHINE_TYPE: str = "Ender-3"
@@ -39,6 +60,11 @@ class MotionSystemSettings:
     # Four buttons shown in the navigation widget; default: 0.04, 0.4, 2.0, 10.0 mm.
     step_presets: list[int] = field(
         default_factory=lambda: list(_DEFAULT_STEP_PRESETS_NM)
+    )
+
+    # Saved stage position for camera calibration and last-calibrated timestamp.
+    camera_calibration_position: CameraCalibrationPosition = field(
+        default_factory=CameraCalibrationPosition
     )
 
     def validate(self) -> None:
@@ -95,6 +121,16 @@ class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
             raw_presets = list(_DEFAULT_STEP_PRESETS_NM)
         padded = (list(raw_presets) + list(_DEFAULT_STEP_PRESETS_NM))[:4]
         filtered_data["step_presets"] = padded
+
+        # Deserialise the nested CameraCalibrationPosition if present.
+        raw_cal_pos = filtered_data.get("camera_calibration_position")
+        if isinstance(raw_cal_pos, dict):
+            valid_cal_fields = {f.name for f in fields(CameraCalibrationPosition)}
+            filtered_data["camera_calibration_position"] = CameraCalibrationPosition(
+                **{k: v for k, v in raw_cal_pos.items() if k in valid_cal_fields}
+            )
+        else:
+            filtered_data.pop("camera_calibration_position", None)
 
         return MotionSystemSettings(**filtered_data)
 

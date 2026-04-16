@@ -479,5 +479,105 @@ def apply_style(app: QApplication) -> None:
             height: 14px;
         }}
 
+        /* Camera space calibration — intro page */
+        QLabel#CalPageTitle {{
+            font-size: 22px;
+            font-weight: bold;
+            color: #5a5a5a;
+        }}
+        QLabel#CalDescriptionBox {{
+            font-size: 14px;
+            color: #000000;
+            background: #f8f8f8;
+            padding: 20px;
+            border: 1px solid #e0e0e0;
+        }}
+        QPushButton#CalStartCalibration {{
+            font-size: 16px;
+            font-weight: bold;
+            padding: 12px 30px;
+            background: #dbdbdb;
+            border: 2px solid #b3b4b6;
+        }}
+        QPushButton#CalStartCalibration:hover {{
+            background: #b3b4b6;
+        }}
+
+        /* Camera space calibration — steps widget */
+        QLabel#CalStepTitle {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #3a3a3a;
+        }}
+        QTextEdit#CalStepBody {{
+            font-size: 13px;
+            padding: 15px;
+            background: #f8f8f8;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            color: #5a5a5a;
+        }}
+        QLabel#CalStatusLabel {{
+            font-size: 12px;
+            color: #444;
+            padding: 2px 0;
+        }}
+
+        /* Camera space calibration — position widget */
+        QLabel#CalSavedPosLabel {{
+            font-size: 13px;
+            color: #5a5a5a;
+        }}
+        QPushButton#CalSecondaryButton {{
+            background-color: rgb(208, 211, 214);
+            border: 1px solid rgb(150, 150, 150);
+            border-radius: 0px;
+            font-size: 13px;
+            padding: 0 8px;
+        }}
+        QPushButton#CalSecondaryButton:hover {{
+            background-color: rgb(187, 190, 193);
+        }}
+        QPushButton#CalSecondaryButton:pressed {{
+            background-color: rgb(170, 173, 175);
+        }}
+        QPushButton#CalSecondaryButton:disabled {{
+            color: rgb(150, 153, 156);
+        }}
+
+        /* Camera space calibration — capture widget */
+        QPushButton#CalStartCapture {{
+            background-color: #f28c28;
+            color: white;
+            border: 1px solid #c97020;
+            border-radius: 0px;
+            font-size: 13px;
+            font-weight: bold;
+        }}
+        QPushButton#CalStartCapture:hover {{
+            background-color: #d97a20;
+        }}
+        QPushButton#CalStartCapture:pressed {{
+            background-color: #bf6a18;
+        }}
+        QPushButton#CalStartCapture:disabled {{
+            background-color: rgb(208, 211, 214);
+            color: rgb(150, 153, 156);
+            border: 1px solid rgb(170, 173, 176);
+        }}
+        QPushButton#CalStopCapture {{
+            background-color: rgb(200, 80, 70);
+            color: white;
+            border: 1px solid rgb(160, 60, 50);
+            border-radius: 0px;
+            font-size: 13px;
+        }}
+        QPushButton#CalStopCapture:hover {{
+            background-color: rgb(180, 65, 55);
+        }}
+        QPushButton#CalStopCapture:pressed {{
+            background-color: rgb(160, 55, 45);
+        }}
+
         """
     )

@@ -26,10 +26,10 @@ from .pages.navigation_settings import navigation_page
 from .pages.about_settings import about_page
 
 class SettingsButton(QToolButton):
-    def __init__(self, tooltip: str = "Settings", parent: QWidget | None = None)-> None:
+    def __init__(self, tooltip: str = "Settings", text: str = "⚙", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setToolTip(tooltip)
-        self.setText("⚙")
+        self.setText(text)
 
         self.setAutoRaise(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)

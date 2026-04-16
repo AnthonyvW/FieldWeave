@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
@@ -7,6 +8,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
@@ -14,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from common.app_context import get_app_context
-from common.logger import error
+from common.logger import error, info
 from motion.routines.camera_calibration_routine import CameraCalibrationRoutine
 
 _NM_PER_MM = 1_000_000
@@ -156,6 +158,67 @@ class CameraCalibrationWidget(QWidget):
 
         main_layout.addWidget(status_group)
 
+        # ---- Calibration position ---------------------------------------
+        pos_group = QGroupBox("Calibration Position")
+        pos_group.setStyleSheet(group_style)
+        pos_layout = QVBoxLayout(pos_group)
+        pos_layout.setContentsMargins(10, 8, 10, 8)
+        pos_layout.setSpacing(6)
+
+        pos_form = QFormLayout()
+        pos_form.setSpacing(6)
+        pos_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self._saved_pos_label = QLabel("Not set")
+        self._saved_pos_label.setStyleSheet("font-size: 13px;")
+        pos_form.addRow("Saved XYZ:", self._saved_pos_label)
+
+        self._last_cal_label = QLabel("Never")
+        self._last_cal_label.setStyleSheet("font-size: 13px;")
+        pos_form.addRow("Last calibrated:", self._last_cal_label)
+
+        pos_layout.addLayout(pos_form)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        secondary_btn_style = """
+            QPushButton {
+                background-color: rgb(208, 211, 214);
+                border: 1px solid rgb(150, 150, 150);
+                border-radius: 0px;
+                font-size: 13px;
+                padding: 0 8px;
+            }
+            QPushButton:hover   { background-color: rgb(187, 190, 193); }
+            QPushButton:pressed { background-color: rgb(170, 173, 175); }
+            QPushButton:disabled { color: rgb(150, 153, 156); }
+        """
+
+        self._set_pos_btn = QPushButton("Set Position")
+        self._set_pos_btn.setFixedHeight(30)
+        self._set_pos_btn.setStyleSheet(secondary_btn_style)
+        self._set_pos_btn.setToolTip("Save the current stage XYZ as the calibration start position")
+        self._set_pos_btn.clicked.connect(self._on_set_position_clicked)
+        btn_row.addWidget(self._set_pos_btn)
+
+        self._goto_pos_btn = QPushButton("Go to Position")
+        self._goto_pos_btn.setFixedHeight(30)
+        self._goto_pos_btn.setStyleSheet(secondary_btn_style)
+        self._goto_pos_btn.setToolTip("Move the stage to the saved calibration position")
+        self._goto_pos_btn.clicked.connect(self._on_goto_position_clicked)
+        btn_row.addWidget(self._goto_pos_btn)
+
+        self._clear_pos_btn = QPushButton("Clear Position")
+        self._clear_pos_btn.setFixedHeight(30)
+        self._clear_pos_btn.setStyleSheet(secondary_btn_style)
+        self._clear_pos_btn.setToolTip("Remove the saved calibration position")
+        self._clear_pos_btn.clicked.connect(self._on_clear_position_clicked)
+        btn_row.addWidget(self._clear_pos_btn)
+
+        pos_layout.addLayout(btn_row)
+        main_layout.addWidget(pos_group)
+
         # ---- Move distances (read-only, from settings) ------------------
         moves_group = QGroupBox("Calibration Moves (from settings)")
         moves_group.setStyleSheet(group_style)
@@ -289,6 +352,43 @@ class CameraCalibrationWidget(QWidget):
         except Exception:
             pass
 
+        self._refresh_position_status()
+
+    def _refresh_position_status(self) -> None:
+        """Update the saved-position and last-calibrated labels from motion settings."""
+        try:
+            ctx = get_app_context()
+            motion_settings = ctx.motion.settings
+            if motion_settings is None:
+                return
+
+            cal_pos = motion_settings.camera_calibration_position
+            running = self._routine is not None
+
+            if cal_pos.is_set:
+                x_mm = cal_pos.x_nm / _NM_PER_MM
+                y_mm = cal_pos.y_nm / _NM_PER_MM
+                z_mm = cal_pos.z_nm / _NM_PER_MM
+                self._saved_pos_label.setText(
+                    f"{x_mm:.3f}, {y_mm:.3f}, {z_mm:.3f} mm"
+                )
+                self._goto_pos_btn.setEnabled(not running)
+                self._clear_pos_btn.setEnabled(not running)
+            else:
+                self._saved_pos_label.setText("Not set")
+                self._goto_pos_btn.setEnabled(False)
+                self._clear_pos_btn.setEnabled(False)
+
+            if cal_pos.has_been_calibrated:
+                dt = datetime.fromisoformat(cal_pos.last_calibrated_iso)
+                local_dt = dt.astimezone()
+                self._last_cal_label.setText(local_dt.strftime("%Y-%m-%d  %H:%M:%S"))
+            else:
+                self._last_cal_label.setText("Never")
+
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
@@ -356,6 +456,83 @@ class CameraCalibrationWidget(QWidget):
         self._refresh_calibration_status()
         self._status_label.setText("Calibration cleared.")
 
+    def _on_set_position_clicked(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.is_ready():
+            self._status_label.setText("Motion controller not ready.")
+            return
+        motion_settings = motion.settings
+        if motion_settings is None:
+            return
+        try:
+            pos = motion.get_position()
+        except Exception as exc:
+            error(f"CameraCalibrationWidget: get_position failed — {exc}")
+            self._status_label.setText("Could not read stage position.")
+            return
+        cal_pos = motion_settings.camera_calibration_position
+        cal_pos.x_nm = pos.x
+        cal_pos.y_nm = pos.y
+        cal_pos.z_nm = pos.z
+        cal_pos.is_set = True
+        motion._controller._config_manager.save(motion_settings)
+        info(
+            f"[CameraCalibration] Saved calibration position: "
+            f"X={pos.x / _NM_PER_MM:.3f} mm  Y={pos.y / _NM_PER_MM:.3f} mm  Z={pos.z / _NM_PER_MM:.3f} mm"
+        )
+        self._refresh_position_status()
+        self._status_label.setText(
+            f"Position saved: ({pos.x / _NM_PER_MM:.3f}, {pos.y / _NM_PER_MM:.3f}, {pos.z / _NM_PER_MM:.3f}) mm"
+        )
+
+    def _on_goto_position_clicked(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.is_ready():
+            self._status_label.setText("Motion controller not ready.")
+            return
+        motion_settings = motion.settings
+        if motion_settings is None:
+            return
+        cal_pos = motion_settings.camera_calibration_position
+        if not cal_pos.is_set:
+            self._status_label.setText("No calibration position saved.")
+            return
+        from motion.models import Position
+        try:
+            motion.move_to_position(
+                Position(x=cal_pos.x_nm, y=cal_pos.y_nm, z=cal_pos.z_nm),
+                wait=False,
+            )
+        except Exception as exc:
+            error(f"CameraCalibrationWidget: move_to_position failed — {exc}")
+            self._status_label.setText("Move failed — see log.")
+            return
+        self._status_label.setText(
+            f"Moving to ({cal_pos.x_nm / _NM_PER_MM:.3f}, "
+            f"{cal_pos.y_nm / _NM_PER_MM:.3f}, "
+            f"{cal_pos.z_nm / _NM_PER_MM:.3f}) mm…"
+        )
+
+    def _on_clear_position_clicked(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None:
+            return
+        motion_settings = motion.settings
+        if motion_settings is None:
+            return
+        cal_pos = motion_settings.camera_calibration_position
+        cal_pos.x_nm = 0
+        cal_pos.y_nm = 0
+        cal_pos.z_nm = 0
+        cal_pos.is_set = False
+        motion._controller._config_manager.save(motion_settings)
+        info("[CameraCalibration] Calibration position cleared")
+        self._refresh_position_status()
+        self._status_label.setText("Calibration position cleared.")
+
     # ------------------------------------------------------------------
     # Routine state
     # ------------------------------------------------------------------
@@ -375,6 +552,9 @@ class CameraCalibrationWidget(QWidget):
     def _enter_running_state(self) -> None:
         self._start_btn.setEnabled(False)
         self._clear_btn.setEnabled(False)
+        self._set_pos_btn.setEnabled(False)
+        self._goto_pos_btn.setEnabled(False)
+        self._clear_pos_btn.setEnabled(False)
         self._stop_btn.setVisible(True)
         self._status_label.setText("Running…")
         self._latest_activity: str = ""

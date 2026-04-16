@@ -24,6 +24,7 @@ Usage::
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Generator
 import numpy as np
 
@@ -323,3 +324,14 @@ class CameraCalibrationRoutine(AutomationRoutine):
             f"ref=({ref.x // _NM_PER_TICK}, {ref.y // _NM_PER_TICK}) ticks"
             f"  move_x={move_x_ticks} ticks  move_y={move_y_ticks} ticks"
         )
+
+        # Persist the reference position and calibration timestamp to motion settings.
+        motion_settings = ctx.motion.settings
+        if motion_settings is not None:
+            cal_pos = motion_settings.camera_calibration_position
+            cal_pos.x_nm = ref.x
+            cal_pos.y_nm = ref.y
+            cal_pos.z_nm = ref.z
+            cal_pos.is_set = True
+            cal_pos.last_calibrated_iso = datetime.now(timezone.utc).isoformat()
+            ctx.motion._controller._config_manager.save(motion_settings)
