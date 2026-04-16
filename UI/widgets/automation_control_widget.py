@@ -19,7 +19,6 @@ from UI.widgets.automation.focus_stack_widget import FocusStackWidget
 from UI.widgets.automation.focus_stack_area_scan_widget import ZStackAreaScanWidget
 from UI.widgets.automation.square_move_widget import SquareMoveWidget
 from UI.widgets.automation.tree_core_widget import TreeCoreWidget
-from UI.widgets.automation.camera_calibration_widget import CameraCalibrationWidget
 
 
 class _ArrowComboBox(QComboBox):
@@ -169,7 +168,6 @@ class AutomationWidget(QWidget):
             FocusStackWidget(),
             ZStackAreaScanWidget(),
             SquareMoveWidget(),
-            CameraCalibrationWidget(),
         ]
 
         for widget in self._sub_widgets:
