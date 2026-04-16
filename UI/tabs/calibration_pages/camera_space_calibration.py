@@ -164,6 +164,7 @@ class CameraSpaceStepsWidget(QWidget):
         self._total_steps: int = len(_STEPS)
         self._capture_complete: bool = False
         self._on_title_changed = on_title_changed
+        self._crosshair_state_before: bool | None = None
         self._build_ui()
         self._update_step_display()
 
@@ -194,6 +195,7 @@ class CameraSpaceStepsWidget(QWidget):
         self._next_btn = QPushButton("Next")
         self._next_btn.clicked.connect(self._next_step)
         self._finish_btn = QPushButton("Finish Calibration")
+        self._finish_btn.clicked.connect(self._restore_crosshair_state)
         self._finish_btn.clicked.connect(self.finished)
 
         nav_layout.addWidget(self._prev_btn)
@@ -274,6 +276,24 @@ class CameraSpaceStepsWidget(QWidget):
         widget.hide()
         return widget
 
+    def _set_crosshair(self, enabled: bool) -> None:
+        ctx = get_app_context()
+        preview = ctx.camera_preview
+        if preview is not None:
+            preview.overlays.crosshair = enabled
+
+    def _save_crosshair_state(self) -> None:
+        ctx = get_app_context()
+        preview = ctx.camera_preview
+        self._crosshair_state_before: bool | None = (
+            preview.overlays.crosshair if preview is not None else None
+        )
+
+    def _restore_crosshair_state(self) -> None:
+        if self._crosshair_state_before is not None:
+            self._set_crosshair(self._crosshair_state_before)
+            self._crosshair_state_before = None
+
     def _update_step_display(self) -> None:
         step_title, step_body = _STEPS[self._current_step]
         self._step_title.setText(step_title)
@@ -293,6 +313,9 @@ class CameraSpaceStepsWidget(QWidget):
         self._position_widget.setVisible(self._current_step == 1)
         if self._current_step == 1:
             self._refresh_position_display()
+
+        # Crosshair active during steps 2, 3, and 4 (indices 1–3)
+        self._set_crosshair(self._current_step >= 1)
 
         # Step 3 (index 2) shows capture controls; Next is gated on completion
         self._capture_widget.setVisible(self._current_step == 2)
@@ -341,6 +364,8 @@ class CameraSpaceStepsWidget(QWidget):
             self._update_step_display()
 
     def reset(self) -> None:
+        self._restore_crosshair_state()
+        self._save_crosshair_state()
         self._current_step = 0
         self._capture_complete = False
         self._update_step_display()
