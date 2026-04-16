@@ -65,6 +65,12 @@ class Autofocus(AutomationRoutine):
     coarse_drop_stop_base:
         Abort when the score drops this much below the baseline and no
         improvement over the start has been found yet.
+    coarse_near_focus_drop_stop:
+        When the baseline is already above ``focus_preview_threshold`` (i.e.
+        already well-focused), abort the coarse sweep as soon as any probe
+        drops this much below the baseline.  Prevents the routine from
+        wandering far away from an already-good starting position when a tiny
+        noise bump on the first probe falsely locks in a bias direction.
     z_floor_mm:
         Hard lower Z limit in mm.
     coarse_step_mm:
@@ -91,6 +97,7 @@ class Autofocus(AutomationRoutine):
         coarse_improve_thresh: float = 0.01,
         coarse_drop_stop_peak: float = 0.02,
         coarse_drop_stop_base: float = 0.03,
+        coarse_near_focus_drop_stop: float = 0.02,
         z_floor_mm: float = 0.0,
         coarse_step_mm: float = 0.20,
         refine_step_mm: float = 0.12,
@@ -105,6 +112,7 @@ class Autofocus(AutomationRoutine):
         self._coarse_improve_thresh = coarse_improve_thresh
         self._coarse_drop_stop_peak = coarse_drop_stop_peak
         self._coarse_drop_stop_base = coarse_drop_stop_base
+        self._coarse_near_focus_drop_stop = coarse_near_focus_drop_stop
         self._z_floor_nm = int(round(z_floor_mm * _NM_PER_MM))
         self._coarse_step_nm = int(round(coarse_step_mm * _NM_PER_MM))
         self._refine_step_nm = int(round(refine_step_mm * _NM_PER_MM))
@@ -286,6 +294,10 @@ class Autofocus(AutomationRoutine):
 
             if best_z == start_nm and (baseline - s) >= self._coarse_drop_stop_base:
                 info("[Autofocus] Early stop (baseline-drop)")
+                break
+
+            if baseline >= self._focus_preview_threshold and (baseline - s) >= self._coarse_near_focus_drop_stop:
+                info("[Autofocus] Early stop (near-focus baseline-drop)")
                 break
 
             if not bias_side and improv >= self._coarse_improve_thresh:
