@@ -15,11 +15,13 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from common.logger import info, error, warning
 from machine_vision.camera_calibration import CameraCalibration
-from machine_vision.machine_vision_worker import MachineVisionWorker, FocusResult
+from machine_vision.machine_vision_worker import MachineVisionWorker, FocusResult, InspectCalibrationResult
 from machine_vision.machine_vision_config import (
     CameraCalibrationSettings,
     FocusDetectionSettings,
     FocusRegionSettings,
+    InspectCalibrationModeSettings,
+    InspectCalibrationSettings,
     LaplacianSettings,
     MachineVisionSettings,
     MachineVisionSettingsManager,
@@ -56,6 +58,16 @@ class _PendingCalibration:
     future: Future[CameraCalibration]
 
 
+@dataclass
+class _PendingInspectCalibration:
+    """A queued calibration-bar inspection request paired with its future."""
+    frame_bytes: bytes
+    width: int
+    height: int
+    snap: bool
+    future: Future[InspectCalibrationResult]
+
+
 class MachineVisionManager(QObject):
     """
     GUI-thread owner of the machine-vision pipeline.
@@ -90,6 +102,7 @@ class MachineVisionManager(QObject):
     focus_result_ready = Signal(object)   # FocusResult
     analysis_error = Signal(str)
     settings_changed = Signal()
+    inspect_calibration_result_ready = Signal(object)   # InspectCalibrationResult
 
     _request_focus = Signal(bytes, int, int)
     _request_calibration_build = Signal(
@@ -99,6 +112,7 @@ class MachineVisionManager(QObject):
         int, int,          # move_x_ticks, move_y_ticks
         int, int, int,     # ref_x, ref_y, ref_z
     )
+    _request_inspect_calibration = Signal(bytes, int, int, bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -113,6 +127,11 @@ class MachineVisionManager(QObject):
         self._pending_calibration: _PendingCalibration | None = None
         self._current_calibration: _PendingCalibration | None = None
         self._calibration_busy: bool = False
+
+        # Inspect-calibration uses the same latest-frame-wins policy as focus.
+        self._pending_inspect: _PendingInspectCalibration | None = None
+        self._current_inspect: _PendingInspectCalibration | None = None
+        self._inspect_busy: bool = False
 
         self._settings_manager = MachineVisionSettingsManager()
         self._settings: MachineVisionSettings = self._load_settings()
@@ -135,6 +154,9 @@ class MachineVisionManager(QObject):
         self._request_calibration_build.connect(self._worker.run_calibration_build)
         self._worker.calibration_ready.connect(self._on_calibration_ready)
         self._worker.calibration_error.connect(self._on_calibration_error)
+
+        self._request_inspect_calibration.connect(self._worker.run_inspect_calibration)
+        self._worker.inspect_calibration_result_ready.connect(self._on_inspect_calibration_result)
 
         self._thread.start()
         self._apply_settings(self._settings)
@@ -380,9 +402,98 @@ class MachineVisionManager(QObject):
         future.add_done_callback(self._signal_from_future)
         return True
 
+    def request_inspect_calibration_async(
+        self,
+        frame: np.ndarray,
+        width: int,
+        height: int,
+        snap: bool = False,
+    ) -> Future[InspectCalibrationResult]:
+        """
+        Submit a calibration-bar inspection request and return a
+        ``Future[InspectCalibrationResult]``.
+
+        Pass ``snap=True`` to use snap-mode parameters (2x downsampling,
+        tick_min_length 200).  The default uses preview-mode parameters
+        (no downsampling, tick_min_length 150).
+
+        Uses the same latest-frame-wins policy as focus analysis: if a
+        request is already queued but not yet dispatched it is cancelled and
+        replaced by this one.
+
+        The frame is copied immediately so the camera buffer may be reused
+        before the future resolves.
+
+        This method is safe to call from the GUI thread only.
+        """
+        future: Future[InspectCalibrationResult] = Future()
+        pending = _PendingInspectCalibration(
+            frame_bytes=bytes(frame),
+            width=width,
+            height=height,
+            snap=snap,
+            future=future,
+        )
+
+        if self._pending_inspect is not None:
+            self._pending_inspect.future.cancel()
+
+        self._pending_inspect = pending
+        self._try_dispatch_inspect()
+        return future
+
+    def request_inspect_calibration(
+        self,
+        frame: np.ndarray,
+        width: int,
+        height: int,
+        snap: bool = False,
+    ) -> bool:
+        """
+        Fire-and-forget wrapper around ``request_inspect_calibration_async``.
+
+        Pass ``snap=True`` to use snap-mode parameters.  Results arrive via
+        ``inspect_calibration_result_ready``; errors arrive via
+        ``analysis_error``.  Always returns ``True``.
+
+        The frame is copied immediately so the camera buffer may be reused.
+        """
+        future = self.request_inspect_calibration_async(frame, width, height, snap=snap)
+        future.add_done_callback(self._signal_from_inspect_future)
+        return True
+
+    def reset_inspect_calibration_state(self) -> None:
+        """
+        Reset the axis hysteresis state on the worker.
+
+        Call this when starting a new inspection session so the confirmed-axis
+        streak does not carry over from a previous run.
+        """
+        self._worker.reset_inspect_calibration_state()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _try_dispatch_inspect(self) -> None:
+        """Dispatch the pending inspect request if the worker is free."""
+        if self._inspect_busy or self._pending_inspect is None:
+            return
+        pending = self._pending_inspect
+        self._pending_inspect = None
+        self._inspect_busy = True
+        self._current_inspect = pending
+        self._request_inspect_calibration.emit(pending.frame_bytes, pending.width, pending.height, pending.snap)
+
+    def _signal_from_inspect_future(self, future: Future[InspectCalibrationResult]) -> None:
+        """Done-callback that fans out a resolved inspect future to the public signals."""
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is not None:
+            self.analysis_error.emit(str(exc))
+        else:
+            self.inspect_calibration_result_ready.emit(future.result())
 
     def _try_dispatch(self) -> None:
         """Dispatch the pending request if the worker is free."""
@@ -469,6 +580,12 @@ class MachineVisionManager(QObject):
         w.focus_region_top = fr.top
         w.focus_region_bottom = fr.bottom
 
+        ic = settings.inspect_calibration
+        w.inspect_calibration_preview_downsample = ic.preview.downsample
+        w.inspect_calibration_preview_tick_min_length = ic.preview.tick_min_length
+        w.inspect_calibration_snap_downsample = ic.snap.downsample
+        w.inspect_calibration_snap_tick_min_length = ic.snap.tick_min_length
+
     def _copy_settings(self) -> MachineVisionSettings:
         """Return a deep copy of the current settings for mutation."""
         f = self._settings.focus
@@ -508,6 +625,16 @@ class MachineVisionManager(QObject):
                 move_x_ticks=cc.move_x_ticks,
                 move_y_ticks=cc.move_y_ticks,
                 calibration=cc.calibration,  # CameraCalibration is immutable; no need to copy.
+            ),
+            inspect_calibration=InspectCalibrationSettings(
+                preview=InspectCalibrationModeSettings(
+                    downsample=self._settings.inspect_calibration.preview.downsample,
+                    tick_min_length=self._settings.inspect_calibration.preview.tick_min_length,
+                ),
+                snap=InspectCalibrationModeSettings(
+                    downsample=self._settings.inspect_calibration.snap.downsample,
+                    tick_min_length=self._settings.inspect_calibration.snap.tick_min_length,
+                ),
             ),
         )
 
@@ -549,6 +676,13 @@ class MachineVisionManager(QObject):
         pending.future.set_exception(RuntimeError(msg))
         self._try_dispatch_calibration()
 
+    @Slot(object)
+    def _on_inspect_calibration_result(self, result: InspectCalibrationResult) -> None:
+        pending = self._current_inspect
+        self._inspect_busy = False
+        pending.future.set_result(result)
+        self._try_dispatch_inspect()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -566,6 +700,10 @@ class MachineVisionManager(QObject):
         if self._pending_calibration is not None:
             self._pending_calibration.future.cancel()
             self._pending_calibration = None
+
+        if self._pending_inspect is not None:
+            self._pending_inspect.future.cancel()
+            self._pending_inspect = None
 
         self._thread.quit()
         if not self._thread.wait(3000):

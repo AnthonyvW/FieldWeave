@@ -192,6 +192,70 @@ class FocusDetectionSettings:
 
 
 # ---------------------------------------------------------------------------
+# Inspect-calibration settings
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InspectCalibrationModeSettings:
+    """
+    Parameters for one mode (preview or snap) of the calibration-bar inspector.
+    """
+
+    downsample: int | None = None
+    """
+    Shrink each axis by this factor before processing.  ``None`` or ``1``
+    disables downscaling.  Use a value like ``2`` for full-resolution captures
+    where speed matters more than precision.
+    """
+
+    tick_min_length: int = 150
+    """
+    Minimum perpendicular pixel run (in full-resolution pixels) required to
+    count a candidate as a tick mark.  Scaled by ``downsample`` internally.
+    """
+
+    def validate(self, label: str) -> None:
+        if self.downsample is not None and self.downsample < 1:
+            raise ValueError(f"inspect_calibration.{label}.downsample must be >= 1 or None")
+        if self.tick_min_length < 1:
+            raise ValueError(f"inspect_calibration.{label}.tick_min_length must be >= 1")
+
+
+@dataclass
+class InspectCalibrationSettings:
+    """
+    Parameters for the calibration-bar inspection algorithm.
+
+    The inspector detects a ruler/scale bar in the frame, determines its
+    orientation (horizontal or vertical), locates tick marks along it, and
+    reports whether end-caps are present at each terminus.
+
+    Two independent mode blocks are provided so that the live preview and
+    full-image snap can be tuned separately without mutual interference.
+    """
+
+    preview: InspectCalibrationModeSettings = field(
+        default_factory=lambda: InspectCalibrationModeSettings(
+            downsample=None,
+            tick_min_length=150,
+        )
+    )
+    """Settings used during live preview (speed-optimised; no downscaling)."""
+
+    snap: InspectCalibrationModeSettings = field(
+        default_factory=lambda: InspectCalibrationModeSettings(
+            downsample=2,
+            tick_min_length=200,
+        )
+    )
+    """Settings used for full-image captures (accuracy-optimised; 2x downscaling)."""
+
+    def validate(self) -> None:
+        self.preview.validate("preview")
+        self.snap.validate("snap")
+
+
+# ---------------------------------------------------------------------------
 # Camera calibration settings
 # ---------------------------------------------------------------------------
 
@@ -229,6 +293,33 @@ class CameraCalibrationSettings:
 
 
 # ---------------------------------------------------------------------------
+# Inspection calibration position
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InspectionCalibrationPosition:
+    """
+    Saved stage position for the inspection calibration workflow.
+
+    Stores the XYZ coordinates (in nanometres) of the position where the
+    inspection calibration slide was last centred.  When ``is_set`` is False
+    the coordinate fields should be treated as undefined.
+    """
+
+    is_set: bool = False
+    """True when a position has been saved and the coordinates are valid."""
+
+    x_nm: int = 0
+    """Stage X coordinate in nanometres."""
+
+    y_nm: int = 0
+    """Stage Y coordinate in nanometres."""
+
+    z_nm: int = 0
+    """Stage Z coordinate in nanometres."""
+
+
+# ---------------------------------------------------------------------------
 # Top-level settings
 # ---------------------------------------------------------------------------
 
@@ -240,10 +331,18 @@ class MachineVisionSettings:
     camera_calibration: CameraCalibrationSettings = field(
         default_factory=CameraCalibrationSettings
     )
+    inspect_calibration: InspectCalibrationSettings = field(
+        default_factory=InspectCalibrationSettings
+    )
+    inspection_calibration_position: InspectionCalibrationPosition = field(
+        default_factory=InspectionCalibrationPosition
+    )
+    """Saved stage position used as the starting point for inspection calibration."""
 
     def validate(self) -> None:
         self.focus.validate()
         self.camera_calibration.validate()
+        self.inspect_calibration.validate()
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +445,35 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             calibration=calibration,
         )
 
-        return MachineVisionSettings(focus=focus, camera_calibration=camera_calibration)
+        ic_data: dict[str, Any] = data.get("inspect_calibration", {})
+        D_preview = InspectCalibrationModeSettings(downsample=None, tick_min_length=150)
+        D_snap = InspectCalibrationModeSettings(downsample=2, tick_min_length=200)
+
+        def _load_ic_mode(d: dict[str, Any], defaults: InspectCalibrationModeSettings) -> InspectCalibrationModeSettings:
+            return InspectCalibrationModeSettings(
+                downsample=d.get("downsample", defaults.downsample),
+                tick_min_length=d.get("tick_min_length", defaults.tick_min_length),
+            )
+
+        inspect_calibration = InspectCalibrationSettings(
+            preview=_load_ic_mode(ic_data.get("preview", {}), D_preview),
+            snap=_load_ic_mode(ic_data.get("snap", {}), D_snap),
+        )
+
+        icp_data: dict[str, Any] = data.get("inspection_calibration_position", {})
+        inspection_calibration_position = InspectionCalibrationPosition(
+            is_set=icp_data.get("is_set", False),
+            x_nm=icp_data.get("x_nm", 0),
+            y_nm=icp_data.get("y_nm", 0),
+            z_nm=icp_data.get("z_nm", 0),
+        )
+
+        return MachineVisionSettings(
+            focus=focus,
+            camera_calibration=camera_calibration,
+            inspect_calibration=inspect_calibration,
+            inspection_calibration_position=inspection_calibration_position,
+        )
 
     def to_dict(self, settings: MachineVisionSettings) -> dict[str, Any]:
         f = settings.focus
@@ -354,6 +481,8 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         lap = f.laplacian
         fr = f.focus_region
         cc = settings.camera_calibration
+        ic = settings.inspect_calibration
+        icp = settings.inspection_calibration_position
         return {
             "focus": {
                 "method": f.method,
@@ -387,5 +516,21 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 "move_x_ticks": cc.move_x_ticks,
                 "move_y_ticks": cc.move_y_ticks,
                 "calibration": cc.calibration.to_dict() if cc.calibration is not None else None,
+            },
+            "inspect_calibration": {
+                "preview": {
+                    "downsample": ic.preview.downsample,
+                    "tick_min_length": ic.preview.tick_min_length,
+                },
+                "snap": {
+                    "downsample": ic.snap.downsample,
+                    "tick_min_length": ic.snap.tick_min_length,
+                },
+            },
+            "inspection_calibration_position": {
+                "is_set": icp.is_set,
+                "x_nm": icp.x_nm,
+                "y_nm": icp.y_nm,
+                "z_nm": icp.z_nm,
             },
         }

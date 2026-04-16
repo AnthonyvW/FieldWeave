@@ -43,6 +43,9 @@ from common.app_context import get_app_context
 from common.logger import info, error
 from machine_vision.machine_vision_config import (
     FocusRegionSettings,
+    InspectCalibrationModeSettings,
+    InspectCalibrationSettings,
+    InspectionCalibrationPosition,
     LaplacianSettings,
     MachineVisionSettings,
     TenengradSettings,
@@ -52,6 +55,7 @@ from machine_vision.machine_vision_config import (
 
 _ORANGE = "#FFA500"
 _GREY = "#aaaaaa"
+_NM_PER_MM = 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +361,76 @@ class _FocusRegionPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Inspection Calibration panel
+# ---------------------------------------------------------------------------
+
+class _InspectCalibrationModePanel(QWidget):
+    """
+    Controls for one mode (preview or snap) of the inspection calibration.
+    """
+
+    def __init__(self, label: str) -> None:
+        super().__init__()
+        self._label = label
+        self._w: dict[str, QWidget] = {}
+        self._build()
+
+    def _build(self) -> None:
+        form = QFormLayout(self)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # downsample — spinbox with a "None" checkbox
+        ds_container = QWidget()
+        ds_row = QHBoxLayout(ds_container)
+        ds_row.setContentsMargins(0, 0, 0, 0)
+
+        ds_spin = QSpinBox()
+        ds_spin.setMinimum(1)
+        ds_spin.setMaximum(16)
+        ds_spin.setSingleStep(1)
+        ds_spin.setFixedWidth(70)
+        ds_spin.setToolTip(
+            f"Shrink each axis by this factor before processing ({self._label} mode).\n"
+            "Check 'None' to disable downscaling entirely."
+        )
+
+        ds_none = QCheckBox("None")
+        ds_none.setToolTip("When checked, downscaling is disabled (equivalent to factor 1).")
+
+        def _toggle_downsample(state: Qt.CheckState) -> None:
+            enabled = state != Qt.CheckState.Checked
+            ds_spin.setEnabled(enabled)
+            ds_spin.setStyleSheet("" if enabled else f"color: {_GREY}; background-color: #f0f0f0;")
+
+        ds_none.checkStateChanged.connect(_toggle_downsample)
+        _toggle_downsample(Qt.CheckState.Unchecked)
+
+        ds_row.addWidget(ds_spin)
+        ds_row.addWidget(ds_none)
+        ds_row.addStretch()
+        form.addRow("Downsample:", ds_container)
+        self._w["downsample"] = ds_spin
+        self._w["downsample_none"] = ds_none
+
+        # tick_min_length
+        tick_spin = QSpinBox()
+        tick_spin.setMinimum(1)
+        tick_spin.setMaximum(2000)
+        tick_spin.setSingleStep(10)
+        tick_spin.setFixedWidth(90)
+        tick_spin.setToolTip(
+            f"Minimum perpendicular pixel run (full-resolution px) required to\n"
+            "count a candidate as a tick mark. Scaled by downsample internally."
+        )
+        form.addRow("Min tick length:", tick_spin)
+        self._w["tick_min_length"] = tick_spin
+
+    @property
+    def widgets(self) -> dict[str, QWidget]:
+        return self._w
+
+
+# ---------------------------------------------------------------------------
 # Main settings widget
 # ---------------------------------------------------------------------------
 
@@ -368,7 +442,7 @@ class MachineVisionSettingsWidget(QWidget):
     """
 
     # Group names exposed for SettingsDialog sidebar sub-items.
-    _GROUP_NAMES = ["Focus Detection"]
+    _GROUP_NAMES = ["Focus Detection", "Inspection Calibration"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -377,21 +451,17 @@ class MachineVisionSettingsWidget(QWidget):
 
         self._has_unsaved_changes: bool = False
 
-        # Set to True while this widget is the one calling apply_settings so
-        # that _on_settings_changed_externally can ignore the echo-back signal
-        # and avoid clobbering the widget state with a stale repopulate.
         self._applying_settings: bool = False
 
-        # Saved baseline values for orange-on-modify tracking.
-        # Key: "<section>.<field>"  e.g. "laplacian.radius"
         self._saved_values: dict[str, object] = {}
 
-        # Registered group boxes for scroll-to support.
         self._group_boxes: dict[str, QGroupBox] = {}
 
         self._tenengrad_panel = _TenengradPanel()
         self._laplacian_panel = _LaplacianPanel()
         self._focus_region_panel = _FocusRegionPanel()
+        self._inspect_preview_panel = _InspectCalibrationModePanel("preview")
+        self._inspect_snap_panel = _InspectCalibrationModePanel("snap")
 
         self._build_ui()
         self._populate_from_settings(self._mv.settings)
@@ -427,9 +497,14 @@ class MachineVisionSettingsWidget(QWidget):
         cl.addWidget(focus_group)
         self._group_boxes["Focus Detection"] = focus_group
 
+        inspect_group = self._build_inspect_calibration_group()
+        cl.addWidget(inspect_group)
+        self._group_boxes["Inspection Calibration"] = inspect_group
+
         # Register group boxes with parent dialog for scroll-to support.
         if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
             self.parent_dialog.register_group_box("Machine Vision", "Focus Detection", focus_group)
+            self.parent_dialog.register_group_box("Machine Vision", "Inspection Calibration", inspect_group)
 
         cl.addStretch()
 
@@ -447,6 +522,77 @@ class MachineVisionSettingsWidget(QWidget):
 
         if self.parent_dialog and hasattr(self.parent_dialog, "save_btn"):
             self.parent_dialog.save_btn.clicked.connect(self._on_save)
+
+        self._refresh_inspection_position_display()
+
+    def _build_inspect_calibration_group(self) -> QGroupBox:
+        group = QGroupBox("Inspection Calibration")
+        vbox = QVBoxLayout(group)
+
+        preview_box = QGroupBox("Preview Mode")
+        preview_box.setToolTip(
+            "Settings used during live preview.\n"
+            "Speed-optimised; typically no downscaling."
+        )
+        preview_vbox = QVBoxLayout(preview_box)
+        preview_vbox.setContentsMargins(6, 6, 6, 6)
+        preview_vbox.addWidget(self._inspect_preview_panel)
+        vbox.addWidget(preview_box)
+
+        snap_box = QGroupBox("Snap Mode")
+        snap_box.setToolTip(
+            "Settings used for full-image captures.\n"
+            "Accuracy-optimised; typically uses downscaling."
+        )
+        snap_vbox = QVBoxLayout(snap_box)
+        snap_vbox.setContentsMargins(6, 6, 6, 6)
+        snap_vbox.addWidget(self._inspect_snap_panel)
+        vbox.addWidget(snap_box)
+
+        position_box = QGroupBox("Inspection Position")
+        position_box.setToolTip(
+            "Saved stage position used as the starting point for inspection calibration."
+        )
+        position_vbox = QVBoxLayout(position_box)
+        position_vbox.setContentsMargins(6, 6, 6, 6)
+        position_vbox.setSpacing(6)
+
+        self._inspection_pos_label = QLabel("Saved position: Not set")
+        self._inspection_pos_label.setObjectName("CalSavedPosLabel")
+        position_vbox.addWidget(self._inspection_pos_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        self._inspection_set_pos_btn = QPushButton("Set Position")
+        self._inspection_set_pos_btn.setToolTip("Save the current stage XYZ as the inspection calibration position")
+        self._inspection_set_pos_btn.clicked.connect(self._on_inspection_set_position_clicked)
+        btn_row.addWidget(self._inspection_set_pos_btn)
+
+        self._inspection_goto_pos_btn = QPushButton("Go to Position")
+        self._inspection_goto_pos_btn.setToolTip("Move the stage to the saved inspection calibration position")
+        self._inspection_goto_pos_btn.setEnabled(False)
+        self._inspection_goto_pos_btn.clicked.connect(self._on_inspection_goto_position_clicked)
+        btn_row.addWidget(self._inspection_goto_pos_btn)
+
+        self._inspection_clear_pos_btn = QPushButton("Clear Position")
+        self._inspection_clear_pos_btn.setToolTip("Remove the saved inspection calibration position")
+        self._inspection_clear_pos_btn.setEnabled(False)
+        self._inspection_clear_pos_btn.clicked.connect(self._on_inspection_clear_position_clicked)
+        btn_row.addWidget(self._inspection_clear_pos_btn)
+
+        btn_row.addStretch()
+        position_vbox.addLayout(btn_row)
+
+        self._inspection_pos_status = QLabel("")
+        self._inspection_pos_status.setObjectName("CalStatusLabel")
+        self._inspection_pos_status.setWordWrap(False)
+        self._inspection_pos_status.hide()
+        position_vbox.addWidget(self._inspection_pos_status)
+
+        vbox.addWidget(position_box)
+
+        return group
 
     def _build_focus_group(self) -> QGroupBox:
         group = QGroupBox("Focus Detection")
@@ -497,6 +643,22 @@ class MachineVisionSettingsWidget(QWidget):
         self._connect_tenengrad_signals()
         self._connect_laplacian_signals()
         self._connect_focus_region_signals()
+        self._connect_inspect_calibration_signals()
+
+    def _connect_inspect_calibration_signals(self) -> None:
+        for mode, panel in (("preview", self._inspect_preview_panel), ("snap", self._inspect_snap_panel)):
+            w = panel.widgets
+            w["tick_min_length"].valueChanged.connect(
+                lambda v, m=mode: self._on_inspect_calibration_changed(m, "tick_min_length", v)
+            )
+            w["downsample"].valueChanged.connect(
+                lambda v, m=mode: self._on_inspect_calibration_changed(m, "downsample", v)
+            )
+            w["downsample_none"].checkStateChanged.connect(
+                lambda s, m=mode: self._on_inspect_calibration_changed(
+                    m, "downsample_none", s == Qt.CheckState.Checked
+                )
+            )
 
     def _connect_tenengrad_signals(self) -> None:
         w = self._tenengrad_panel.widgets
@@ -577,6 +739,7 @@ class MachineVisionSettingsWidget(QWidget):
             self._populate_tenengrad(f.tenengrad)
             self._populate_laplacian(f.laplacian)
             self._populate_focus_region(f.focus_region)
+            self._populate_inspect_calibration(settings.inspect_calibration)
         finally:
             self._block_all_signals(False)
 
@@ -618,6 +781,19 @@ class MachineVisionSettingsWidget(QWidget):
                 widget = w.get(f"{k}{suffix}")
                 if widget is not None:
                     widget.setEnabled(fr.enabled)
+
+    def _populate_inspect_calibration(self, ic: InspectCalibrationSettings) -> None:
+        for mode, panel, mode_settings in (
+            ("preview", self._inspect_preview_panel, ic.preview),
+            ("snap", self._inspect_snap_panel, ic.snap),
+        ):
+            w = panel.widgets
+            is_none = mode_settings.downsample is None
+            w["downsample_none"].setChecked(is_none)
+            w["downsample"].setEnabled(not is_none)
+            w["downsample"].setStyleSheet("" if not is_none else f"color: {_GREY}; background-color: #f0f0f0;")
+            w["downsample"].setValue(mode_settings.downsample if mode_settings.downsample is not None else 1)
+            w["tick_min_length"].setValue(mode_settings.tick_min_length)
 
     def _set_float_row(
         self,
@@ -664,6 +840,10 @@ class MachineVisionSettingsWidget(QWidget):
             "focus_region.right": fr.right,
             "focus_region.top": fr.top,
             "focus_region.bottom": fr.bottom,
+            "inspect_calibration.preview.downsample": settings.inspect_calibration.preview.downsample,
+            "inspect_calibration.preview.tick_min_length": settings.inspect_calibration.preview.tick_min_length,
+            "inspect_calibration.snap.downsample": settings.inspect_calibration.snap.downsample,
+            "inspect_calibration.snap.tick_min_length": settings.inspect_calibration.snap.tick_min_length,
         }
 
     def _check_modified(self, key: str, current_value: object) -> bool:
@@ -754,6 +934,123 @@ class MachineVisionSettingsWidget(QWidget):
         self._mark_field(f"focus_region.{field}", field, self._focus_region_panel.widgets, value)
         self._set_unsaved(True)
 
+    def _on_inspect_calibration_changed(self, mode: str, field: str, value: object) -> None:
+        """Apply a changed inspect-calibration field to the manager and update orange state."""
+        s = self._mv._copy_settings()
+        mode_settings = s.inspect_calibration.preview if mode == "preview" else s.inspect_calibration.snap
+        if field == "downsample_none":
+            mode_settings.downsample = None if value else (
+                (self._inspect_preview_panel if mode == "preview" else self._inspect_snap_panel)
+                .widgets["downsample"].value()
+            )
+        else:
+            setattr(mode_settings, field, value)
+        self._applying_settings = True
+        self._mv.apply_settings(s)
+        self._applying_settings = False
+        saved_key = f"inspect_calibration.{mode}.{field if field != 'downsample_none' else 'downsample'}"
+        panel = self._inspect_preview_panel if mode == "preview" else self._inspect_snap_panel
+        current = mode_settings.downsample if field == "downsample_none" else value
+        self._mark_field(saved_key, field if field != "downsample_none" else "downsample_none", panel.widgets, current)
+        self._set_unsaved(True)
+
+    # ------------------------------------------------------------------
+    # Inspection calibration position handlers
+    # ------------------------------------------------------------------
+
+    def _refresh_inspection_position_display(self) -> None:
+        try:
+            icp = self._mv.settings.inspection_calibration_position
+            if icp.is_set:
+                x_mm = icp.x_nm / _NM_PER_MM
+                y_mm = icp.y_nm / _NM_PER_MM
+                z_mm = icp.z_nm / _NM_PER_MM
+                self._inspection_pos_label.setText(
+                    f"Saved X: {x_mm:.3f}  Y: {y_mm:.3f}  Z: {z_mm:.3f} mm"
+                )
+                self._inspection_goto_pos_btn.setEnabled(True)
+                self._inspection_clear_pos_btn.setEnabled(True)
+            else:
+                self._inspection_pos_label.setText("Saved position: Not set")
+                self._inspection_goto_pos_btn.setEnabled(False)
+                self._inspection_clear_pos_btn.setEnabled(False)
+        except Exception:
+            pass
+
+    def _set_inspection_status(self, text: str) -> None:
+        self._inspection_pos_status.setText(text)
+        self._inspection_pos_status.setVisible(bool(text))
+
+    def _on_inspection_set_position_clicked(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.is_ready():
+            self._set_inspection_status("Motion controller not ready.")
+            return
+        try:
+            pos = motion.get_position()
+        except Exception as exc:
+            error(f"MachineVisionSettings: get_position failed — {exc}")
+            self._set_inspection_status("Could not read stage position.")
+            return
+        s = self._mv._copy_settings()
+        s.inspection_calibration_position.x_nm = pos.x
+        s.inspection_calibration_position.y_nm = pos.y
+        s.inspection_calibration_position.z_nm = pos.z
+        s.inspection_calibration_position.is_set = True
+        self._mv.apply_settings(s)
+        self._mv.save_settings()
+        info(
+            f"[MachineVisionSettings] Inspection position saved: "
+            f"X={pos.x / _NM_PER_MM:.3f} mm  Y={pos.y / _NM_PER_MM:.3f} mm  Z={pos.z / _NM_PER_MM:.3f} mm"
+        )
+        self._refresh_inspection_position_display()
+        self._set_inspection_status(
+            f"Position saved: ({pos.x / _NM_PER_MM:.3f}, {pos.y / _NM_PER_MM:.3f}, {pos.z / _NM_PER_MM:.3f}) mm"
+        )
+
+    def _on_inspection_goto_position_clicked(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.is_ready():
+            self._set_inspection_status("Motion controller not ready.")
+            return
+        icp = self._mv.settings.inspection_calibration_position
+        if not icp.is_set:
+            self._set_inspection_status("No inspection position saved.")
+            return
+        from motion.models import Position
+        try:
+            motion.move_to_position(
+                Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm),
+                wait=False,
+            )
+        except Exception as exc:
+            error(f"MachineVisionSettings: move_to_position failed — {exc}")
+            self._set_inspection_status("Move failed — see log.")
+            return
+        self._set_inspection_status(
+            f"Moving to ({icp.x_nm / _NM_PER_MM:.3f}, "
+            f"{icp.y_nm / _NM_PER_MM:.3f}, "
+            f"{icp.z_nm / _NM_PER_MM:.3f}) mm…"
+        )
+
+    def _on_inspection_clear_position_clicked(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None:
+            return
+        s = self._mv._copy_settings()
+        s.inspection_calibration_position.x_nm = 0
+        s.inspection_calibration_position.y_nm = 0
+        s.inspection_calibration_position.z_nm = 0
+        s.inspection_calibration_position.is_set = False
+        self._mv.apply_settings(s)
+        self._mv.save_settings()
+        info("[MachineVisionSettings] Inspection calibration position cleared")
+        self._refresh_inspection_position_display()
+        self._set_inspection_status("Inspection position cleared.")
+
     # ------------------------------------------------------------------
     # External settings change
     # ------------------------------------------------------------------
@@ -788,7 +1085,13 @@ class MachineVisionSettingsWidget(QWidget):
                 ctx.toast.error(f"Save failed: {exc}", duration=3000)
 
     def _clear_all_orange(self) -> None:
-        for panel in (self._tenengrad_panel, self._laplacian_panel, self._focus_region_panel):
+        for panel in (
+            self._tenengrad_panel,
+            self._laplacian_panel,
+            self._focus_region_panel,
+            self._inspect_preview_panel,
+            self._inspect_snap_panel,
+        ):
             for w in panel.widgets.values():
                 self._apply_orange(w, False)
         self._apply_orange(self._method_combo, False)
@@ -823,7 +1126,13 @@ class MachineVisionSettingsWidget(QWidget):
 
     def _block_all_signals(self, block: bool) -> None:
         self._method_combo.blockSignals(block)
-        for panel in (self._tenengrad_panel, self._laplacian_panel, self._focus_region_panel):
+        for panel in (
+            self._tenengrad_panel,
+            self._laplacian_panel,
+            self._focus_region_panel,
+            self._inspect_preview_panel,
+            self._inspect_snap_panel,
+        ):
             for w in panel.widgets.values():
                 w.blockSignals(block)
 

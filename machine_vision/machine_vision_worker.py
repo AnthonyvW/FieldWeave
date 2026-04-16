@@ -38,6 +38,11 @@ from machine_vision.focus_detection import (
     apply_focus_overlay,
     compute_focus_scores,
 )
+from machine_vision.calibration_bar_detection import (
+    AxisState,
+    BarDetectionResult,
+    process_frame,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +80,22 @@ class FocusResult:
     """Which focus measure produced this result."""
 
 
+@dataclass
+class InspectCalibrationResult:
+    """
+    Result of a single calibration-bar inspection pass.
+
+    All arrays are freshly allocated (not views into any shared buffer) and
+    are safe to read from the GUI thread after the signal is delivered.
+    """
+
+    detection: BarDetectionResult
+    """Raw detection result from the vision pipeline."""
+
+    source_width: int
+    source_height: int
+
+
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
@@ -92,6 +113,7 @@ class MachineVisionWorker(QObject):
     analysis_error = Signal(str)
     calibration_ready = Signal(object)    # CameraCalibration
     calibration_error = Signal(str)
+    inspect_calibration_result_ready = Signal(object)   # InspectCalibrationResult
 
     # Active method — controls which parameter block is used.
     focus_method: FocusMethod = FOCUS_METHOD_LAPLACIAN
@@ -121,11 +143,71 @@ class MachineVisionWorker(QObject):
     focus_region_top: float = 0.0
     focus_region_bottom: float = 0.0
 
+    # Inspect-calibration parameters — preview mode (live overlay)
+    inspect_calibration_preview_downsample: int | None = None
+    inspect_calibration_preview_tick_min_length: int = 150
+
+    # Inspect-calibration parameters — snap mode (full-image capture)
+    inspect_calibration_snap_downsample: int | None = 2
+    inspect_calibration_snap_tick_min_length: int = 200
+
     # Shared
     overlay_colormap: int = cv2.COLORMAP_JET
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._axis_state = AxisState()
+
+    @Slot(bytes, int, int, bool)
+    def run_inspect_calibration(self, frame_bytes: bytes, width: int, height: int, snap: bool = False) -> None:
+        """
+        Run a calibration-bar inspection pass on the given RGB888 frame.
+
+        Detects the bar's orientation and tick marks, then emits
+        ``inspect_calibration_result_ready`` with an ``InspectCalibrationResult``.
+        The ``AxisState`` is preserved across calls so the confirmed-axis
+        hysteresis works correctly during live preview.
+
+        Pass ``snap=True`` to use the snap-mode parameters (2x downsampling,
+        tick_min_length 200) instead of the preview-mode parameters (no
+        downsampling, tick_min_length 150).
+
+        frame_bytes must be a *copy* of the raw RGB888 data
+        (stride == width * 3).
+        """
+        try:
+            arr = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3)).copy()
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+            if snap:
+                downsample = self.inspect_calibration_snap_downsample
+                tick_min_length = self.inspect_calibration_snap_tick_min_length
+            else:
+                downsample = self.inspect_calibration_preview_downsample
+                tick_min_length = self.inspect_calibration_preview_tick_min_length
+
+            detection = process_frame(
+                bgr,
+                self._axis_state,
+                downsample=downsample,
+                tick_min_length=tick_min_length,
+            )
+
+            result = InspectCalibrationResult(
+                detection=detection,
+                source_width=width,
+                source_height=height,
+            )
+            self.inspect_calibration_result_ready.emit(result)
+
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"MachineVisionWorker: inspect calibration failed:\n{msg}")
+            self.analysis_error.emit(msg)
+
+    def reset_inspect_calibration_state(self) -> None:
+        """Reset the axis hysteresis state. Call when starting a new inspection session."""
+        self._axis_state = AxisState()
 
     @Slot(bytes, int, int)
     def run_focus_analysis(self, frame_bytes: bytes, width: int, height: int) -> None:

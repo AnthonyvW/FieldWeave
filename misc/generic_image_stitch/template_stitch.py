@@ -203,6 +203,127 @@ def crop_black_borders(image: cv2.Mat) -> cv2.Mat:
     return image
 
 
+def _rotate_image(image: cv2.Mat, degrees: int) -> cv2.Mat:
+    """Rotate image by 0, 90, 180, or 270 degrees clockwise."""
+    if degrees == 0:
+        return image
+    if degrees == 90:
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if degrees == 180:
+        return cv2.rotate(image, cv2.ROTATE_180)
+    if degrees == 270:
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    raise ValueError(f"degrees must be 0, 90, 180, or 270; got {degrees}")
+
+
+def _find_scalebar_rect(image: cv2.Mat) -> tuple[int, int, int, int] | None:
+    """Return (x, y, w, h) of the scale bar bounding box, or None if not found.
+
+    Looks for the most elongated horizontal contour, which is assumed to be
+    the scale bar. The image passed in should already be oriented so the bar
+    is expected to run horizontally.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 10
+    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    img_h, img_w = image.shape[:2]
+    best: tuple[int, int, int, int] | None = None
+    best_score = 0.0
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w < img_w * 0.1 or h == 0:
+            continue
+        aspect = w / h
+        if aspect < 4:
+            continue
+        score = float(w) * aspect
+        if score > best_score:
+            best_score = score
+            best = (x, y, w, h)
+
+    return best
+
+
+def _text_mass_above_vs_below(image: cv2.Mat, bar_y: int, bar_h: int) -> tuple[float, float]:
+    """Return (mass_above, mass_below) of text-like blobs relative to the bar.
+
+    Small dark blobs consistent with printed digits are counted by total area
+    on each side of the bar's vertical midpoint.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    img_h, img_w = gray.shape
+
+    bar_mid = bar_y + bar_h // 2
+
+    mask = np.ones_like(gray, dtype=np.uint8)
+    mask[max(0, bar_y - 4):bar_y + bar_h + 4, :] = 0
+
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    binary = cv2.bitwise_and(binary, binary, mask=mask)
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    mass_above = 0.0
+    mass_below = 0.0
+    max_blob = img_h * img_w * 0.01
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        area = w * h
+        if area < 10 or area > max_blob:
+            continue
+        cy = y + h // 2
+        if cy < bar_mid:
+            mass_above += area
+        else:
+            mass_below += area
+
+    return float(mass_above), float(mass_below)
+
+
+def detect_orientation(image: cv2.Mat) -> int:
+    """Return the clockwise rotation in degrees (0, 90, 180, 270) needed to
+    orient the panorama with the scale bar horizontal and numbers above it.
+
+    The aspect ratio constrains candidates to two 180°-apart options, then
+    the text-above-bar heuristic selects between them.
+    """
+    h, w = image.shape[:2]
+    candidates = [0, 180] if w >= h else [90, 270]
+
+    print("  Detecting orientation...")
+
+    best_rotation = candidates[0]
+    best_ratio = -1.0
+
+    for rot in candidates:
+        rotated = _rotate_image(image, rot)
+        bar = _find_scalebar_rect(rotated)
+        if bar is None:
+            print(f"    {rot}°: scale bar not found")
+            continue
+        bx, by, bw, bh = bar
+        above, below = _text_mass_above_vs_below(rotated, by, bh)
+        total = above + below
+        ratio = above / total if total > 0 else 0.0
+        print(f"    {rot}°: bar at y={by} h={bh} w={bw} | text above={above:.0f} below={below:.0f} ratio={ratio:.3f}")
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_rotation = rot
+
+    print(f"  Selected rotation: {best_rotation}° (text-above ratio={best_ratio:.3f})")
+    return best_rotation
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Stitch one JPEG per subfolder into a single panorama named after the root folder.",
@@ -211,12 +332,15 @@ def main() -> int:
 Examples:
   python siftstitch.py /path/to/root
   python siftstitch.py /path/to/root --no-crop
+  python siftstitch.py /path/to/root --no-rotate
         """,
     )
     parser.add_argument("input_folder", type=str,
                         help="Root folder containing subfolders, each with one JPEG image")
     parser.add_argument("--no-crop", action="store_true",
                         help="Skip automatic cropping of black borders")
+    parser.add_argument("--no-rotate", action="store_true",
+                        help="Skip automatic orientation correction")
 
     args = parser.parse_args()
 
@@ -245,6 +369,14 @@ Examples:
     if not args.no_crop:
         print("Cropping black borders...")
         result = crop_black_borders(result)
+
+    if not args.no_rotate:
+        rotation = detect_orientation(result)
+        if rotation != 0:
+            print(f"Rotating panorama {rotation}° clockwise...")
+            result = _rotate_image(result, rotation)
+        else:
+            print("Orientation correct, no rotation needed.")
 
     root_name = os.path.basename(input_folder)
     output_path = os.path.join(input_folder, f"{root_name}.jpg")

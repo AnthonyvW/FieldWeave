@@ -13,6 +13,7 @@ from UI.widgets.preview_overlay.channel import ChannelButton, ChannelOverlay
 from UI.widgets.preview_overlay.click_to_move import ClickToMoveOverlay
 from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverlay
 from UI.widgets.preview_overlay.focus import FocusButton, FocusOverlay
+from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationButton, InspectCalibrationOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
@@ -226,6 +227,16 @@ class OverlayController:
         self._preview._video_label.update()
 
     @property
+    def inspect_calibration(self) -> bool:
+        return self._preview._inspect_calibration_overlay.enabled
+
+    @inspect_calibration.setter
+    def inspect_calibration(self, enabled: bool) -> None:
+        self._preview._inspect_calibration_button.setChecked(enabled)
+        self._preview._inspect_calibration_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    @property
     def click_to_move(self) -> bool:
         return self._preview._click_to_move_overlay.enabled
 
@@ -315,12 +326,14 @@ class CameraPreview(QFrame):
         self._crosshair_overlay = CrosshairOverlay()
         self._grid_overlay = GridOverlay()
         self._focus_overlay = FocusOverlay()
+        self._inspect_calibration_overlay = InspectCalibrationOverlay()
         self._channel_overlay = ChannelOverlay()
         self._click_to_move_overlay = ClickToMoveOverlay()
 
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
         self._video_label.add_overlay(self._focus_overlay)
+        self._video_label.add_overlay(self._inspect_calibration_overlay)
         self._video_label.add_overlay(self._click_to_move_overlay)
 
         self._crosshair_button = CrosshairButton(self)
@@ -341,14 +354,24 @@ class CameraPreview(QFrame):
         self._focus_button.toggled_focus.connect(self._focus_overlay.set_enabled)
         self._focus_button.toggled_focus.connect(self._video_label.update)
 
+        self._inspect_calibration_button = InspectCalibrationButton(self)
+        self._inspect_calibration_button.move(10, 115)
+        self._inspect_calibration_button.raise_()
+        self._inspect_calibration_button.toggled_inspect_calibration.connect(
+            self._inspect_calibration_overlay.set_enabled
+        )
+        self._inspect_calibration_button.toggled_inspect_calibration.connect(
+            self._video_label.update
+        )
+
         self._channel_button = ChannelButton(self)
-        self._channel_button.move(10, 115)
+        self._channel_button.move(10, 150)
         self._channel_button.raise_()
         self._channel_button.menu.raise_()
         self._channel_button.channel_changed.connect(self._on_channel_changed)
 
         self._hide_preview_button = EyeToggleButton(self)
-        self._hide_preview_button.move(10, 150)
+        self._hide_preview_button.move(10, 185)
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
@@ -357,6 +380,9 @@ class CameraPreview(QFrame):
         self._video_label.set_click_handler(self._click_to_move_overlay)
 
         get_app_context().machine_vision.focus_result_ready.connect(
+            lambda _result: self._video_label.update()
+        )
+        get_app_context().machine_vision.inspect_calibration_result_ready.connect(
             lambda _result: self._video_label.update()
         )
 
