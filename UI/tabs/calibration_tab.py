@@ -55,16 +55,7 @@ class CalibrationTab(QWidget):
         self._calibration_list.setMaximumWidth(250)
         self._calibration_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._calibration_list.addItems(_SIDEBAR_TITLES)
-        self._calibration_list.setStyleSheet(
-            "QListWidget {"
-            "  font-size: 13px; padding: 5px;"
-            "  border: none; border-right: 2px solid #b3b4b6;"
-            "  background: #f8f8f8;"
-            "}"
-            "QListWidget::item { padding: 12px; border-bottom: 1px solid #e0e0e0; color: #000000; }"
-            "QListWidget::item:selected { background: #dbdbdb; color: #000000; border: none; }"
-            "QListWidget::item:hover { background: #e8e8e8; color: #000000; }"
-        )
+        self._calibration_list.setObjectName("CalibrationSidebar")
         self._calibration_list.currentRowChanged.connect(self._on_calibration_selected)
         sidebar_layout.addWidget(self._calibration_list)
         main_layout.addWidget(sidebar)

@@ -52,19 +52,17 @@ class _ConfirmDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("Ready to start calibration scale routine?")
-        title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        title.setObjectName("CalScaleDialogTitle")
         layout.addWidget(title)
 
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgb(200, 200, 200);")
+        line.setObjectName("SampleDivider")
         layout.addWidget(line)
 
         form = QFormLayout()
         form.setSpacing(6)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        label_style = "font-size: 13px; color: #555;"
-        value_style = "font-size: 13px; font-weight: bold;"
 
         rows: list[tuple[str, str]] = [
             ("Start X",      f"{current_x_mm:.4f} mm"),
@@ -76,9 +74,9 @@ class _ConfirmDialog(QDialog):
         ]
         for label_text, value_text in rows:
             lbl = QLabel(label_text + ":")
-            lbl.setStyleSheet(label_style)
+            lbl.setObjectName("CalScaleRowLabel")
             val = QLabel(value_text)
-            val.setStyleSheet(value_style)
+            val.setObjectName("CalScaleRowValue")
             val.setWordWrap(True)
             form.addRow(lbl, val)
 
@@ -89,7 +87,7 @@ class _ConfirmDialog(QDialog):
             "along the bar saving images at each position until the end is reached."
         )
         note.setWordWrap(True)
-        note.setStyleSheet("font-size: 12px; color: #666;")
+        note.setObjectName("CalScaleNote")
         layout.addWidget(note)
 
         buttons = QDialogButtonBox(
@@ -125,31 +123,14 @@ class InspectionCalibrationScaleWidget(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(12)
 
-        group_style = """
-            QGroupBox {
-                font-size: 13px;
-                font-weight: normal;
-                border: 1px solid rgb(180, 180, 180);
-                border-radius: 0px;
-                margin-top: 6px;
-                padding-top: 4px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 3px;
-            }
-        """
-
         # ---- Saved position group ----------------------------------------
         position_group = QGroupBox("Scale Bar Start Position")
-        position_group.setStyleSheet(group_style)
         pos_vbox = QVBoxLayout(position_group)
         pos_vbox.setContentsMargins(10, 8, 10, 8)
         pos_vbox.setSpacing(6)
 
         self._pos_label = QLabel("Saved position: Not set")
-        self._pos_label.setStyleSheet("font-size: 12px; color: #444;")
+        self._pos_label.setObjectName("CalScalePosLabel")
         pos_vbox.addWidget(self._pos_label)
 
         pos_btn_row = QHBoxLayout()
@@ -158,7 +139,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._set_pos_btn = QPushButton("Set Position")
         self._set_pos_btn.setFixedHeight(30)
         self._set_pos_btn.setToolTip("Save the current stage XYZ as the scale bar start position")
-        self._set_pos_btn.setStyleSheet(self._secondary_btn_style())
+        self._set_pos_btn.setObjectName("CalSecondaryButton")
         self._set_pos_btn.clicked.connect(self._on_set_position_clicked)
         pos_btn_row.addWidget(self._set_pos_btn)
 
@@ -166,7 +147,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._goto_pos_btn.setFixedHeight(30)
         self._goto_pos_btn.setEnabled(False)
         self._goto_pos_btn.setToolTip("Move the stage to the saved scale bar start position")
-        self._goto_pos_btn.setStyleSheet(self._secondary_btn_style())
+        self._goto_pos_btn.setObjectName("CalSecondaryButton")
         self._goto_pos_btn.clicked.connect(self._on_goto_position_clicked)
         pos_btn_row.addWidget(self._goto_pos_btn)
 
@@ -174,7 +155,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._clear_pos_btn.setFixedHeight(30)
         self._clear_pos_btn.setEnabled(False)
         self._clear_pos_btn.setToolTip("Remove the saved scale bar start position")
-        self._clear_pos_btn.setStyleSheet(self._secondary_btn_style())
+        self._clear_pos_btn.setObjectName("CalSecondaryButton")
         self._clear_pos_btn.clicked.connect(self._on_clear_position_clicked)
         pos_btn_row.addWidget(self._clear_pos_btn)
 
@@ -182,7 +163,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         pos_vbox.addLayout(pos_btn_row)
 
         self._pos_status_label = QLabel("")
-        self._pos_status_label.setStyleSheet("font-size: 12px; color: #444; padding: 2px 0;")
+        self._pos_status_label.setObjectName("CalScaleStatusLabel")
         self._pos_status_label.hide()
         pos_vbox.addWidget(self._pos_status_label)
 
@@ -190,17 +171,16 @@ class InspectionCalibrationScaleWidget(QWidget):
 
         # ---- Calibration info group --------------------------------------
         cal_info_group = QGroupBox("Calibration Info")
-        cal_info_group.setStyleSheet(group_style)
         cal_info_vbox = QVBoxLayout(cal_info_group)
         cal_info_vbox.setContentsMargins(10, 8, 10, 8)
         cal_info_vbox.setSpacing(4)
 
         self._last_calibrated_label = QLabel("Last calibrated: —")
-        self._last_calibrated_label.setStyleSheet("font-size: 12px; color: #444;")
+        self._last_calibrated_label.setObjectName("CalScalePosLabel")
         cal_info_vbox.addWidget(self._last_calibrated_label)
 
         self._dpi_label = QLabel("DPI: —")
-        self._dpi_label.setStyleSheet("font-size: 12px; color: #444;")
+        self._dpi_label.setObjectName("CalScalePosLabel")
         cal_info_vbox.addWidget(self._dpi_label)
 
         main_layout.addWidget(cal_info_group)
@@ -224,25 +204,9 @@ class InspectionCalibrationScaleWidget(QWidget):
         main_layout.addWidget(output_group)
 
         # ---- Start button ------------------------------------------------
-        self._start_btn = QPushButton("Start Routine")
+        self._start_btn = QPushButton("Start Automation")
         self._start_btn.setFixedHeight(34)
-        self._start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f28c28;
-                color: white;
-                border: 1px solid #c97020;
-                border-radius: 0px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover   { background-color: #d97a20; }
-            QPushButton:pressed { background-color: #bf6a18; }
-            QPushButton:disabled {
-                background-color: rgb(208, 211, 214);
-                color: rgb(150, 153, 156);
-                border: 1px solid rgb(170, 173, 176);
-            }
-        """)
+        self._start_btn.setObjectName("CalScaleStart")
         self._start_btn.clicked.connect(self._on_start_clicked)
         main_layout.addWidget(self._start_btn)
 
@@ -254,23 +218,13 @@ class InspectionCalibrationScaleWidget(QWidget):
 
         self._pause_resume_btn = QPushButton("Pause")
         self._pause_resume_btn.setFixedHeight(32)
-        self._pause_resume_btn.setStyleSheet(self._secondary_btn_style())
+        self._pause_resume_btn.setObjectName("CalSecondaryButton")
         self._pause_resume_btn.clicked.connect(self._on_pause_resume_clicked)
         controls_layout.addWidget(self._pause_resume_btn)
 
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setFixedHeight(32)
-        self._stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgb(200, 80, 70);
-                color: white;
-                border: 1px solid rgb(160, 60, 50);
-                border-radius: 0px;
-                font-size: 13px;
-            }
-            QPushButton:hover   { background-color: rgb(180, 65, 55); }
-            QPushButton:pressed { background-color: rgb(160, 55, 45); }
-        """)
+        self._stop_btn.setObjectName("CalScaleStop")
         self._stop_btn.clicked.connect(self._on_stop_clicked)
         controls_layout.addWidget(self._stop_btn)
 
@@ -280,7 +234,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         # ---- Status label ------------------------------------------------
         self._status_label = QLabel("")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._status_label.setStyleSheet("font-size: 12px; color: #444; padding: 2px 0;")
+        self._status_label.setObjectName("CalScaleStatusLabel")
         main_layout.addWidget(self._status_label)
 
         main_layout.addStretch(1)
@@ -296,25 +250,6 @@ class InspectionCalibrationScaleWidget(QWidget):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _secondary_btn_style() -> str:
-        return """
-            QPushButton {
-                background-color: rgb(208, 211, 214);
-                border: 1px solid rgb(150, 150, 150);
-                border-radius: 0px;
-                font-size: 13px;
-                padding: 0 8px;
-            }
-            QPushButton:hover    { background-color: rgb(187, 190, 193); }
-            QPushButton:pressed  { background-color: rgb(170, 173, 175); }
-            QPushButton:disabled {
-                background-color: rgb(225, 227, 229);
-                color: rgb(160, 163, 166);
-                border: 1px solid rgb(190, 193, 196);
-            }
-        """
 
     def _get_motion(self):
         ctx = get_app_context()

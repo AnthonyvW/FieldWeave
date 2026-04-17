@@ -158,6 +158,28 @@ def apply_style(app: QApplication) -> None:
             border-radius: 10px;
         }}
 
+        QListWidget#CalibrationSidebar {{
+            font-size: 13px;
+            padding: 5px;
+            border: none;
+            border-right: 2px solid #b3b4b6;
+            background: #f8f8f8;
+        }}
+        QListWidget#CalibrationSidebar::item {{
+            padding: 12px;
+            border-bottom: 1px solid #e0e0e0;
+            color: #000000;
+        }}
+        QListWidget#CalibrationSidebar::item:selected {{
+            background: #dbdbdb;
+            color: #000000;
+            border: none;
+        }}
+        QListWidget#CalibrationSidebar::item:hover {{
+            background: #e8e8e8;
+            color: #000000;
+        }}
+
         QFrame#StepCard {{
             background: rgba(0,0,0,0.03);
             border: 1px solid rgba(0,0,0,0.06);
@@ -577,6 +599,62 @@ def apply_style(app: QApplication) -> None:
         }}
         QPushButton#CalStopCapture:pressed {{
             background-color: rgb(160, 55, 45);
+        }}
+
+
+        /* Inspection calibration scale — start button */
+        QPushButton#CalScaleStart {{
+            background-color: #f28c28;
+            color: white;
+            border: 1px solid #c97020;
+            border-radius: 0px;
+            font-size: 13px;
+            font-weight: bold;
+        }}
+        QPushButton#CalScaleStart:hover {{ background-color: #d97a20; }}
+        QPushButton#CalScaleStart:pressed {{ background-color: #bf6a18; }}
+        QPushButton#CalScaleStart:disabled {{
+            background-color: rgb(208, 211, 214);
+            color: rgb(150, 153, 156);
+            border: 1px solid rgb(170, 173, 176);
+        }}
+
+        /* Inspection calibration scale — stop button */
+        QPushButton#CalScaleStop {{
+            background-color: rgb(200, 80, 70);
+            color: white;
+            border: 1px solid rgb(160, 60, 50);
+            border-radius: 0px;
+            font-size: 13px;
+        }}
+        QPushButton#CalScaleStop:hover {{ background-color: rgb(180, 65, 55); }}
+        QPushButton#CalScaleStop:pressed {{ background-color: rgb(160, 55, 45); }}
+
+        /* Inspection calibration scale — label roles */
+        QLabel#CalScalePosLabel {{
+            font-size: 12px;
+            color: #444;
+        }}
+        QLabel#CalScaleStatusLabel {{
+            font-size: 12px;
+            color: #444;
+            padding: 2px 0;
+        }}
+        QLabel#CalScaleDialogTitle {{
+            font-size: 14px;
+            font-weight: bold;
+        }}
+        QLabel#CalScaleRowLabel {{
+            font-size: 13px;
+            color: #555;
+        }}
+        QLabel#CalScaleRowValue {{
+            font-size: 13px;
+            font-weight: bold;
+        }}
+        QLabel#CalScaleNote {{
+            font-size: 12px;
+            color: #666;
         }}
 
         """
