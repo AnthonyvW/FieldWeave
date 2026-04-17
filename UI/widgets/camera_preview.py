@@ -13,7 +13,7 @@ from UI.widgets.preview_overlay.channel import ChannelButton, ChannelOverlay
 from UI.widgets.preview_overlay.click_to_move import ClickToMoveOverlay
 from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverlay
 from UI.widgets.preview_overlay.focus import FocusButton, FocusOverlay
-from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationButton, InspectCalibrationOverlay
+from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
@@ -232,7 +232,6 @@ class OverlayController:
 
     @inspect_calibration.setter
     def inspect_calibration(self, enabled: bool) -> None:
-        self._preview._inspect_calibration_button.setChecked(enabled)
         self._preview._inspect_calibration_overlay.set_enabled(enabled)
         self._preview._video_label.update()
 
@@ -354,24 +353,14 @@ class CameraPreview(QFrame):
         self._focus_button.toggled_focus.connect(self._focus_overlay.set_enabled)
         self._focus_button.toggled_focus.connect(self._video_label.update)
 
-        self._inspect_calibration_button = InspectCalibrationButton(self)
-        self._inspect_calibration_button.move(10, 115)
-        self._inspect_calibration_button.raise_()
-        self._inspect_calibration_button.toggled_inspect_calibration.connect(
-            self._inspect_calibration_overlay.set_enabled
-        )
-        self._inspect_calibration_button.toggled_inspect_calibration.connect(
-            self._video_label.update
-        )
-
         self._channel_button = ChannelButton(self)
-        self._channel_button.move(10, 150)
+        self._channel_button.move(10, 115)
         self._channel_button.raise_()
         self._channel_button.menu.raise_()
         self._channel_button.channel_changed.connect(self._on_channel_changed)
 
         self._hide_preview_button = EyeToggleButton(self)
-        self._hide_preview_button.move(10, 185)
+        self._hide_preview_button.move(10, 150)
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 

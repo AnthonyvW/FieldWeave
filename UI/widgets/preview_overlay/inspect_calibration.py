@@ -13,12 +13,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PySide6.QtCore import Qt, QRect, Slot, Signal
+from PySide6.QtCore import QRect, Slot
 from PySide6.QtGui import QPainter, QColor, QPen, QFont
-from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 
 from common.app_context import get_app_context
-from common.logger import info
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
 if TYPE_CHECKING:
@@ -186,40 +184,3 @@ class InspectCalibrationOverlay(Overlay):
             painter.drawText(rect.left() + 5, rect.bottom() - 8, self._status_text)
 
         painter.restore()
-
-
-class InspectCalibrationButton(QPushButton):
-    """
-    Checkable overlay button for the inspect-calibration overlay.
-
-    The icon uses two stacked unicode characters that suggest a ruled
-    calibration bar with tick marks.
-    """
-
-    toggled_inspect_calibration = Signal(bool)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("InspectCalibrationButton")
-        self.setCheckable(True)
-        self.setFixedSize(30, 30)
-        self.setToolTip("Toggle Inspect Calibration Overlay")
-        self.clicked.connect(self._on_clicked)
-        self._build_icon_labels()
-
-    def _build_icon_labels(self) -> None:
-        top = QLabel("╤╤╤", self)
-        top.setObjectName("InspectCalibrationOverlayLabel")
-        top.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        top.setGeometry(0, -2, 30, 30)
-        top.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        bar = QLabel("━━━", self)
-        bar.setObjectName("InspectCalibrationOverlayLabel")
-        bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bar.setGeometry(0, 2, 30, 30)
-        bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-    def _on_clicked(self, checked: bool) -> None:
-        info(f"Inspect Calibration Overlay Toggled {'on' if checked else 'off'}")
-        self.toggled_inspect_calibration.emit(checked)

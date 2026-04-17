@@ -13,7 +13,7 @@ from UI.tabs.calibration_pages.camera_space_calibration import (
     CameraSpaceCalibrationPage,
     CameraSpaceCalibrationWidget,
 )
-from UI.tabs.calibration_pages.dpi_calibration import DpiCalibrationWidget
+from UI.tabs.calibration_pages.dpi_calibration import DpiCalibrationPage, DpiCalibrationWidget
 from UI.tabs.calibration_pages.slot_calibration import SlotCalibrationWidget
 
 _SIDEBAR_TITLES: list[str] = [
@@ -22,7 +22,8 @@ _SIDEBAR_TITLES: list[str] = [
     "Sample Slot Position Calibration",
 ]
 
-_CAMERA_SPACE_INDEX = 2
+_CAMERA_SPACE_INDEX = 0
+_DPI_INDEX = 1
 
 
 class CalibrationTab(QWidget):
@@ -33,14 +34,13 @@ class CalibrationTab(QWidget):
         self._on_calibration_selected(0)
 
     def _build_ui(self) -> None:
-        # Outer stack: index 0 = normal calibration layout, index 1 = live page
         self._outer_stack = QStackedWidget()
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
         outer_layout.addWidget(self._outer_stack)
 
-        # --- Normal calibration layout ---
+        # --- Normal calibration layout (outer stack index 0) ---
         calibration_widget = QWidget()
         main_layout = QHBoxLayout(calibration_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -72,10 +72,15 @@ class CalibrationTab(QWidget):
         self._content_stack = QStackedWidget()
 
         self._camera_space_widget = CameraSpaceCalibrationWidget()
-        self._camera_space_widget.calibration_started.connect(self._on_calibration_started)
+        self._camera_space_widget.calibration_started.connect(
+            lambda: self._on_calibration_started(_CAMERA_SPACE_INDEX)
+        )
         self._content_stack.addWidget(self._camera_space_widget)
 
         self._dpi_widget = DpiCalibrationWidget()
+        self._dpi_widget.calibration_started.connect(
+            lambda: self._on_calibration_started(_DPI_INDEX)
+        )
         self._content_stack.addWidget(self._dpi_widget)
 
         self._slot_widget = SlotCalibrationWidget()
@@ -84,10 +89,20 @@ class CalibrationTab(QWidget):
         main_layout.addWidget(self._content_stack, 1)
         self._outer_stack.addWidget(calibration_widget)
 
-        # --- Live calibration page ---
-        self._live_page = CameraSpaceCalibrationPage()
-        self._live_page.finished.connect(self._on_calibration_finished)
-        self._outer_stack.addWidget(self._live_page)
+        # --- Live calibration pages (outer stack indices 1, 2) ---
+        self._camera_space_page = CameraSpaceCalibrationPage()
+        self._camera_space_page.finished.connect(self._on_calibration_finished)
+        self._outer_stack.addWidget(self._camera_space_page)
+
+        self._dpi_page = DpiCalibrationPage()
+        self._dpi_page.finished.connect(self._on_calibration_finished)
+        self._outer_stack.addWidget(self._dpi_page)
+
+        self._live_page_indices: dict[int, int] = {
+            _CAMERA_SPACE_INDEX: 1,
+            _DPI_INDEX: 2,
+        }
+        self._active_list_index: int = 0
 
     @Slot(int)
     def _on_calibration_selected(self, index: int) -> None:
@@ -99,12 +114,19 @@ class CalibrationTab(QWidget):
         self._content_stack.setCurrentIndex(index)
 
     @Slot()
-    def _on_calibration_started(self) -> None:
-        self._live_page.start()
-        self._outer_stack.setCurrentIndex(1)
+    def _on_calibration_started(self, list_index: int) -> None:
+        self._active_list_index = list_index
+        if list_index == _CAMERA_SPACE_INDEX:
+            self._camera_space_page.start()
+            self._outer_stack.setCurrentIndex(self._live_page_indices[_CAMERA_SPACE_INDEX])
+        elif list_index == _DPI_INDEX:
+            self._dpi_page.start()
+            self._outer_stack.setCurrentIndex(self._live_page_indices[_DPI_INDEX])
 
     @Slot()
     def _on_calibration_finished(self) -> None:
         self._outer_stack.setCurrentIndex(0)
-        self._calibration_list.setCurrentRow(_CAMERA_SPACE_INDEX)
-        self._camera_space_widget.reset()
+        self._calibration_list.setCurrentRow(self._active_list_index)
+        widget = self._content_stack.widget(self._active_list_index)
+        if hasattr(widget, "reset"):
+            widget.reset()
