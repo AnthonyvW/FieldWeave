@@ -250,6 +250,13 @@ class InspectCalibrationSettings:
     )
     """Settings used for full-image captures (accuracy-optimised; 2x downscaling)."""
 
+    last_calibrated: str | None = None
+    """
+    ISO-8601 timestamp of the most recent accepted inspection calibration snap,
+    or ``None`` if no snap has been accepted in the current configuration.
+    Set by the caller after a successful snap result is accepted.
+    """
+
     def validate(self) -> None:
         self.preview.validate("preview")
         self.snap.validate("snap")
@@ -326,6 +333,14 @@ class InspectionCalibrationPosition:
 @dataclass
 class MachineVisionSettings:
     """Top-level machine-vision configuration."""
+
+    dpi: float | None = None
+    """
+    Known optical resolution of the camera/lens assembly in dots-per-inch.
+    When set this serves as a reference value for display and cross-check
+    against the DPI estimated by ``CameraCalibration``.  ``None`` means
+    unspecified.
+    """
 
     focus: FocusDetectionSettings = field(default_factory=FocusDetectionSettings)
     camera_calibration: CameraCalibrationSettings = field(
@@ -458,6 +473,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         inspect_calibration = InspectCalibrationSettings(
             preview=_load_ic_mode(ic_data.get("preview", {}), D_preview),
             snap=_load_ic_mode(ic_data.get("snap", {}), D_snap),
+            last_calibrated=ic_data.get("last_calibrated"),
         )
 
         icp_data: dict[str, Any] = data.get("inspection_calibration_position", {})
@@ -469,6 +485,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         )
 
         return MachineVisionSettings(
+            dpi=data.get("dpi"),
             focus=focus,
             camera_calibration=camera_calibration,
             inspect_calibration=inspect_calibration,
@@ -484,6 +501,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         ic = settings.inspect_calibration
         icp = settings.inspection_calibration_position
         return {
+            "dpi": settings.dpi,
             "focus": {
                 "method": f.method,
                 "tenengrad": {
@@ -526,6 +544,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                     "downsample": ic.snap.downsample,
                     "tick_min_length": ic.snap.tick_min_length,
                 },
+                "last_calibrated": ic.last_calibrated,
             },
             "inspection_calibration_position": {
                 "is_set": icp.is_set,

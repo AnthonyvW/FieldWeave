@@ -593,6 +593,7 @@ class MachineVisionManager(QObject):
         fr = f.focus_region
         cc = self._settings.camera_calibration
         return MachineVisionSettings(
+            dpi=self._settings.dpi,
             focus=FocusDetectionSettings(
                 method=f.method,
                 tenengrad=TenengradSettings(
@@ -635,6 +636,7 @@ class MachineVisionManager(QObject):
                     downsample=self._settings.inspect_calibration.snap.downsample,
                     tick_min_length=self._settings.inspect_calibration.snap.tick_min_length,
                 ),
+                last_calibrated=self._settings.inspect_calibration.last_calibrated,
             ),
         )
 

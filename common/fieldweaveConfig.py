@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union
 
@@ -9,11 +9,43 @@ from common.logger import info
 
 
 @dataclass
+class StitchAndMeasureSettings:
+    """Settings for the stitch-and-measure post-processing task."""
+
+    scale_mm: float = 10.0
+    tick_min_length: int = 200
+    crop_borders: bool = True
+    auto_rotate: bool = True
+    save_debug_overlay: bool = False
+
+    def validate(self) -> None:
+        if self.scale_mm <= 0:
+            raise ValueError("scale_mm must be positive")
+        if self.tick_min_length <= 0:
+            raise ValueError("tick_min_length must be positive")
+
+
+@dataclass
+class PostProcessingSettings:
+    """Settings for the post-processing manager."""
+
+    stitch_and_measure: StitchAndMeasureSettings = field(
+        default_factory=StitchAndMeasureSettings
+    )
+
+    def validate(self) -> None:
+        self.stitch_and_measure.validate()
+
+
+@dataclass
 class FieldWeaveSettings:
     """FieldWeave application settings"""
 
     version: str = "1.2"  # Version from last startup
     show_patchnotes: bool = False  # Runtime flag - set when version changes, not saved
+    post_processing: PostProcessingSettings = field(
+        default_factory=PostProcessingSettings
+    )
 
     def validate(self) -> None:
         """
@@ -24,6 +56,7 @@ class FieldWeaveSettings:
         """
         if not isinstance(self.version, str) or not self.version:
             raise ValueError("version must be a non-empty string")
+        self.post_processing.validate()
 
 
 class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
@@ -72,12 +105,7 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
             Migrated dictionary with updated version
         """
         info(f"FieldWeave version changed: {from_version} -> {to_version}")
-
-        # Update version to current
         data["version"] = to_version
-
-        # Add any future version-specific migrations here
-
         return data
 
     def from_dict(self, data: dict[str, Any]) -> FieldWeaveSettings:
@@ -92,22 +120,29 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
         Returns:
             FieldWeaveSettings instance with show_patchnotes set if needed
         """
-        # Handle empty dict (fresh instance)
         if not data:
             settings = FieldWeaveSettings()
         else:
-            # Extract only valid fields for FieldWeaveSettings
-            valid_fields = {"version"}
-            filtered_data = {k: v for k,
-                             v in data.items() if k in valid_fields}
-            settings = FieldWeaveSettings(**filtered_data)
+            pp_data: dict[str, Any] = data.get("post_processing", {})
+            sm_data: dict[str, Any] = pp_data.get("stitch_and_measure", {})
 
-        # If migration happened, set the show_patchnotes flag
+            sm_fields = {
+                "scale_mm", "tick_min_length", "crop_borders",
+                "auto_rotate", "save_debug_overlay",
+            }
+            stitch_settings = StitchAndMeasureSettings(
+                **{k: v for k, v in sm_data.items() if k in sm_fields}
+            )
+            post_settings = PostProcessingSettings(stitch_and_measure=stitch_settings)
+
+            settings = FieldWeaveSettings(
+                version=data.get("version", FieldWeaveSettings.version),
+                post_processing=post_settings,
+            )
+
         if settings.version != self.get_fieldweave_version():
             settings.show_patchnotes = True
             info("Patch notes flag set - new version detected")
-
-            # Save the updated version
             self.save(settings)
 
         return settings
@@ -124,6 +159,16 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
         Returns:
             Dictionary representation
         """
+        sm = settings.post_processing.stitch_and_measure
         return {
             "version": settings.version,
+            "post_processing": {
+                "stitch_and_measure": {
+                    "scale_mm": sm.scale_mm,
+                    "tick_min_length": sm.tick_min_length,
+                    "crop_borders": sm.crop_borders,
+                    "auto_rotate": sm.auto_rotate,
+                    "save_debug_overlay": sm.save_debug_overlay,
+                },
+            },
         }

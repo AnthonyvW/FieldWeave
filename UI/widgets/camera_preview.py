@@ -561,11 +561,16 @@ class CameraPreview(QFrame):
             self._current_full_width = width
             self._current_full_height = height
 
-            image = QImage(buf, width, height, stride, QImage.Format.Format_RGB888)
+            # QImage(buf, ...) does not copy the data — it holds a raw pointer
+            # into buf.  Call .copy() immediately so the QImage owns its memory
+            # and cannot be invalidated if buf is reassigned elsewhere.
+            image = QImage(buf, width, height, stride, QImage.Format.Format_RGB888).copy()
 
             if self._channel_overlay.needs_filter:
-                image = self._channel_overlay.apply(image.copy())
+                image = self._channel_overlay.apply(image)
 
+            # image.bits() returns a raw pointer; keep image alive in a local
+            # so the GC cannot collect it while ptr is still being read.
             ptr = image.bits()
             full_arr = (
                 np.frombuffer(ptr, dtype=np.uint8)
@@ -574,6 +579,7 @@ class CameraPreview(QFrame):
                 .reshape((image.height(), image.width(), 3))
                 .copy()
             )
+            del ptr
             self._video_label.notify_full(full_arr)
 
             lw = self._video_label.width()
@@ -585,14 +591,15 @@ class CameraPreview(QFrame):
                     Qt.TransformationMode.FastTransformation,
                 )
 
-                ptr = scaled.bits()
+                scaled_ptr = scaled.bits()
                 scaled_arr = (
-                    np.frombuffer(ptr, dtype=np.uint8)
+                    np.frombuffer(scaled_ptr, dtype=np.uint8)
                     .reshape((scaled.height(), scaled.bytesPerLine()))
                     [:, : scaled.width() * 3]
                     .reshape((scaled.height(), scaled.width(), 3))
                     .copy()
                 )
+                del scaled_ptr
                 self._video_label.notify_scaled(scaled_arr)
                 self._video_label.setPixmap(QPixmap.fromImage(scaled))
 

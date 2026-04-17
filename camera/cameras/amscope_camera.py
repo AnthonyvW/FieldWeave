@@ -290,18 +290,28 @@ class AmscopeCamera(BaseCamera):
 
         amcam = self._get_sdk()
         try:
-            # Get current resolution to allocate preview frame buffer
-            _res_index, _width, _height = self.get_current_preview_resolution()
-            # Allocate preview frame buffer using the post-rotation output size.
-            # get_FinalSize() accounts for AMCAM_OPTION_ROTATE so the buffer
-            # is correctly sized for 90/270° rotations where width and height
-            # are transposed relative to the raw sensor resolution.
+            # Allocate the preview frame buffer large enough to hold the
+            # maximum still resolution.  The SDK temporarily fires EVENT_IMAGE
+            # at the still resolution during a snap; if the buffer is only
+            # preview-sized, PullImageV4 overflows it and corrupts adjacent
+            # memory.
+            max_size = 0
             try:
-                fw, fh = self._hcam.get_FinalSize()
+                for res in self.settings.get_still_resolutions():
+                    s = amcam.TDIBWIDTHBYTES(res.width * 24) * res.height
+                    if s > max_size:
+                        max_size = s
             except Exception:
-                _, fw, fh = self.get_current_preview_resolution()
-            buffer_size = amcam.TDIBWIDTHBYTES(fw * 24) * fh
-            self._frame_buffer = ctypes.create_string_buffer(buffer_size)
+                pass
+
+            if max_size == 0:
+                try:
+                    fw, fh = self._hcam.get_FinalSize()
+                except Exception:
+                    _, fw, fh = self.get_current_preview_resolution()
+                max_size = amcam.TDIBWIDTHBYTES(fw * 24) * fh
+
+            self._frame_buffer = ctypes.create_string_buffer(max_size)
 
             self._callback = callback
             self._callback_context = context

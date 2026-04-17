@@ -5,6 +5,12 @@ Autofocuses, then walks the stage along the calibration scale bar until it
 has traversed the full length of the bar, saving a raw image at each position
 into a ``raw_calibration_scale`` folder inside the supplied output path.
 
+Once all images are captured the routine hands the folder to a
+:class:`~post_processing.post_processing_routines.StitchAndMeasureRoutine`
+via the global :class:`~post_processing.post_processing_manager.PostProcessingManager`
+and blocks until stitching and DPI measurement are complete.  The routine only
+reports completion after the post-processing step finishes.
+
 The routine:
   1. Runs an autofocus pass in place.
   2. Captures a snap and runs the inspect-calibration machine-vision pipeline
@@ -12,6 +18,7 @@ The routine:
   3. Moves 0.4 mm toward the far (absent) end of the bar.
   4. Repeats until the last visible tick cluster has crossed the image
      centre along the bar axis.
+  5. Stitches the captured images and measures DPI.
 
 Images are saved as JPEG with the stage position encoded in the filename:
   x{X_nm}_y{Y_nm}_z{Z_nm}.jpg
@@ -35,6 +42,7 @@ Usage::
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
 
@@ -48,6 +56,7 @@ from motion.routines.automation_routine import AutomationRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame, move_z_and_wait
 from motion.routines.autofocus.autofocus_routine import Autofocus
 from machine_vision.calibration_bar_detection import AxisState, process_frame
+from post_processing.routines.stitch_and_measure import StitchAndMeasureRoutine
 
 _NM_PER_MM = 1_000_000
 _STEP_NM = int(0.4 * _NM_PER_MM)
@@ -81,29 +90,32 @@ def _axis_move_direction(
         cluster_centres = [(s + e) // 2 for s, e in clusters]
         above = sum(1 for c in cluster_centres if c > centre)
         below = len(cluster_centres) - above
-        # Dense end on the right side of frame → move stage negative (left)
         return -1 if above >= below else 1
     else:
         centre = (image_height // 2) // downsample
         cluster_centres = [(s + e) // 2 for s, e in clusters]
         above = sum(1 for c in cluster_centres if c > centre)
         below = len(cluster_centres) - above
-        # Dense end on the lower side of frame → move stage negative (up)
         return -1 if above >= below else 1
 
 
 class InspectionCalibrationScaleRoutine(AutomationRoutine):
     """
-    Walk the stage along the calibration scale bar, saving images at each step.
+    Walk the stage along the calibration scale bar, saving images at each step,
+    then stitch the images and measure DPI.
 
     Starting from the current position the routine autofocuses, determines
     the bar axis and travel direction, then steps 0.4 mm at a time toward the
-    far end of the bar.  It stops once the last visible tick cluster has
-    crossed the midpoint of the image along the bar axis, meaning the final
-    tick mark is at or just past centre in the captured frame.
+    far end of the bar.  It stops once the last visible tick mark has passed
+    through the image centre.
 
     All images are saved into ``<output_path>/raw_calibration_scale/`` with
     filenames encoding the actual stage position at capture time.
+
+    After all images are captured a
+    :class:`~post_processing.post_processing_routines.StitchAndMeasureRoutine`
+    is started via the global post-processing manager and the routine blocks
+    until it completes.  :attr:`stitch_result` is populated on success.
 
     Parameters
     ----------
@@ -125,22 +137,44 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
 
     job_name = "Inspection Calibration Scale"
 
+    # Phase weight boundaries (percent, 0–100).
+    # Weights shift slightly depending on whether a start position move is needed.
+    _PHASE_MOVE_END   = 5
+    _PHASE_AF_END     = 20
+    _PHASE_IMAGING_END = 75
+    # Stitching fills the remainder up to 100.
+
     def __init__(
         self,
         motion: MotionControllerManager,
         output_path: str | Path,
         *,
+        start_position: Position | None = None,
         step_mm: float = 0.4,
         settle_s: float = 0.4,
-        max_steps: int = 60,
+        max_steps: int = 30,
         capture_timeout_s: float = 10.0,
     ) -> None:
         super().__init__(motion)
         self._output_path = Path(output_path)
+        self._start_position = start_position
         self._step_nm = int(round(step_mm * _NM_PER_MM))
         self._settle_s = settle_s
         self._max_steps = max_steps
         self._capture_timeout_s = capture_timeout_s
+
+        self.stitch_result = None
+        """Populated with a :class:`~post_processing.post_processing_routines.StitchAndMeasureResult`
+        after the routine completes successfully, or left as None on failure."""
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _set_percent(self, activity: str, percent: float) -> None:
+        """Report progress as a 0–100 percentage rather than a step count."""
+        clamped = max(0, min(100, int(round(percent))))
+        self._set_status(activity, clamped, 100)
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -150,8 +184,9 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         ctx = get_app_context()
         camera_manager = ctx.camera_manager
         mv = ctx.machine_vision
+        post_processing = ctx.post_processing
 
-        self._set_activity("Initialising")
+        self._set_percent("Initialising", 0)
 
         if not ctx.has_camera:
             error("[CalibrationScale] No camera available — aborting")
@@ -167,10 +202,33 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         info(f"[CalibrationScale] Saving images to: {save_dir}")
 
         # ------------------------------------------------------------------
+        # Step 0: Move to start position (if one was saved)
+        # ------------------------------------------------------------------
+
+        if self._start_position is not None:
+            self._set_percent("Moving to start position", 0)
+            info(
+                f"[CalibrationScale] Moving to start position:"
+                f" X={self._start_position.x / _NM_PER_MM:.3f} mm"
+                f" Y={self._start_position.y / _NM_PER_MM:.3f} mm"
+                f" Z={self._start_position.z / _NM_PER_MM:.3f} mm"
+            )
+            self.motion.move_to_position(self._start_position, wait=True)
+
+            if self._check_stop():
+                return
+
+            yield
+
+        # ------------------------------------------------------------------
         # Step 1: Autofocus
         # ------------------------------------------------------------------
 
-        self._set_activity("Autofocusing")
+        af_start = self._PHASE_MOVE_END if self._start_position is not None else 0
+        af_end = self._PHASE_AF_END
+        imaging_end = self._PHASE_IMAGING_END
+
+        self._set_percent("Autofocusing", af_start)
         info("[CalibrationScale] Starting autofocus")
 
         autofocus = Autofocus(motion=self.motion)
@@ -186,7 +244,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         # Step 2: Initial snap to determine axis and travel direction
         # ------------------------------------------------------------------
 
-        self._set_activity("Detecting scale bar axis")
+        self._set_percent("Detecting scale bar axis", af_end)
         info("[CalibrationScale] Capturing initial snap for bar detection")
 
         if self._settle_s > 0:
@@ -253,16 +311,18 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         # ------------------------------------------------------------------
 
         step = 0
+        result = initial_result
 
         while step < self._max_steps:
             if self._check_stop():
                 return
 
             step += 1
-            self._set_status(
-                f"Step {step}/{self._max_steps}  ticks={result.tick_count if step > 1 else initial_result.tick_count}",
-                step,
-                self._max_steps,
+            imaging_fraction = min(step / max(1, self._max_steps), 1.0)
+            imaging_percent = af_end + imaging_fraction * (imaging_end - af_end)
+            self._set_percent(
+                f"Imaging step {step}  ticks={result.tick_count}",
+                imaging_percent,
             )
 
             current_pos = self.motion.get_position()
@@ -320,12 +380,6 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             except OSError as exc:
                 warning(f"[CalibrationScale] Failed to save image at step {step}: {exc}")
 
-            # Stop when the last tick mark has passed through the centre of
-            # the image.  As we move, ticks peel off the leading edge first.
-            # The last tick remaining is always on the trailing side — the
-            # high-pixel end when moving negative, the low-pixel end when
-            # moving positive.  We stop once that tick's centre has crossed
-            # the image midpoint.
             if result._clusters:
                 image_mid = (
                     (image_w // 2) // result._downsample
@@ -334,13 +388,9 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
                 )
                 cluster_centres = [(s + e) // 2 for s, e in result._clusters]
                 if direction > 0:
-                    # Moving toward higher pixels: ticks peel off the low end,
-                    # last tick is the one with the smallest pixel coord.
                     last_tick_centre = min(cluster_centres)
                     past_centre = last_tick_centre >= image_mid
                 else:
-                    # Moving toward lower pixels: ticks peel off the high end,
-                    # last tick is the one with the largest pixel coord.
                     last_tick_centre = max(cluster_centres)
                     past_centre = last_tick_centre <= image_mid
 
@@ -360,7 +410,48 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
                 f" without detecting bar end"
             )
 
-        self._set_activity("Complete")
+        # ------------------------------------------------------------------
+        # Step 5: Stitch images and measure DPI
+        # ------------------------------------------------------------------
+
+        self._set_percent("Stitching and measuring", imaging_end)
+        info(f"[CalibrationScale] Starting stitch-and-measure on {self._output_path}")
+
+        stitch_routine = StitchAndMeasureRoutine(
+            settings=post_processing.settings,
+            input_folder=str(self._output_path),
+        )
+        post_processing.start_routine(stitch_routine)
+
+        while stitch_routine.is_running:
+            if self._check_stop():
+                post_processing.stop_routine()
+                return
+            self._set_percent(f"Stitching — {stitch_routine.activity}", imaging_end)
+            time.sleep(0.25)
+
+        stitch_routine.wait()
+
+        self.stitch_result = stitch_routine.result
+
+        if self.stitch_result is None:
+            warning("[CalibrationScale] Stitch-and-measure completed but produced no result")
+        else:
+            info(
+                f"[CalibrationScale] Stitch complete —"
+                f" DPI={self.stitch_result.dpi}"
+                f" size={self.stitch_result.image_width}x{self.stitch_result.image_height}"
+                f" output={self.stitch_result.output_path}"
+            )
+            mv_settings = ctx.machine_vision.settings
+            mv_settings.inspect_calibration.last_calibrated = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            ctx.machine_vision.save_settings()
+
+        yield
+
+        self._set_percent("Complete", 100)
         info(
             f"[CalibrationScale] Done — {step} steps taken,"
             f" {len(list(save_dir.glob('*.jpg')))} images saved in {save_dir}"

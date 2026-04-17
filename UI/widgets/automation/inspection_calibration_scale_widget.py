@@ -188,6 +188,23 @@ class InspectionCalibrationScaleWidget(QWidget):
 
         main_layout.addWidget(position_group)
 
+        # ---- Calibration info group --------------------------------------
+        cal_info_group = QGroupBox("Calibration Info")
+        cal_info_group.setStyleSheet(group_style)
+        cal_info_vbox = QVBoxLayout(cal_info_group)
+        cal_info_vbox.setContentsMargins(10, 8, 10, 8)
+        cal_info_vbox.setSpacing(4)
+
+        self._last_calibrated_label = QLabel("Last calibrated: —")
+        self._last_calibrated_label.setStyleSheet("font-size: 12px; color: #444;")
+        cal_info_vbox.addWidget(self._last_calibrated_label)
+
+        self._dpi_label = QLabel("DPI: —")
+        self._dpi_label.setStyleSheet("font-size: 12px; color: #444;")
+        cal_info_vbox.addWidget(self._dpi_label)
+
+        main_layout.addWidget(cal_info_group)
+
         # ---- Output folder (matches area scan pattern) -------------------
         output_group = QGroupBox("Output Folder")
         output_layout = QHBoxLayout(output_group)
@@ -274,6 +291,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._poll_timer.timeout.connect(self._poll_routine_state)
 
         self._refresh_position_display()
+        self._refresh_calibration_info()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -311,6 +329,29 @@ class InspectionCalibrationScaleWidget(QWidget):
         if not icp.is_set:
             return None
         return icp.x_nm, icp.y_nm, icp.z_nm
+
+    def _refresh_calibration_info(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.machine_vision is None:
+            self._last_calibrated_label.setText("Last calibrated: —")
+            self._dpi_label.setText("DPI: —")
+            return
+        s = ctx.machine_vision.settings
+        last_cal = s.inspect_calibration.last_calibrated
+        if last_cal:
+            try:
+                dt = datetime.fromisoformat(last_cal)
+                self._last_calibrated_label.setText(
+                    f"Last calibrated: {dt.strftime('%Y-%m-%d %H:%M')}"
+                )
+            except ValueError:
+                self._last_calibrated_label.setText(f"Last calibrated: {last_cal}")
+        else:
+            self._last_calibrated_label.setText("Last calibrated: —")
+        if s.dpi is not None:
+            self._dpi_label.setText(f"DPI: {s.dpi:.1f}")
+        else:
+            self._dpi_label.setText("DPI: —")
 
     def _refresh_position_display(self) -> None:
         saved = self._get_saved_position()
@@ -471,20 +512,15 @@ class InspectionCalibrationScaleWidget(QWidget):
             return
 
         if pos is not None:
-            try:
-                motion.move_to_position(
-                    Position(x=pos[0], y=pos[1], z=pos[2]),
-                    wait=True,
-                )
-            except Exception as exc:
-                error(f"InspectionCalibrationScaleWidget: move to start position failed — {exc}")
-                self._status_label.setText("Move to start position failed — see log.")
-                return
+            start_position = Position(x=pos[0], y=pos[1], z=pos[2])
+        else:
+            start_position = None
 
         try:
             self._routine = InspectionCalibrationScaleRoutine(
                 motion=motion,
                 output_path=output_path,
+                start_position=start_position,
             )
             motion.start_routine(self._routine)
         except Exception as exc:
@@ -537,6 +573,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._status_label.setText("Finished.")
         self._routine = None
         self._refresh_position_display()
+        self._refresh_calibration_info()
 
     def _poll_routine_state(self) -> None:
         if self._routine is None or not self._routine.is_running:

@@ -70,9 +70,11 @@ class State:
         elif self.activity != "-":
             parts.append(self.activity)
         if self.progress_total > 0:
-            progress = f"{self.progress_current}/{self.progress_total}"
             eta = self.format_eta()
-            parts.append(f"{eta}" if eta else progress)
+            if self.progress_total != 100:
+                parts.append(eta if eta else f"{self.progress_current}/{self.progress_total}")
+            elif eta:
+                parts.append(eta)
         return "  |  ".join(parts)
 
     def format_eta(self) -> str:

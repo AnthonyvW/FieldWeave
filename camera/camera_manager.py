@@ -563,7 +563,7 @@ class CameraManager(QObject):
                 self._frame_width = current_width
                 self._frame_height = current_height
 
-            self._current_frame_buffer = bytes(frame_buf)
+            self._current_frame_buffer = frame_buf
             self._preview_frame_seq += 1
             self.preview_frame_ready.emit(self._frame_width, self._frame_height)
 
