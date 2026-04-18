@@ -22,6 +22,7 @@ from machine_vision.machine_vision_config import (
     FocusRegionSettings,
     InspectCalibrationModeSettings,
     InspectCalibrationSettings,
+    InspectionCalibrationPosition,
     LaplacianSettings,
     MachineVisionSettings,
     MachineVisionSettingsManager,
@@ -756,6 +757,12 @@ class MachineVisionManager(QObject):
                     tick_min_length=self._settings.inspect_calibration.snap.tick_min_length,
                 ),
                 last_calibrated=self._settings.inspect_calibration.last_calibrated,
+            ),
+            inspection_calibration_position=InspectionCalibrationPosition(
+                is_set=self._settings.inspection_calibration_position.is_set,
+                x_nm=self._settings.inspection_calibration_position.x_nm,
+                y_nm=self._settings.inspection_calibration_position.y_nm,
+                z_nm=self._settings.inspection_calibration_position.z_nm,
             ),
             red_mark=RedMarkDetectionSettings(
                 scale=rm.scale,

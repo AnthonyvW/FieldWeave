@@ -251,13 +251,28 @@ class DpiCalibrationStepsWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
+        self._dpi_label = QLabel("")
+        self._dpi_label.setObjectName("CalSavedPosLabel")
+        layout.addWidget(self._dpi_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
         self._view_image_btn = QPushButton("View Image")
         self._view_image_btn.setObjectName("CalSecondaryButton")
         self._view_image_btn.setMinimumHeight(34)
         self._view_image_btn.setEnabled(False)
         self._view_image_btn.clicked.connect(self._on_view_image_clicked)
-        layout.addWidget(self._view_image_btn)
+        btn_row.addWidget(self._view_image_btn)
 
+        self._open_folder_btn = QPushButton("Open Folder")
+        self._open_folder_btn.setObjectName("CalSecondaryButton")
+        self._open_folder_btn.setMinimumHeight(34)
+        self._open_folder_btn.setEnabled(False)
+        self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
+        btn_row.addWidget(self._open_folder_btn)
+
+        layout.addLayout(btn_row)
         widget.hide()
         return widget
 
@@ -335,7 +350,14 @@ class DpiCalibrationStepsWidget(QWidget):
 
         self._qc_widget.setVisible(self._current_step == 3)
         if self._current_step == 3:
-            self._view_image_btn.setEnabled(self._output_folder is not None)
+            has_output = self._output_folder is not None
+            self._view_image_btn.setEnabled(has_output)
+            self._open_folder_btn.setEnabled(has_output)
+            try:
+                dpi = get_app_context().machine_vision.settings.dpi
+                self._dpi_label.setText(f"DPI: {dpi:.1f}" if dpi is not None else "DPI: Unknown")
+            except Exception:
+                self._dpi_label.setText("DPI: Unknown")
 
         self._apply_overlays_for_step(self._current_step)
         self._set_status("")
@@ -574,6 +596,15 @@ class DpiCalibrationStepsWidget(QWidget):
             self._set_status(f"Image not found: {image_path}")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(image_path)))
+
+    def _on_open_folder_clicked(self) -> None:
+        if self._output_folder is None:
+            return
+        folder = Path(self._output_folder)
+        if not folder.exists():
+            self._set_status(f"Folder not found: {folder}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
 
 class DpiCalibrationPage(CameraWithSidebarPage):

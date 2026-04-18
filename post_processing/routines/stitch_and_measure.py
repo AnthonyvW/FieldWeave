@@ -40,7 +40,7 @@ def _parse_y_position(filename: str) -> int:
     return int(match.group(1)) if match else 0
 
 
-def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str]]:
+def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str, int]]:
     valid_extensions = {'.jpg', '.jpeg', '.JPG', '.JPEG'}
     jpeg_files = sorted([
         f for f in os.listdir(image_folder)
@@ -49,12 +49,12 @@ def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str]]:
     if not jpeg_files:
         raise ValueError(f"No JPEG images found in {image_folder}")
 
-    entries = sorted(
-        [(_parse_y_position(f), f) for f in jpeg_files],
-        key=lambda e: e[0],
-    )
+    entries: list[tuple[int, str]] = [
+        (_parse_y_position(f), f) for f in jpeg_files
+    ]
+    entries.sort(key=lambda e: e[0], reverse=True)
 
-    images: list[tuple[cv2.Mat, str]] = []
+    images: list[tuple[cv2.Mat, str, int]] = []
     for y_pos, filename in entries:
         img_path = os.path.join(image_folder, filename)
         img = cv2.imread(img_path)
@@ -62,39 +62,65 @@ def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str]]:
             warning(f"StitchAndMeasureRoutine: could not load {img_path}, skipping")
             continue
         debug(f"  + y={y_pos:>12}  {filename}")
-        images.append((img, filename))
+        images.append((img, filename, y_pos))
     return images
 
 
-def _match_offset(a: cv2.Mat, b: cv2.Mat) -> tuple[float, int, int]:
+def _correlation_profile(a: cv2.Mat, b: cv2.Mat, min_overlap_frac: float = 0.05) -> np.ndarray:
     gray_a = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
     gray_b = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
-    h_b = gray_b.shape[0]
+    h_a, h_b = gray_a.shape[0], gray_b.shape[0]
     template = gray_b[:h_b // 2, :]
     result = cv2.matchTemplate(gray_a, template, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-    return float(max_val), int(max_loc[1]), int(max_loc[0])
+    profile = result.max(axis=1)
+    min_y = int(h_a * min_overlap_frac)
+    profile[:min_y] = -1.0
+    return profile
 
 
-def _find_offset(
-    a: cv2.Mat, b: cv2.Mat, detect_direction: bool = False
-) -> tuple[tuple[int, int] | None, str]:
-    conf_ab, y_ab, x_ab = _match_offset(a, b)
-    if detect_direction:
-        conf_ba, y_ba, x_ba = _match_offset(b, a)
-        debug(
-            f"    Match confidence a→b: {conf_ab:.3f} (y={y_ab}px x={x_ab}px)"
-            f"  b→a: {conf_ba:.3f} (y={y_ba}px x={x_ba}px)"
-        )
-        if conf_ab < 0.1 and conf_ba < 0.1:
-            return None, f"Template match confidence too low (a→b: {conf_ab:.3f}, b→a: {conf_ba:.3f})"
-        if y_ba > y_ab:
-            return (-y_ba, x_ba), ""
-    else:
-        debug(f"    Match confidence: {conf_ab:.3f} (y={y_ab}px x={x_ab}px)")
-        if conf_ab < 0.1:
-            return None, f"Template match confidence too low ({conf_ab:.3f})"
-    return (y_ab, x_ab), ""
+def _first_peak(profile: np.ndarray, threshold_frac: float = 0.85) -> int | None:
+    global_max = float(profile.max())
+    if global_max <= 0:
+        return None
+    threshold = threshold_frac * global_max
+    kernel = np.ones(5) / 5
+    smoothed = np.convolve(profile, kernel, mode='same')
+    for i in range(1, len(smoothed) - 1):
+        if smoothed[i] >= threshold and smoothed[i] >= smoothed[i - 1] and smoothed[i] >= smoothed[i + 1]:
+            return i
+    return None
+
+
+def _find_offset_first_peak(
+    images: list[tuple[cv2.Mat, str, int]],
+    threshold_frac: float = 0.85,
+    min_overlap_frac: float = 0.05,
+) -> int | None:
+    offsets: list[int] = []
+    for i in range(len(images) - 1):
+        img_a, _, _ = images[i]
+        img_b, _, _ = images[i + 1]
+        profile = _correlation_profile(img_a, img_b, min_overlap_frac)
+        peak = _first_peak(profile, threshold_frac)
+        if peak is not None:
+            global_max_val = float(profile.max())
+            peak_val = float(profile[peak])
+            debug(f"  Pair {i:2d}: first_peak={peak}px  peak_conf={peak_val:.3f}  global_max_conf={global_max_val:.3f}")
+            offsets.append(peak)
+        else:
+            debug(f"  Pair {i:2d}: no peak found")
+    if not offsets:
+        return None
+    return int(round(float(np.median(offsets))))
+
+
+def _calibrate_offset(images: list[tuple[cv2.Mat, str, int]]) -> int | None:
+    offset = _find_offset_first_peak(images)
+    if offset is None:
+        warning("_calibrate_offset: no peaks found in any pair")
+        return None
+    debug(f"_calibrate_offset: step offset={offset}px")
+    return offset
 
 
 def _place_image(
@@ -113,24 +139,18 @@ def _place_image(
         canvas[seam_y:y_offset + h_i, :x_end] = image[src_seam:, src_x_start:src_x_start + x_end]
 
 
-def _stitch_images(images: list[tuple[cv2.Mat, str]]) -> cv2.Mat | None:
+def _stitch_images(images: list[tuple[cv2.Mat, str, int]]) -> cv2.Mat | None:
     debug(f"_stitch_images: stitching {len(images)} images sequentially by Y position")
 
-    offsets, err = _find_offset(images[0][0], images[1][0], detect_direction=True)
-    if offsets is None:
-        warning(f"_stitch_images: failed to determine scan direction: {err}")
+    offset_px = _calibrate_offset(images)
+    if offset_px is None:
+        warning("_stitch_images: failed to calibrate step offset")
         return None
 
-    if offsets[0] < 0:
-        debug(f"  Detected bottom-to-top scan order (y={offsets[0]}px), reversing sequence")
-        images = list(reversed(images))
-        offsets, err = _find_offset(images[0][0], images[1][0])
-        if offsets is None:
-            warning(f"_stitch_images: failed after reversal: {err}")
-            return None
-
-    y_off, x_off = offsets
     h_a, w_a = images[0][0].shape[:2]
+    pair_offsets: list[tuple[int, int]] = [(offset_px, 0)] * (len(images) - 1)
+
+    y_off, x_off = pair_offsets[0]
     h_b, w_b = images[1][0].shape[:2]
     cum_x = x_off
     canvas_h = max(y_off + h_b, h_a)
@@ -143,12 +163,8 @@ def _stitch_images(images: list[tuple[cv2.Mat, str]]) -> cv2.Mat | None:
     prev_end_y = y_off + h_b
 
     for i in range(2, len(images)):
-        img, label = images[i]
-        offsets, err = _find_offset(images[i - 1][0], img)
-        if offsets is None:
-            warning(f"_stitch_images: failed at step {i}: {err}")
-            return None
-        y_off, x_off = offsets
+        img, label, _ = images[i]
+        y_off, x_off = pair_offsets[i - 1]
         cum_y += y_off
         cum_x += x_off
         h_i, w_i = img.shape[:2]
@@ -187,80 +203,6 @@ def _rotate_image(image: cv2.Mat, degrees: int) -> cv2.Mat:
     raise ValueError(f"degrees must be 0, 90, 180, or 270; got {degrees}")
 
 
-def _find_scalebar_rect(image: cv2.Mat) -> tuple[int, int, int, int] | None:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    binary = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 10
-    )
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    img_w = image.shape[1]
-    best: tuple[int, int, int, int] | None = None
-    best_score = 0.0
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w < img_w * 0.1 or h == 0:
-            continue
-        aspect = w / h
-        if aspect < 4:
-            continue
-        score = float(w) * aspect
-        if score > best_score:
-            best_score = score
-            best = (x, y, w, h)
-    return best
-
-
-def _text_mass_above_vs_below(image: cv2.Mat, bar_y: int, bar_h: int) -> tuple[float, float]:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    img_h, img_w = gray.shape
-    bar_mid = bar_y + bar_h // 2
-    mask = np.ones_like(gray, dtype=np.uint8)
-    mask[max(0, bar_y - 4):bar_y + bar_h + 4, :] = 0
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    binary = cv2.bitwise_and(binary, binary, mask=mask)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    mass_above = 0.0
-    mass_below = 0.0
-    max_blob = img_h * img_w * 0.01
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
-        if area < 10 or area > max_blob:
-            continue
-        cy = y + h // 2
-        if cy < bar_mid:
-            mass_above += area
-        else:
-            mass_below += area
-    return float(mass_above), float(mass_below)
-
-
-def _detect_orientation(image: cv2.Mat) -> int:
-    h, w = image.shape[:2]
-    candidates = [0, 180] if w >= h else [90, 270]
-    best_rotation = candidates[0]
-    best_ratio = -1.0
-    for rot in candidates:
-        rotated = _rotate_image(image, rot)
-        bar = _find_scalebar_rect(rotated)
-        if bar is None:
-            continue
-        bx, by, bw, bh = bar
-        above, below = _text_mass_above_vs_below(rotated, by, bh)
-        total = above + below
-        ratio = above / total if total > 0 else 0.0
-        debug(f"    {rot}°: bar at y={by} h={bh} w={bw} | above={above:.0f} below={below:.0f} ratio={ratio:.3f}")
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_rotation = rot
-    debug(f"_detect_orientation: selected {best_rotation}° (ratio={best_ratio:.3f})")
-    return best_rotation
-
-
 def _binarize(gray: np.ndarray) -> np.ndarray:
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     return binary
@@ -285,6 +227,46 @@ def _find_bar_axis(binary: np.ndarray) -> tuple[str, int]:
         return "horizontal", best
     best = max(range(binary.shape[1]), key=lambda c: _longest_run(binary[:, c]))
     return "vertical", best
+
+
+def _text_mass_above_vs_below(
+    binary: np.ndarray, baseline_index: int, axis: str
+) -> tuple[float, float]:
+    band = 5
+    if axis == "horizontal":
+        mask = np.ones_like(binary)
+        mask[max(0, baseline_index - band):baseline_index + band + 1, :] = 0
+        masked = binary & mask
+        above = float(np.count_nonzero(masked[:baseline_index, :]))
+        below = float(np.count_nonzero(masked[baseline_index:, :]))
+    else:
+        mask = np.ones_like(binary)
+        mask[:, max(0, baseline_index - band):baseline_index + band + 1] = 0
+        masked = binary & mask
+        above = float(np.count_nonzero(masked[:, :baseline_index]))
+        below = float(np.count_nonzero(masked[:, baseline_index:]))
+    return above, below
+
+
+def _detect_orientation(image: cv2.Mat) -> int:
+    h, w = image.shape[:2]
+    candidates = [0, 180] if w >= h else [90, 270]
+    best_rotation = candidates[0]
+    best_ratio = -1.0
+    for rot in candidates:
+        rotated = _rotate_image(image, rot)
+        gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
+        binary = _binarize(gray)
+        axis, baseline_index = _find_bar_axis(binary)
+        above, below = _text_mass_above_vs_below(binary, baseline_index, axis)
+        total = above + below
+        ratio = above / total if total > 0 else 0.0
+        debug(f"    {rot}°: axis={axis} baseline={baseline_index}px | above={above:.0f} below={below:.0f} ratio={ratio:.3f}")
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_rotation = rot
+    debug(f"_detect_orientation: selected {best_rotation}° (ratio={best_ratio:.3f})")
+    return best_rotation
 
 
 def _find_tick_intersections(
@@ -517,8 +499,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
             ctx = get_app_context()
             if ctx is not None and ctx.machine_vision is not None:
                 ctx.machine_vision.settings.dpi = dpi
-                ctx.machine_vision.save_settings()
-                debug(f"StitchAndMeasureRoutine: DPI {dpi:.2f} saved to machine vision settings")
+                debug(f"StitchAndMeasureRoutine: DPI {dpi:.2f} written to machine vision settings")
 
         debug_path: str | None = None
         if sm.save_debug_overlay and dpi is not None:
