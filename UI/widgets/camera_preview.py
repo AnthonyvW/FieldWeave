@@ -16,6 +16,7 @@ from UI.widgets.preview_overlay.focus import FocusButton, FocusOverlay
 from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
+from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay, RedMarkButton
 
 
 class EyeToggleButton(QPushButton):
@@ -236,6 +237,16 @@ class OverlayController:
         self._preview._video_label.update()
 
     @property
+    def red_mark(self) -> bool:
+        return self._preview._red_mark_overlay.enabled
+
+    @red_mark.setter
+    def red_mark(self, enabled: bool) -> None:
+        self._preview._red_mark_button.setChecked(enabled)
+        self._preview._red_mark_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    @property
     def click_to_move(self) -> bool:
         return self._preview._click_to_move_overlay.enabled
 
@@ -326,6 +337,7 @@ class CameraPreview(QFrame):
         self._grid_overlay = GridOverlay()
         self._focus_overlay = FocusOverlay()
         self._inspect_calibration_overlay = InspectCalibrationOverlay()
+        self._red_mark_overlay = RedMarkDetectionOverlay()
         self._channel_overlay = ChannelOverlay()
         self._click_to_move_overlay = ClickToMoveOverlay()
 
@@ -333,6 +345,7 @@ class CameraPreview(QFrame):
         self._video_label.add_overlay(self._grid_overlay)
         self._video_label.add_overlay(self._focus_overlay)
         self._video_label.add_overlay(self._inspect_calibration_overlay)
+        self._video_label.add_overlay(self._red_mark_overlay)
         self._video_label.add_overlay(self._click_to_move_overlay)
 
         self._crosshair_button = CrosshairButton(self)
@@ -364,6 +377,12 @@ class CameraPreview(QFrame):
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
+        self._red_mark_button = RedMarkButton(self)
+        self._red_mark_button.move(10, 185)
+        self._red_mark_button.raise_()
+        self._red_mark_button.toggled_red_mark.connect(self._red_mark_overlay.set_enabled)
+        self._red_mark_button.toggled_red_mark.connect(self._video_label.update)
+
         self._overlays = OverlayController(self)
 
         self._video_label.set_click_handler(self._click_to_move_overlay)
@@ -372,6 +391,9 @@ class CameraPreview(QFrame):
             lambda _result: self._video_label.update()
         )
         get_app_context().machine_vision.inspect_calibration_result_ready.connect(
+            lambda _result: self._video_label.update()
+        )
+        get_app_context().machine_vision.red_mark_detection_result_ready.connect(
             lambda _result: self._video_label.update()
         )
 

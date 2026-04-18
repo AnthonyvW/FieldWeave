@@ -8,6 +8,7 @@ returned to the GUI thread through Qt signals.
 
 from __future__ import annotations
 
+import time
 import traceback
 from dataclasses import dataclass
 
@@ -42,6 +43,11 @@ from machine_vision.calibration_bar_detection import (
     AxisState,
     BarDetectionResult,
     process_frame,
+)
+from machine_vision.red_mark_detection import (
+    detect_red_marks,
+    smooth_value,
+    line_orientation,
 )
 
 
@@ -96,6 +102,68 @@ class InspectCalibrationResult:
     source_height: int
 
 
+@dataclass
+class RedMarkDetectionResult:
+    """
+    Result of a single red-mark detection pass.
+
+    All coordinate values are in full source-image pixel space (not
+    downsampled), matching the frame dimensions in ``source_width`` /
+    ``source_height``.  The overlay reprojects them into display space at
+    paint time.
+    """
+
+    valid_centers: list[tuple[float, float]]
+    """Centroids of accepted red-mark blobs, (x, y) in source pixels."""
+
+    filtered_centers: list[tuple[float, float]]
+    """Centroids of blobs that were rejected by area, aspect-ratio, or
+    position filters, kept for diagnostic display."""
+
+    valid_mask: np.ndarray
+    """
+    uint8 pixel mask of accepted blob footprints (255 = blob, 0 = background),
+    shape (source_height, source_width).  Used by the overlay to paint actual
+    blob pixels rather than just centroid markers.
+    """
+
+    filtered_mask: np.ndarray
+    """uint8 pixel mask of rejected blob footprints, same shape as valid_mask."""
+
+    mean_x: float | None
+    """Mean X of valid centroid coordinates, or None when no valid blobs."""
+
+    mean_y: float | None
+    """Mean Y of valid centroid coordinates, or None when no valid blobs."""
+
+    stabilized_x: float | None
+    """
+    EMA-smoothed mean X of valid mark centroids; used for the vertical
+    reference line.  ``None`` when no valid marks are present.
+    """
+
+    stabilized_y: float | None
+    """
+    EMA-smoothed mean Y of valid mark centroids; used for the horizontal
+    reference line.  ``None`` when no valid marks are present.
+    """
+
+    image_center_x: float | None
+    """Horizontal midpoint of the source frame (source_width / 2)."""
+
+    image_center_y: float | None
+    """Vertical midpoint of the source frame (source_height / 2)."""
+
+    line_orientation: str
+    """``'vertical'`` or ``'horizontal'`` — which axis the marks indicate."""
+
+    elapsed_ms: float
+    """Wall-clock time taken for this detection pass in milliseconds."""
+
+    source_width: int
+    source_height: int
+
+
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
@@ -114,6 +182,7 @@ class MachineVisionWorker(QObject):
     calibration_ready = Signal(object)    # CameraCalibration
     calibration_error = Signal(str)
     inspect_calibration_result_ready = Signal(object)   # InspectCalibrationResult
+    red_mark_detection_result_ready = Signal(object)    # RedMarkDetectionResult
 
     # Active method — controls which parameter block is used.
     focus_method: FocusMethod = FOCUS_METHOD_LAPLACIAN
@@ -154,9 +223,29 @@ class MachineVisionWorker(QObject):
     # Shared
     overlay_colormap: int = cv2.COLORMAP_JET
 
+    # Red-mark detection parameters
+    red_mark_scale: int = 4
+    red_mark_open_kernel_size: int = 5
+    red_mark_min_area: int = 500
+    red_mark_max_aspect_ratio: float = 8.0
+    red_mark_min_area_fraction: float = 0.1
+    red_mark_hue_low: int = 160
+    red_mark_hue_high: int = 10
+    red_mark_sat_min: int = 100
+    red_mark_val_min: int = 50
+    red_mark_smoothing_alpha: float = 0.25
+    red_mark_deadband_px: float = 2.0
+    red_mark_max_step_px: float = 30.0
+    red_mark_jump_threshold_px: float = 50.0
+    red_mark_side_cluster_fraction: float = 0.85
+    red_mark_side_cluster_margin: float = 0.18
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._axis_state = AxisState()
+        self._red_smoothed_x: float | None = None
+        self._red_smoothed_y: float | None = None
+        self._red_cluster_frames: int = 0
 
     @Slot(bytes, int, int, bool)
     def run_inspect_calibration(self, frame_bytes: bytes, width: int, height: int, snap: bool = False) -> None:
@@ -208,6 +297,94 @@ class MachineVisionWorker(QObject):
     def reset_inspect_calibration_state(self) -> None:
         """Reset the axis hysteresis state. Call when starting a new inspection session."""
         self._axis_state = AxisState()
+
+    def reset_red_mark_state(self) -> None:
+        """Reset the smoothing and hysteresis state for red-mark detection."""
+        self._red_smoothed_x = None
+        self._red_smoothed_y = None
+        self._red_cluster_frames = 0
+
+    @Slot(bytes, int, int)
+    def run_red_mark_detection(self, frame_bytes: bytes, width: int, height: int) -> None:
+        """
+        Detect red registration marks in the given RGB888 frame.
+
+        Emits ``red_mark_detection_result_ready`` with a
+        ``RedMarkDetectionResult`` containing accepted and rejected centroids,
+        the stabilized reference position, and the active line orientation.
+
+        Smoothing state (EMA, hysteresis) is preserved across calls so the
+        overlay remains stable during live preview.  Call
+        ``reset_red_mark_state`` when starting a new detection session.
+
+        frame_bytes must be a *copy* of the raw RGB888 data
+        (stride == width * 3).
+        """
+        try:
+            t0 = time.perf_counter()
+
+            arr = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3)).copy()
+
+            valid, filtered, valid_mask, filtered_mask, mean_x, mean_y = detect_red_marks(
+                arr,
+                open_kernel_size=self.red_mark_open_kernel_size,
+                min_area=self.red_mark_min_area,
+                scale=self.red_mark_scale,
+                max_aspect_ratio=self.red_mark_max_aspect_ratio,
+                min_area_fraction=self.red_mark_min_area_fraction,
+                hue_low=self.red_mark_hue_low,
+                hue_high=self.red_mark_hue_high,
+                sat_min=self.red_mark_sat_min,
+                val_min=self.red_mark_val_min,
+            )
+
+            self._red_smoothed_x = smooth_value(
+                self._red_smoothed_x, mean_x,
+                self.red_mark_smoothing_alpha,
+                self.red_mark_deadband_px,
+                self.red_mark_max_step_px,
+                self.red_mark_jump_threshold_px,
+            )
+            self._red_smoothed_y = smooth_value(
+                self._red_smoothed_y, mean_y,
+                self.red_mark_smoothing_alpha,
+                self.red_mark_deadband_px,
+                self.red_mark_max_step_px,
+                self.red_mark_jump_threshold_px,
+            )
+
+            orientation, self._red_cluster_frames = line_orientation(
+                valid,
+                width,
+                self.red_mark_side_cluster_fraction,
+                self.red_mark_side_cluster_margin,
+                self._red_cluster_frames,
+            )
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+            result = RedMarkDetectionResult(
+                valid_centers=valid,
+                filtered_centers=filtered,
+                valid_mask=valid_mask,
+                filtered_mask=filtered_mask,
+                mean_x=mean_x,
+                mean_y=mean_y,
+                stabilized_x=self._red_smoothed_x,
+                stabilized_y=self._red_smoothed_y,
+                image_center_x=float(width) / 2.0,
+                image_center_y=float(height) / 2.0,
+                line_orientation=orientation,
+                elapsed_ms=elapsed_ms,
+                source_width=width,
+                source_height=height,
+            )
+            self.red_mark_detection_result_ready.emit(result)
+
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"MachineVisionWorker: red mark detection failed:\n{msg}")
+            self.analysis_error.emit(msg)
 
     @Slot(bytes, int, int)
     def run_focus_analysis(self, frame_bytes: bytes, width: int, height: int) -> None:

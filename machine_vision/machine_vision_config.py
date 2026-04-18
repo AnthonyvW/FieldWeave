@@ -192,6 +192,126 @@ class FocusDetectionSettings:
 
 
 # ---------------------------------------------------------------------------
+# Red-mark detection settings
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RedMarkDetectionSettings:
+    """
+    Parameters for the red registration-mark detection algorithm.
+
+    The detector isolates red blobs in each frame using HSV colour space,
+    filters by area and aspect ratio, and computes a stabilized centroid
+    used to draw a reference line on the preview overlay.
+    """
+
+    scale: int = 4
+    """
+    Downsample factor applied before processing.  The image is resized to
+    1/scale in each dimension before detection; centroids and masks are
+    projected back to full resolution afterwards.  Must be >= 1.
+    Higher values reduce processing time at the cost of precision.
+    """
+
+    open_kernel_size: int = 5
+    """
+    Side length of the elliptical morphological opening kernel applied after
+    HSV thresholding.  Larger values remove more noise but may break up small
+    marks.
+    """
+
+    min_area: int = 500
+    """Minimum blob area in pixels.  Smaller blobs are discarded as noise."""
+
+    max_aspect_ratio: float = 8.0
+    """
+    Maximum ratio of the longer side to the shorter side of a blob's bounding
+    box.  Elongated blobs (e.g. scratches) are discarded above this value.
+    """
+
+    min_area_fraction: float = 0.1
+    """
+    Minimum blob area as a fraction of the largest surviving blob.  Discards
+    small stray marks when a large registration mark is also present.
+    """
+
+    hue_low: int = 160
+    """
+    Lower hue boundary for the upper red range (160-180 in OpenCV HSV).
+    Red wraps around 0/180, so two ranges are combined.
+    """
+
+    hue_high: int = 10
+    """Upper hue boundary for the lower red range (0-hue_high in OpenCV HSV)."""
+
+    sat_min: int = 100
+    """Minimum HSV saturation for a pixel to count as red [0-255]."""
+
+    val_min: int = 50
+    """Minimum HSV value for a pixel to count as red [0-255]."""
+
+    smoothing_alpha: float = 0.25
+    """EMA weight for the stabilized centroid position [0.0 - 1.0]."""
+
+    deadband_px: float = 2.0
+    """Changes smaller than this (in pixels) are ignored to prevent jitter."""
+
+    max_step_px: float = 30.0
+    """Maximum centroid movement per frame in pixels (slew-rate limit)."""
+
+    jump_threshold_px: float = 50.0
+    """
+    If the raw centroid moves more than this many pixels from the smoothed
+    value in a single frame, the smoothed value jumps directly to the raw
+    value instead of slewing.
+    """
+
+    side_cluster_fraction: float = 0.85
+    """
+    Fraction of marks that must be within ``side_cluster_margin`` of one
+    horizontal edge before the line orientation switches to ``'horizontal'``.
+    """
+
+    side_cluster_margin: float = 0.18
+    """
+    Fraction of image width defining the left/right edge zones used by the
+    side-cluster test.
+    """
+
+    def validate(self) -> None:
+        if self.scale < 1:
+            raise ValueError("red_mark.scale must be >= 1")
+        if self.open_kernel_size < 1:
+            raise ValueError("red_mark.open_kernel_size must be >= 1")
+        if self.min_area < 0:
+            raise ValueError("red_mark.min_area must be >= 0")
+        if self.max_aspect_ratio < 1.0:
+            raise ValueError("red_mark.max_aspect_ratio must be >= 1.0")
+        if not (0.0 <= self.min_area_fraction <= 1.0):
+            raise ValueError("red_mark.min_area_fraction must be in [0.0, 1.0]")
+        if not (0 <= self.hue_low <= 180):
+            raise ValueError("red_mark.hue_low must be in [0, 180]")
+        if not (0 <= self.hue_high <= 180):
+            raise ValueError("red_mark.hue_high must be in [0, 180]")
+        if not (0 <= self.sat_min <= 255):
+            raise ValueError("red_mark.sat_min must be in [0, 255]")
+        if not (0 <= self.val_min <= 255):
+            raise ValueError("red_mark.val_min must be in [0, 255]")
+        if not (0.0 <= self.smoothing_alpha <= 1.0):
+            raise ValueError("red_mark.smoothing_alpha must be in [0.0, 1.0]")
+        if self.deadband_px < 0:
+            raise ValueError("red_mark.deadband_px must be >= 0")
+        if self.max_step_px < 0:
+            raise ValueError("red_mark.max_step_px must be >= 0")
+        if self.jump_threshold_px < 0:
+            raise ValueError("red_mark.jump_threshold_px must be >= 0")
+        if not (0.0 <= self.side_cluster_fraction <= 1.0):
+            raise ValueError("red_mark.side_cluster_fraction must be in [0.0, 1.0]")
+        if not (0.0 <= self.side_cluster_margin <= 0.45):
+            raise ValueError("red_mark.side_cluster_margin must be in [0.0, 0.45]")
+
+
+# ---------------------------------------------------------------------------
 # Inspect-calibration settings
 # ---------------------------------------------------------------------------
 
@@ -353,11 +473,14 @@ class MachineVisionSettings:
         default_factory=InspectionCalibrationPosition
     )
     """Saved stage position used as the starting point for inspection calibration."""
+    red_mark: RedMarkDetectionSettings = field(default_factory=RedMarkDetectionSettings)
+    """Parameters for the red registration-mark detection algorithm."""
 
     def validate(self) -> None:
         self.focus.validate()
         self.camera_calibration.validate()
         self.inspect_calibration.validate()
+        self.red_mark.validate()
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +521,27 @@ def _load_focus_region(d: dict[str, Any]) -> FocusRegionSettings:
         right=d.get("right", D.right),
         top=d.get("top", D.top),
         bottom=d.get("bottom", D.bottom),
+    )
+
+
+def _load_red_mark(d: dict[str, Any]) -> RedMarkDetectionSettings:
+    D = RedMarkDetectionSettings
+    return RedMarkDetectionSettings(
+        scale=d.get("scale", D.scale),
+        open_kernel_size=d.get("open_kernel_size", D.open_kernel_size),
+        min_area=d.get("min_area", D.min_area),
+        max_aspect_ratio=d.get("max_aspect_ratio", D.max_aspect_ratio),
+        min_area_fraction=d.get("min_area_fraction", D.min_area_fraction),
+        hue_low=d.get("hue_low", D.hue_low),
+        hue_high=d.get("hue_high", D.hue_high),
+        sat_min=d.get("sat_min", D.sat_min),
+        val_min=d.get("val_min", D.val_min),
+        smoothing_alpha=d.get("smoothing_alpha", D.smoothing_alpha),
+        deadband_px=d.get("deadband_px", D.deadband_px),
+        max_step_px=d.get("max_step_px", D.max_step_px),
+        jump_threshold_px=d.get("jump_threshold_px", D.jump_threshold_px),
+        side_cluster_fraction=d.get("side_cluster_fraction", D.side_cluster_fraction),
+        side_cluster_margin=d.get("side_cluster_margin", D.side_cluster_margin),
     )
 
 
@@ -490,6 +634,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             camera_calibration=camera_calibration,
             inspect_calibration=inspect_calibration,
             inspection_calibration_position=inspection_calibration_position,
+            red_mark=_load_red_mark(data.get("red_mark", {})),
         )
 
     def to_dict(self, settings: MachineVisionSettings) -> dict[str, Any]:
@@ -500,6 +645,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         cc = settings.camera_calibration
         ic = settings.inspect_calibration
         icp = settings.inspection_calibration_position
+        rm = settings.red_mark
         return {
             "dpi": settings.dpi,
             "focus": {
@@ -551,5 +697,22 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 "x_nm": icp.x_nm,
                 "y_nm": icp.y_nm,
                 "z_nm": icp.z_nm,
+            },
+            "red_mark": {
+                "scale": rm.scale,
+                "open_kernel_size": rm.open_kernel_size,
+                "min_area": rm.min_area,
+                "max_aspect_ratio": rm.max_aspect_ratio,
+                "min_area_fraction": rm.min_area_fraction,
+                "hue_low": rm.hue_low,
+                "hue_high": rm.hue_high,
+                "sat_min": rm.sat_min,
+                "val_min": rm.val_min,
+                "smoothing_alpha": rm.smoothing_alpha,
+                "deadband_px": rm.deadband_px,
+                "max_step_px": rm.max_step_px,
+                "jump_threshold_px": rm.jump_threshold_px,
+                "side_cluster_fraction": rm.side_cluster_fraction,
+                "side_cluster_margin": rm.side_cluster_margin,
             },
         }

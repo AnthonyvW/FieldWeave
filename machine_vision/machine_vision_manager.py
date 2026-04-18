@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from common.logger import info, error, warning
 from machine_vision.camera_calibration import CameraCalibration
-from machine_vision.machine_vision_worker import MachineVisionWorker, FocusResult, InspectCalibrationResult
+from machine_vision.machine_vision_worker import MachineVisionWorker, FocusResult, InspectCalibrationResult, RedMarkDetectionResult
 from machine_vision.machine_vision_config import (
     CameraCalibrationSettings,
     FocusDetectionSettings,
@@ -25,6 +25,7 @@ from machine_vision.machine_vision_config import (
     LaplacianSettings,
     MachineVisionSettings,
     MachineVisionSettingsManager,
+    RedMarkDetectionSettings,
     TenengradSettings,
 )
 
@@ -68,6 +69,15 @@ class _PendingInspectCalibration:
     future: Future[InspectCalibrationResult]
 
 
+@dataclass
+class _PendingRedMarkDetection:
+    """A queued red-mark detection request paired with its future."""
+    frame_bytes: bytes
+    width: int
+    height: int
+    future: Future[RedMarkDetectionResult]
+
+
 class MachineVisionManager(QObject):
     """
     GUI-thread owner of the machine-vision pipeline.
@@ -103,6 +113,7 @@ class MachineVisionManager(QObject):
     analysis_error = Signal(str)
     settings_changed = Signal()
     inspect_calibration_result_ready = Signal(object)   # InspectCalibrationResult
+    red_mark_detection_result_ready = Signal(object)    # RedMarkDetectionResult
 
     _request_focus = Signal(bytes, int, int)
     _request_calibration_build = Signal(
@@ -113,6 +124,7 @@ class MachineVisionManager(QObject):
         int, int, int,     # ref_x, ref_y, ref_z
     )
     _request_inspect_calibration = Signal(bytes, int, int, bool)
+    _request_red_mark_detection = Signal(bytes, int, int)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -132,6 +144,11 @@ class MachineVisionManager(QObject):
         self._pending_inspect: _PendingInspectCalibration | None = None
         self._current_inspect: _PendingInspectCalibration | None = None
         self._inspect_busy: bool = False
+
+        # Red-mark detection uses the same latest-frame-wins policy.
+        self._pending_red_mark: _PendingRedMarkDetection | None = None
+        self._current_red_mark: _PendingRedMarkDetection | None = None
+        self._red_mark_busy: bool = False
 
         self._settings_manager = MachineVisionSettingsManager()
         self._settings: MachineVisionSettings = self._load_settings()
@@ -157,6 +174,9 @@ class MachineVisionManager(QObject):
 
         self._request_inspect_calibration.connect(self._worker.run_inspect_calibration)
         self._worker.inspect_calibration_result_ready.connect(self._on_inspect_calibration_result)
+
+        self._request_red_mark_detection.connect(self._worker.run_red_mark_detection)
+        self._worker.red_mark_detection_result_ready.connect(self._on_red_mark_result)
 
         self._thread.start()
         self._apply_settings(self._settings)
@@ -471,6 +491,67 @@ class MachineVisionManager(QObject):
         """
         self._worker.reset_inspect_calibration_state()
 
+    def request_red_mark_detection_async(
+        self,
+        frame: np.ndarray,
+        width: int,
+        height: int,
+    ) -> Future[RedMarkDetectionResult]:
+        """
+        Submit a red-mark detection request and return a
+        ``Future[RedMarkDetectionResult]``.
+
+        Uses the same latest-frame-wins policy as focus analysis: if a request
+        is already queued but not yet dispatched it is cancelled and replaced
+        by this one.
+
+        The frame is copied immediately so the camera buffer may be reused
+        before the future resolves.
+
+        This method is safe to call from the GUI thread only.
+        """
+        future: Future[RedMarkDetectionResult] = Future()
+        pending = _PendingRedMarkDetection(
+            frame_bytes=bytes(frame),
+            width=width,
+            height=height,
+            future=future,
+        )
+
+        if self._pending_red_mark is not None:
+            self._pending_red_mark.future.cancel()
+
+        self._pending_red_mark = pending
+        self._try_dispatch_red_mark()
+        return future
+
+    def request_red_mark_detection(
+        self,
+        frame: np.ndarray,
+        width: int,
+        height: int,
+    ) -> bool:
+        """
+        Fire-and-forget wrapper around ``request_red_mark_detection_async``.
+
+        Results arrive via ``red_mark_detection_result_ready``; errors arrive
+        via ``analysis_error``.  Always returns ``True``.
+
+        The frame is copied immediately so the camera buffer may be reused.
+        """
+        future = self.request_red_mark_detection_async(frame, width, height)
+        future.add_done_callback(self._signal_from_red_mark_future)
+        return True
+
+    def reset_red_mark_state(self) -> None:
+        """
+        Reset the smoothing and hysteresis state for red-mark detection.
+
+        Call this when starting a new detection session so stale EMA values
+        from a previous run do not bias the first result.
+        """
+        self._worker.reset_red_mark_state()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -494,6 +575,26 @@ class MachineVisionManager(QObject):
             self.analysis_error.emit(str(exc))
         else:
             self.inspect_calibration_result_ready.emit(future.result())
+
+    def _try_dispatch_red_mark(self) -> None:
+        """Dispatch the pending red-mark request if the worker is free."""
+        if self._red_mark_busy or self._pending_red_mark is None:
+            return
+        pending = self._pending_red_mark
+        self._pending_red_mark = None
+        self._red_mark_busy = True
+        self._current_red_mark = pending
+        self._request_red_mark_detection.emit(pending.frame_bytes, pending.width, pending.height)
+
+    def _signal_from_red_mark_future(self, future: Future[RedMarkDetectionResult]) -> None:
+        """Done-callback that fans out a resolved red-mark future to the public signals."""
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is not None:
+            self.analysis_error.emit(str(exc))
+        else:
+            self.red_mark_detection_result_ready.emit(future.result())
 
     def _try_dispatch(self) -> None:
         """Dispatch the pending request if the worker is free."""
@@ -586,12 +687,30 @@ class MachineVisionManager(QObject):
         w.inspect_calibration_snap_downsample = ic.snap.downsample
         w.inspect_calibration_snap_tick_min_length = ic.snap.tick_min_length
 
+        rm = settings.red_mark
+        w.red_mark_scale = rm.scale
+        w.red_mark_open_kernel_size = rm.open_kernel_size
+        w.red_mark_min_area = rm.min_area
+        w.red_mark_max_aspect_ratio = rm.max_aspect_ratio
+        w.red_mark_min_area_fraction = rm.min_area_fraction
+        w.red_mark_hue_low = rm.hue_low
+        w.red_mark_hue_high = rm.hue_high
+        w.red_mark_sat_min = rm.sat_min
+        w.red_mark_val_min = rm.val_min
+        w.red_mark_smoothing_alpha = rm.smoothing_alpha
+        w.red_mark_deadband_px = rm.deadband_px
+        w.red_mark_max_step_px = rm.max_step_px
+        w.red_mark_jump_threshold_px = rm.jump_threshold_px
+        w.red_mark_side_cluster_fraction = rm.side_cluster_fraction
+        w.red_mark_side_cluster_margin = rm.side_cluster_margin
+
     def _copy_settings(self) -> MachineVisionSettings:
         """Return a deep copy of the current settings for mutation."""
         f = self._settings.focus
         t, lap = f.tenengrad, f.laplacian
         fr = f.focus_region
         cc = self._settings.camera_calibration
+        rm = self._settings.red_mark
         return MachineVisionSettings(
             dpi=self._settings.dpi,
             focus=FocusDetectionSettings(
@@ -637,6 +756,23 @@ class MachineVisionManager(QObject):
                     tick_min_length=self._settings.inspect_calibration.snap.tick_min_length,
                 ),
                 last_calibrated=self._settings.inspect_calibration.last_calibrated,
+            ),
+            red_mark=RedMarkDetectionSettings(
+                scale=rm.scale,
+                open_kernel_size=rm.open_kernel_size,
+                min_area=rm.min_area,
+                max_aspect_ratio=rm.max_aspect_ratio,
+                min_area_fraction=rm.min_area_fraction,
+                hue_low=rm.hue_low,
+                hue_high=rm.hue_high,
+                sat_min=rm.sat_min,
+                val_min=rm.val_min,
+                smoothing_alpha=rm.smoothing_alpha,
+                deadband_px=rm.deadband_px,
+                max_step_px=rm.max_step_px,
+                jump_threshold_px=rm.jump_threshold_px,
+                side_cluster_fraction=rm.side_cluster_fraction,
+                side_cluster_margin=rm.side_cluster_margin,
             ),
         )
 
@@ -685,6 +821,13 @@ class MachineVisionManager(QObject):
         pending.future.set_result(result)
         self._try_dispatch_inspect()
 
+    @Slot(object)
+    def _on_red_mark_result(self, result: RedMarkDetectionResult) -> None:
+        pending = self._current_red_mark
+        self._red_mark_busy = False
+        pending.future.set_result(result)
+        self._try_dispatch_red_mark()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -706,6 +849,10 @@ class MachineVisionManager(QObject):
         if self._pending_inspect is not None:
             self._pending_inspect.future.cancel()
             self._pending_inspect = None
+
+        if self._pending_red_mark is not None:
+            self._pending_red_mark.future.cancel()
+            self._pending_red_mark = None
 
         self._thread.quit()
         if not self._thread.wait(3000):
