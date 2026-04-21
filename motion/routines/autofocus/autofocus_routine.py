@@ -154,7 +154,7 @@ class Autofocus(AutomationRoutine):
             if frame is None:
                 return float("-inf")
             try:
-                future = mv.request_focus_analysis_async(frame, frame.shape[1], frame.shape[0])
+                future = mv.request_focus_analysis_guaranteed(frame)
                 return float(future.result(timeout=10.0).scores.peak)
             except Exception:
                 return float("-inf")
@@ -166,7 +166,7 @@ class Autofocus(AutomationRoutine):
             if frame is None:
                 return float("-inf")
             try:
-                future = mv.request_focus_analysis_async(frame, frame.shape[1], frame.shape[0])
+                future = mv.request_focus_analysis_guaranteed(frame)
                 return float(future.result(timeout=10.0).scores.peak)
             except Exception:
                 return float("-inf")

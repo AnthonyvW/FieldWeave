@@ -28,11 +28,59 @@ config system is in use (e.g. ``MachineVisionSettingsManager``).
 
 from __future__ import annotations
 
+from typing import Any, Literal, TYPE_CHECKING
 from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable
 
 import cv2
 import numpy as np
+
+from machine_vision.algorithms.vision_algorithm import VisionAlgorithm
+
+if TYPE_CHECKING:
+    from machine_vision.machine_vision_config import MachineVisionSettings as _MachineVisionSettings
+
+
+# ---------------------------------------------------------------------------
+# Y-axis orientation
+# ---------------------------------------------------------------------------
+
+CameraYAxisOrientation = Literal["horizontal", "vertical"]
+"""
+Which image axis the world Y axis is primarily aligned with.
+
+``"vertical"``   — a +Y stage move shifts the image mostly up or down.
+``"horizontal"`` — a +Y stage move shifts the image mostly left or right.
+
+Derived from ``CameraCalibration.M_est`` and never persisted; recomputed
+whenever a calibration is loaded or newly built.
+"""
+
+
+def derive_y_axis_orientation(M_est: np.ndarray) -> CameraYAxisOrientation:
+    """
+    Determine which camera axis the world Y axis primarily aligns with.
+
+    Applies ``M_est`` to a unit world-Y vector ``[0, 1]`` to obtain the
+    pixel displacement produced by a +Y stage move.  Whichever pixel
+    component (X = horizontal, Y = vertical) has the larger absolute
+    magnitude is the primary axis.
+
+    Parameters
+    ----------
+    M_est:
+        2×2 camera-to-stage mapping matrix from ``CameraCalibration``.
+
+    Returns
+    -------
+    ``"horizontal"`` if the world Y axis maps primarily along the image
+    X axis, ``"vertical"`` otherwise.
+    """
+    world_y = np.array([[0.0], [1.0]], dtype=np.float64)
+    pixel_delta = M_est @ world_y
+    dpx = abs(float(pixel_delta[0, 0]))
+    dpy = abs(float(pixel_delta[1, 0]))
+    return "horizontal" if dpx > dpy else "vertical"
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +129,13 @@ class CameraCalibration:
     move_y_ticks: int
 
     dpi: float | None = None
+
+    y_axis_orientation: CameraYAxisOrientation = "vertical"
+    """
+    Which image axis the world Y axis is primarily aligned with.
+    Derived from ``M_est``; not persisted.  Recomputed by ``from_dict``
+    and ``build_calibration``.
+    """
 
     # ------------------------------------------------------------------
     # Coordinate conversion
@@ -188,6 +243,7 @@ class CameraCalibration:
             move_x_ticks=int(d.get("move_x_ticks", 100)),
             move_y_ticks=int(d.get("move_y_ticks", 100)),
             dpi=d.get("dpi"),
+            y_axis_orientation=derive_y_axis_orientation(M_est),
         )
 
 
@@ -360,4 +416,51 @@ def build_calibration(
         image_height=image_height,
         move_x_ticks=move_x_ticks,
         move_y_ticks=move_y_ticks,
+        y_axis_orientation=derive_y_axis_orientation(M_est),
     )
+
+# ---------------------------------------------------------------------------
+# CalibrationBuild — settings-aware algorithm class
+# ---------------------------------------------------------------------------
+
+
+class CalibrationBuild(VisionAlgorithm):
+    """
+    Builds a ``CameraCalibration`` from three captured frames.
+
+    On success, writes the result back into
+    ``settings.camera_calibration.calibration`` and calls ``save_settings``
+    so the calibration is persisted without any involvement from the manager.
+    """
+
+    def __init__(self, settings: _MachineVisionSettings, save_settings: Callable[[], None]) -> None:
+        super().__init__(settings)
+        self._save_settings = save_settings
+
+    def process(
+        self,
+        base_bytes: bytes, base_width: int, base_height: int,
+        x_bytes: bytes,    x_width: int,    x_height: int,
+        y_bytes: bytes,    y_width: int,    y_height: int,
+        move_x_ticks: int, move_y_ticks: int,
+        ref_x: int, ref_y: int, ref_z: int,
+    ) -> CameraCalibration:
+        def _to_edge(fb: bytes, w: int, h: int) -> np.ndarray:
+            arr = np.frombuffer(fb, dtype=np.uint8).reshape((h, w, 3))
+            return compute_edge_map(rgb_to_gray(arr))
+
+        calibration = build_calibration(
+            edges_base=_to_edge(base_bytes, base_width, base_height),
+            edges_x=_to_edge(x_bytes, x_width, x_height),
+            edges_y=_to_edge(y_bytes, y_width, y_height),
+            move_x_ticks=move_x_ticks,
+            move_y_ticks=move_y_ticks,
+            ref_x=ref_x,
+            ref_y=ref_y,
+            ref_z=ref_z,
+            image_width=base_width,
+            image_height=base_height,
+        )
+        self._settings.camera_calibration.calibration = calibration
+        self._save_settings()
+        return calibration

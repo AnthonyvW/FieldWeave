@@ -14,17 +14,18 @@ horizontal depending on mark distribution), and the offset from image center.
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PySide6.QtCore import QRect, Qt, Slot
+from PySide6.QtCore import QRect, Qt, QObject, Signal, Slot
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QImage
 
 from common.app_context import get_app_context
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
 if TYPE_CHECKING:
-    from machine_vision.machine_vision_worker import RedMarkDetectionResult
+    from machine_vision.algorithms.red_mark_detection import RedMarkDetectionResult
 
 _COL_VALID   = QColor(0, 255, 0)
 _COL_INVALID = QColor(255, 80, 80)
@@ -77,6 +78,10 @@ def _draw_text_shadowed(
     painter.drawText(x, y, text)
 
 
+class _ResultRelay(QObject):
+    result_ready = Signal(object)
+
+
 class RedMarkDetectionOverlay(Overlay):
     """
     Overlay that draws red-mark detection results onto the preview.
@@ -99,9 +104,8 @@ class RedMarkDetectionOverlay(Overlay):
         self._result: RedMarkDetectionResult | None = None
         self._source_width: int = 1
         self._source_height: int = 1
-        get_app_context().machine_vision.red_mark_detection_result_ready.connect(
-            self.receive_result
-        )
+        self._relay = _ResultRelay()
+        self._relay.result_ready.connect(self._on_result)
 
     # ------------------------------------------------------------------
     # Called by OverlayLabel on every rendered frame (GUI thread)
@@ -111,23 +115,28 @@ class RedMarkDetectionOverlay(Overlay):
         """
         Called by OverlayLabel.notify_full() with each full-resolution frame.
 
-        Submits a detection job to the vision manager.  The manager silently
-        drops the request if it is still processing the previous frame.
+        Submits a detection job to the vision manager and attaches a
+        done-callback to deliver the result back to the GUI thread.
         """
         h, w = frame.shape[:2]
-        get_app_context().machine_vision.request_red_mark_detection(frame, w, h)
+        future = get_app_context().machine_vision.request_red_mark_detection(frame, w, h)
+        future.add_done_callback(self._on_future_done)
 
     # ------------------------------------------------------------------
-    # Receive results from MachineVisionManager (GUI thread, queued signal)
+    # Future done-callback (called on worker thread)
+    # ------------------------------------------------------------------
+
+    def _on_future_done(self, future: Future) -> None:
+        if future.cancelled() or future.exception() is not None:
+            return
+        self._relay.result_ready.emit(future.result())
+
+    # ------------------------------------------------------------------
+    # Slot — receives result on GUI thread via queued signal
     # ------------------------------------------------------------------
 
     @Slot(object)
-    def receive_result(self, result: RedMarkDetectionResult) -> None:
-        """
-        Store the latest detection result for painting.
-
-        Always called on the GUI thread via Qt queued connection.
-        """
+    def _on_result(self, result: RedMarkDetectionResult) -> None:
         self._result = result
         self._source_width = result.source_width
         self._source_height = result.source_height
@@ -229,9 +238,6 @@ class RedMarkDetectionOverlay(Overlay):
 red_mark.py
 
 Toolbar button for the red-mark detection overlay.
-
-Follows the same pattern as FocusButton / GridButton so CameraPreview can
-treat all overlay buttons uniformly.
 """
 
 from PySide6.QtCore import Signal
@@ -267,8 +273,6 @@ class RedMarkButton(QPushButton):
         cx, cy = w / 2.0, h / 2.0
 
         dot_r = h * 0.18
-
-        # Crosshair lines
         arm = h * 0.36
         pen = QPen(QColor(180, 180, 180) if not self.isChecked() else QColor(60, 60, 60))
         pen.setWidth(1)
@@ -276,7 +280,6 @@ class RedMarkButton(QPushButton):
         painter.drawLine(int(cx - arm), int(cy), int(cx + arm), int(cy))
         painter.drawLine(int(cx), int(cy - arm), int(cx), int(cy + arm))
 
-        # Red filled circle at centre
         painter.setPen(QPen(QColor(180, 40, 40), 1))
         painter.setBrush(QColor(220, 50, 50))
         painter.drawEllipse(

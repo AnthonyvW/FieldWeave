@@ -16,7 +16,7 @@ from typing import Any, Literal, Union
 
 from common.generic_config import ConfigManager
 from common.logger import info
-from machine_vision.camera_calibration import CameraCalibration
+from machine_vision.algorithms.camera_calibration import CameraCalibration, CameraYAxisOrientation
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +411,18 @@ class CameraCalibrationSettings:
 
     calibration: CameraCalibration | None = None
     """Most recently computed calibration, or None if uncalibrated."""
+
+    @property
+    def y_axis_orientation(self) -> CameraYAxisOrientation | None:
+        """
+        Which image axis the world Y axis is primarily aligned with, or
+        ``None`` when no calibration is present.
+
+        Derived from the active ``CameraCalibration.M_est``; never persisted.
+        """
+        if self.calibration is None:
+            return None
+        return self.calibration.y_axis_orientation
 
     def validate(self) -> None:
         if self.move_x_ticks <= 0:

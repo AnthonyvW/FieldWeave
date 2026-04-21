@@ -1,21 +1,25 @@
 """
 machine_vision_manager.py
 
-GUI-thread owner of the machine-vision worker thread.
-Owns persistent settings and exposes a clean API for requesting analysis.
+GUI-thread owner of the machine-vision pipeline.
 """
 
 from __future__ import annotations
 
+import traceback
+from collections import deque
+from collections.abc import Callable
 from concurrent.futures import Future
-from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from common.logger import info, error, warning
-from machine_vision.camera_calibration import CameraCalibration
-from machine_vision.machine_vision_worker import MachineVisionWorker, FocusResult, InspectCalibrationResult, RedMarkDetectionResult
+from machine_vision.algorithms.camera_calibration import CameraCalibration, CalibrationBuild
+from machine_vision.algorithms.focus_detection import FocusAnalysis, FocusResult
+from machine_vision.algorithms.calibration_bar_detection import InspectCalibration, InspectCalibrationResult
+from machine_vision.algorithms.red_mark_detection import RedMarkDetection, RedMarkDetectionResult
 from machine_vision.machine_vision_config import (
     CameraCalibrationSettings,
     FocusDetectionSettings,
@@ -30,54 +34,199 @@ from machine_vision.machine_vision_config import (
     TenengradSettings,
 )
 
-
-@dataclass
-class _PendingRequest:
-    """A queued focus analysis request paired with its future."""
-    frame_bytes: bytes
-    width: int
-    height: int
-    future: Future[FocusResult]
+_T = TypeVar("_T")
 
 
-@dataclass
-class _PendingCalibration:
-    """A queued calibration-build request paired with its future."""
-    base_bytes: bytes
-    base_width: int
-    base_height: int
-    x_bytes: bytes
-    x_width: int
-    x_height: int
-    y_bytes: bytes
-    y_width: int
-    y_height: int
-    move_x_ticks: int
-    move_y_ticks: int
-    ref_x: int
-    ref_y: int
-    ref_z: int
-    future: Future[CameraCalibration]
+# ---------------------------------------------------------------------------
+# JobQueue — generic latest-frame-wins dispatch abstraction
+# ---------------------------------------------------------------------------
+
+class JobQueue(Generic[_T]):
+    """
+    Manages pending/current/busy state for a single worker job type.
+
+    ``dispatch`` is called with the pending args tuple when the queue is free.
+    ``result_signal`` and ``error_signal`` are connected at construction time
+    so all wiring for a job type is colocated at the registration call site.
+
+    Two submission modes are provided:
+
+    ``submit`` — latest-frame-wins.  If a request is already waiting it is
+    cancelled and replaced.  Use this for streaming preview frames where only
+    the most recent result matters.
+
+    ``submit_guaranteed`` — FIFO, never dropped.  Requests are appended to a
+    separate deque and always executed in order.  Guaranteed jobs are drained
+    before any pending droppable job is dispatched.  Use this when a result
+    for a specific frame must be obtained (e.g. autofocus scoring).
+
+    All methods must be called from the GUI thread only.
+    """
+
+    def __init__(
+        self,
+        dispatch: Callable[[tuple], None],
+        result_signal: Signal,
+        error_signal: Signal,
+    ) -> None:
+        self._dispatch = dispatch
+        self._pending: tuple | None = None
+        self._pending_future: Future[_T] | None = None
+        self._guaranteed: deque[tuple[tuple, Future[_T]]] = deque()
+        self._current_future: Future[_T] | None = None
+        self._busy: bool = False
+        result_signal.connect(self._handle_result)
+        error_signal.connect(self._handle_error)
+
+    def submit(self, args: tuple) -> Future[_T]:
+        future: Future[_T] = Future()
+        if self._pending_future is not None:
+            self._pending_future.cancel()
+        self._pending = args
+        self._pending_future = future
+        self._try_dispatch()
+        return future
+
+    def submit_guaranteed(self, args: tuple) -> Future[_T]:
+        future: Future[_T] = Future()
+        self._guaranteed.append((args, future))
+        self._try_dispatch()
+        return future
+
+    def cancel_pending(self) -> None:
+        if self._pending_future is not None:
+            self._pending_future.cancel()
+            self._pending_future = None
+            self._pending = None
+
+    def _handle_result(self, result: _T) -> None:
+        if not self._busy:
+            return
+        future = self._current_future
+        self._busy = False
+        self._current_future = None
+        future.set_result(result)
+        self._try_dispatch()
+
+    def _handle_error(self, msg: str) -> None:
+        if not self._busy:
+            return
+        future = self._current_future
+        self._busy = False
+        self._current_future = None
+        future.set_exception(RuntimeError(msg))
+        self._try_dispatch()
+
+    def _try_dispatch(self) -> None:
+        if self._busy:
+            return
+        if self._guaranteed:
+            args, future = self._guaranteed.popleft()
+            self._current_future = future
+            self._busy = True
+            self._dispatch(args)
+            return
+        if self._pending is not None:
+            args = self._pending
+            self._current_future = self._pending_future
+            self._pending = None
+            self._pending_future = None
+            self._busy = True
+            self._dispatch(args)
 
 
-@dataclass
-class _PendingInspectCalibration:
-    """A queued calibration-bar inspection request paired with its future."""
-    frame_bytes: bytes
-    width: int
-    height: int
-    snap: bool
-    future: Future[InspectCalibrationResult]
+# ---------------------------------------------------------------------------
+# Worker — private QObject that lives on the vision thread
+# ---------------------------------------------------------------------------
+
+class _VisionWorker(QObject):
+    """
+    Thin QObject dispatcher that lives on the vision thread.
+
+    Holds the signals and slots that must execute off the GUI thread.
+    All algorithm logic is delegated to ``VisionAlgorithm`` instances, which
+    read their parameters directly from the shared ``MachineVisionSettings``.
+    """
+
+    focus_result_ready = Signal(object)                 # FocusResult
+    focus_error = Signal(str)
+    calibration_ready = Signal(object)                  # CameraCalibration
+    calibration_error = Signal(str)
+    inspect_calibration_result_ready = Signal(object)   # InspectCalibrationResult
+    inspect_calibration_error = Signal(str)
+    red_mark_detection_result_ready = Signal(object)    # RedMarkDetectionResult
+    red_mark_detection_error = Signal(str)
+
+    def __init__(self, settings: MachineVisionSettings, save_settings: Callable[[], None], parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._focus = FocusAnalysis(settings)
+        self._calibration_build = CalibrationBuild(settings, save_settings)
+        self._inspect_calibration = InspectCalibration(settings)
+        self._red_mark_detection = RedMarkDetection(settings)
+
+    @Slot(bytes, int, int)
+    def run_focus_analysis(self, frame_bytes: bytes, width: int, height: int) -> None:
+        try:
+            self.focus_result_ready.emit(self._focus.process(frame_bytes, width, height))
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"_VisionWorker: focus analysis failed:\n{msg}")
+            self.focus_error.emit(msg)
+
+    @Slot(bytes, int, int, bytes, int, int, bytes, int, int, int, int, int, int, int)
+    def run_calibration_build(
+        self,
+        base_bytes: bytes, base_width: int, base_height: int,
+        x_bytes: bytes,    x_width: int,    x_height: int,
+        y_bytes: bytes,    y_width: int,    y_height: int,
+        move_x_ticks: int, move_y_ticks: int,
+        ref_x: int, ref_y: int, ref_z: int,
+    ) -> None:
+        try:
+            self.calibration_ready.emit(self._calibration_build.process(
+                base_bytes, base_width, base_height,
+                x_bytes,    x_width,    x_height,
+                y_bytes,    y_width,    y_height,
+                move_x_ticks, move_y_ticks,
+                ref_x, ref_y, ref_z,
+            ))
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"_VisionWorker: calibration build failed:\n{msg}")
+            self.calibration_error.emit(msg)
+
+    @Slot(bytes, int, int, bool)
+    def run_inspect_calibration(self, frame_bytes: bytes, width: int, height: int, snap: bool = False) -> None:
+        try:
+            self.inspect_calibration_result_ready.emit(
+                self._inspect_calibration.process(frame_bytes, width, height, snap)
+            )
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"_VisionWorker: inspect calibration failed:\n{msg}")
+            self.inspect_calibration_error.emit(msg)
+
+    @Slot(bytes, int, int)
+    def run_red_mark_detection(self, frame_bytes: bytes, width: int, height: int) -> None:
+        try:
+            self.red_mark_detection_result_ready.emit(
+                self._red_mark_detection.process(frame_bytes, width, height)
+            )
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"_VisionWorker: red mark detection failed:\n{msg}")
+            self.red_mark_detection_error.emit(msg)
+
+    def reset_inspect_calibration_state(self) -> None:
+        self._inspect_calibration.reset()
+
+    def reset_red_mark_state(self) -> None:
+        self._red_mark_detection.reset()
 
 
-@dataclass
-class _PendingRedMarkDetection:
-    """A queued red-mark detection request paired with its future."""
-    frame_bytes: bytes
-    width: int
-    height: int
-    future: Future[RedMarkDetectionResult]
-
+# ---------------------------------------------------------------------------
+# Manager
+# ---------------------------------------------------------------------------
 
 class MachineVisionManager(QObject):
     """
@@ -85,44 +234,32 @@ class MachineVisionManager(QObject):
 
     Signals
     -------
-    focus_result_ready(FocusResult):
-        Delivered on the GUI thread after a successful focus pass.
-    analysis_error(str):
-        Delivered on the GUI thread when a worker exception occurs.
     settings_changed():
         Emitted after settings are applied so UI pages can refresh.
 
-    Guaranteed-result API
-    ---------------------
-    Use ``request_focus_analysis_async`` to get a ``Future[FocusResult]``
-    that is always resolved — either with the result or with an exception.
+    Request API
+    -----------
+    Every ``request_*`` / ``submit_*`` method returns a ``Future`` that is
+    always resolved — either with the result or with the worker exception
+    reraised.  Callers that want signal-based delivery attach a done-callback
+    to the returned ``Future``; no PySide6 import is required in the callback.
 
     Latest-frame-wins policy
     ------------------------
-    At most one request sits pending behind the in-flight job.  When a new
-    request arrives while the worker is busy, any previously waiting request
-    is cancelled and replaced with the newest frame.  This keeps the overlay
-    current for live preview: stale queued frames are never processed.
-
-    Fire-and-forget API
-    -------------------
-    ``request_focus_analysis`` is a convenience wrapper that wires the future
-    to the ``focus_result_ready`` / ``analysis_error`` signals as before.
+    At most one request waits behind the in-flight job per job type.  When a
+    new request arrives while the worker is busy the previously waiting
+    request is cancelled and replaced.
     """
 
-    focus_result_ready = Signal(object)   # FocusResult
-    analysis_error = Signal(str)
     settings_changed = Signal()
-    inspect_calibration_result_ready = Signal(object)   # InspectCalibrationResult
-    red_mark_detection_result_ready = Signal(object)    # RedMarkDetectionResult
 
     _request_focus = Signal(bytes, int, int)
     _request_calibration_build = Signal(
-        bytes, int, int,   # base frame
-        bytes, int, int,   # x frame
-        bytes, int, int,   # y frame
-        int, int,          # move_x_ticks, move_y_ticks
-        int, int, int,     # ref_x, ref_y, ref_z
+        bytes, int, int,
+        bytes, int, int,
+        bytes, int, int,
+        int, int,
+        int, int, int,
     )
     _request_inspect_calibration = Signal(bytes, int, int, bool)
     _request_red_mark_detection = Signal(bytes, int, int)
@@ -130,58 +267,56 @@ class MachineVisionManager(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
 
-        # At most one request waits behind the in-flight job (latest-frame-wins).
-        # Both fields are only ever touched from the GUI thread.
-        self._pending: _PendingRequest | None = None
-        self._current_pending: _PendingRequest | None = None
-        self._busy: bool = False
-
-        # Calibration build runs exclusively (not interleaved with focus jobs).
-        self._pending_calibration: _PendingCalibration | None = None
-        self._current_calibration: _PendingCalibration | None = None
-        self._calibration_busy: bool = False
-
-        # Inspect-calibration uses the same latest-frame-wins policy as focus.
-        self._pending_inspect: _PendingInspectCalibration | None = None
-        self._current_inspect: _PendingInspectCalibration | None = None
-        self._inspect_busy: bool = False
-
-        # Red-mark detection uses the same latest-frame-wins policy.
-        self._pending_red_mark: _PendingRedMarkDetection | None = None
-        self._current_red_mark: _PendingRedMarkDetection | None = None
-        self._red_mark_busy: bool = False
-
         self._settings_manager = MachineVisionSettingsManager()
         self._settings: MachineVisionSettings = self._load_settings()
-
-        # Calibration is loaded from settings; can also be set at runtime.
-        self._calibration: CameraCalibration | None = (
-            self._settings.camera_calibration.calibration
-        )
 
         self._thread = QThread(self)
         self._thread.setObjectName("MachineVisionThread")
 
-        self._worker = MachineVisionWorker()
+        self._worker = _VisionWorker(self._settings, self.save_settings)
         self._worker.moveToThread(self._thread)
 
-        self._request_focus.connect(self._worker.run_focus_analysis)
-        self._worker.focus_result_ready.connect(self._on_focus_result)
-        self._worker.analysis_error.connect(self._on_analysis_error)
-
-        self._request_calibration_build.connect(self._worker.run_calibration_build)
-        self._worker.calibration_ready.connect(self._on_calibration_ready)
-        self._worker.calibration_error.connect(self._on_calibration_error)
-
-        self._request_inspect_calibration.connect(self._worker.run_inspect_calibration)
-        self._worker.inspect_calibration_result_ready.connect(self._on_inspect_calibration_result)
-
-        self._request_red_mark_detection.connect(self._worker.run_red_mark_detection)
-        self._worker.red_mark_detection_result_ready.connect(self._on_red_mark_result)
+        self._focus_queue = self._register_queue(
+            request_signal=self._request_focus,
+            worker_slot=self._worker.run_focus_analysis,
+            result_signal=self._worker.focus_result_ready,
+            error_signal=self._worker.focus_error,
+        )
+        self._calibration_queue = self._register_queue(
+            request_signal=self._request_calibration_build,
+            worker_slot=self._worker.run_calibration_build,
+            result_signal=self._worker.calibration_ready,
+            error_signal=self._worker.calibration_error,
+        )
+        self._inspect_queue = self._register_queue(
+            request_signal=self._request_inspect_calibration,
+            worker_slot=self._worker.run_inspect_calibration,
+            result_signal=self._worker.inspect_calibration_result_ready,
+            error_signal=self._worker.inspect_calibration_error,
+        )
+        self._red_mark_queue = self._register_queue(
+            request_signal=self._request_red_mark_detection,
+            worker_slot=self._worker.run_red_mark_detection,
+            result_signal=self._worker.red_mark_detection_result_ready,
+            error_signal=self._worker.red_mark_detection_error,
+        )
 
         self._thread.start()
-        self._apply_settings(self._settings)
         info("MachineVisionManager: worker thread started")
+
+    def _register_queue(
+        self,
+        request_signal: Signal,
+        worker_slot,
+        result_signal: Signal,
+        error_signal: Signal,
+    ) -> JobQueue:
+        request_signal.connect(worker_slot)
+        return JobQueue(
+            dispatch=lambda args: request_signal.emit(*args),
+            result_signal=result_signal,
+            error_signal=error_signal,
+        )
 
     # ------------------------------------------------------------------
     # Settings API
@@ -192,14 +327,24 @@ class MachineVisionManager(QObject):
         return self._settings
 
     def apply_settings(self, settings: MachineVisionSettings) -> None:
-        """Apply *settings* to the worker immediately without saving to disk."""
+        """
+        Apply new settings values by updating the existing settings object in-place.
+
+        All algorithms hold a reference to the same ``MachineVisionSettings``
+        instance and read from it at ``process()`` time, so in-place mutation
+        is sufficient — no reference update or fan-out is needed.
+        """
         try:
             settings.validate()
         except ValueError as exc:
             error(f"MachineVisionManager: invalid settings — {exc}")
             return
-        self._settings = settings
-        self._apply_settings(settings)
+        self._settings.dpi = settings.dpi
+        self._settings.focus = settings.focus
+        self._settings.camera_calibration = settings.camera_calibration
+        self._settings.inspect_calibration = settings.inspect_calibration
+        self._settings.inspection_calibration_position = settings.inspection_calibration_position
+        self._settings.red_mark = settings.red_mark
         self.settings_changed.emit()
 
     def save_settings(self) -> None:
@@ -217,12 +362,12 @@ class MachineVisionManager(QObject):
     @property
     def calibration(self) -> CameraCalibration | None:
         """The most recently completed calibration, or ``None`` if uncalibrated."""
-        return self._calibration
+        return self._settings.camera_calibration.calibration
 
     @property
     def is_calibrated(self) -> bool:
         """``True`` when a valid calibration is available."""
-        return self._calibration is not None
+        return self._settings.camera_calibration.calibration is not None
 
     def pixel_to_world_delta(
         self,
@@ -236,22 +381,13 @@ class MachineVisionManager(QObject):
 
         Delegates to ``CameraCalibration.pixel_to_world_delta``.  Returns
         ``None`` when no calibration is available.
-
-        Parameters
-        ----------
-        pixel_x, pixel_y:
-            Target pixel coordinates (origin top-left).
-        image_center_x, image_center_y:
-            Override the image centre used for the conversion.  Defaults to
-            the image dimensions recorded at calibration time.
         """
-        if self._calibration is None:
+        cal = self._settings.camera_calibration.calibration
+        if cal is None:
             return None
-        return self._calibration.pixel_to_world_delta(
-            pixel_x, pixel_y, image_center_x, image_center_y
-        )
+        return cal.pixel_to_world_delta(pixel_x, pixel_y, image_center_x, image_center_y)
 
-    def submit_calibration_frames_async(
+    def submit_calibration_frames(
         self,
         base_frame: np.ndarray,
         base_width: int,
@@ -275,51 +411,29 @@ class MachineVisionManager(QObject):
         The three frames must have been captured at the base (reference)
         position, after a +X move, and after a +Y move respectively.  The
         stage must have returned to the base position between the X and Y
-        captures — this is the caller's (printer controller's) responsibility.
+        captures.
 
         Each frame is copied immediately so camera buffers may be reused.
-
         ``move_x_ticks`` and ``move_y_ticks`` default to the values stored in
         ``settings.camera_calibration`` if not supplied.
 
-        If a calibration build is already in progress the new request replaces
-        it (latest-request-wins, consistent with the focus analysis policy).
-        The future is always resolved: set to the ``CameraCalibration`` on
-        success, or to an exception on failure.  On success the manager's
-        ``_calibration`` attribute is updated automatically.
-
-        This method is safe to call from the GUI thread only.
+        On success the calibration is written into the settings object and
+        persisted automatically.
         """
         cc = self._settings.camera_calibration
         mx = move_x_ticks if move_x_ticks is not None else cc.move_x_ticks
         my = move_y_ticks if move_y_ticks is not None else cc.move_y_ticks
 
-        future: Future[CameraCalibration] = Future()
-        pending = _PendingCalibration(
-            base_bytes=bytes(base_frame),
-            base_width=base_width,
-            base_height=base_height,
-            x_bytes=bytes(x_frame),
-            x_width=x_width,
-            x_height=x_height,
-            y_bytes=bytes(y_frame),
-            y_width=y_width,
-            y_height=y_height,
-            move_x_ticks=mx,
-            move_y_ticks=my,
-            ref_x=ref_x,
-            ref_y=ref_y,
-            ref_z=ref_z,
-            future=future,
+        args = (
+            bytes(base_frame), base_width, base_height,
+            bytes(x_frame),    x_width,    x_height,
+            bytes(y_frame),    y_width,    y_height,
+            mx, my,
+            ref_x, ref_y, ref_z,
         )
+        return self._calibration_queue.submit(args)
 
-        if self._pending_calibration is not None:
-            self._pending_calibration.future.cancel()
-        self._pending_calibration = pending
-        self._try_dispatch_calibration()
-        return future
-
-    def submit_calibration_frames(
+    def submit_calibration_frames_guaranteed(
         self,
         base_frame: np.ndarray,
         base_width: int,
@@ -335,29 +449,36 @@ class MachineVisionManager(QObject):
         ref_z: int,
         move_x_ticks: int | None = None,
         move_y_ticks: int | None = None,
-    ) -> None:
+    ) -> Future[CameraCalibration]:
         """
-        Fire-and-forget wrapper around ``submit_calibration_frames_async``.
+        Submit three RGB888 frames for calibration, guaranteed to be executed.
 
-        On success the manager stores the new calibration and persists it.
-        On failure ``analysis_error`` is emitted with the traceback string.
+        Identical to ``submit_calibration_frames`` but the request is appended
+        to a FIFO queue that is never dropped or cancelled.  Guaranteed requests
+        are always drained before any waiting droppable request is dispatched.
+
+        Each frame is copied immediately so camera buffers may be reused.
+        ``move_x_ticks`` and ``move_y_ticks`` default to the values stored in
+        ``settings.camera_calibration`` if not supplied.
+
+        On success the calibration is written into the settings object and
+        persisted automatically.
         """
-        future = self.submit_calibration_frames_async(
-            base_frame, base_width, base_height,
-            x_frame, x_width, x_height,
-            y_frame, y_width, y_height,
+        cc = self._settings.camera_calibration
+        mx = move_x_ticks if move_x_ticks is not None else cc.move_x_ticks
+        my = move_y_ticks if move_y_ticks is not None else cc.move_y_ticks
+
+        args = (
+            bytes(base_frame), base_width, base_height,
+            bytes(x_frame),    x_width,    x_height,
+            bytes(y_frame),    y_width,    y_height,
+            mx, my,
             ref_x, ref_y, ref_z,
-            move_x_ticks, move_y_ticks,
         )
-        future.add_done_callback(self._signal_from_calibration_future)
+        return self._calibration_queue.submit_guaranteed(args)
 
     def clear_calibration(self) -> None:
-        """
-        Discard the current calibration from memory and from persisted settings.
-
-        Saves settings to disk.
-        """
-        self._calibration = None
+        """Discard the current calibration from memory and from persisted settings."""
         self._settings.camera_calibration.calibration = None
         self.save_settings()
         info("MachineVisionManager: calibration cleared")
@@ -366,64 +487,42 @@ class MachineVisionManager(QObject):
     # Analysis API
     # ------------------------------------------------------------------
 
-    def request_focus_analysis_async(
+    def request_focus_analysis(
         self,
         frame: np.ndarray,
         width: int,
         height: int,
     ) -> Future[FocusResult]:
         """
-        Submit a focus analysis request and return a ``Future[FocusResult]``.
+        Submit a focus analysis request using latest-frame-wins policy.
 
-        The future is always resolved: either set to the ``FocusResult`` on
-        success, or set to an exception if the worker raises.
-
-        If the worker is currently busy, any previously queued (but not yet
-        dispatched) request is cancelled and replaced by this one.  Only the
-        most recent frame waits behind the in-flight job, so the overlay
-        never falls behind during live preview.
+        If a request is already waiting it is cancelled and replaced with this
+        one.  Use this for continuous preview feeds where only the most recent
+        frame matters.
 
         The frame is copied immediately so the camera buffer may be reused
         before the future resolves.
-
-        This method is safe to call from the GUI thread only.
         """
-        future: Future[FocusResult] = Future()
-        pending = _PendingRequest(
-            frame_bytes=bytes(frame),
-            width=width,
-            height=height,
-            future=future,
-        )
+        return self._focus_queue.submit((bytes(frame), width, height))
 
-        # Discard the previous waiting request (if any) before replacing it.
-        if self._pending is not None:
-            self._pending.future.cancel()
-
-        self._pending = pending
-        self._try_dispatch()
-        return future
-
-    def request_focus_analysis(
+    def request_focus_analysis_guaranteed(
         self,
-        frame: np.ndarray,
-        width: int,
-        height: int,
-    ) -> bool:
+        frame: np.ndarray
+    ) -> Future[FocusResult]:
         """
-        Submit a focus analysis request.
+        Submit a focus analysis request that is guaranteed to be executed.
 
-        Always returns ``True``; the request is queued if the worker is busy.
-        Results and errors arrive via the ``focus_result_ready`` and
-        ``analysis_error`` signals as before.
+        The request is appended to a FIFO queue that is never dropped or
+        cancelled.  Guaranteed requests are always drained before any waiting
+        droppable preview request is dispatched.  Use this when a result for a
+        specific captured frame must be obtained (e.g. autofocus scoring).
 
-        The frame is copied immediately so the camera buffer may be reused.
+        The frame is copied immediately so the camera buffer may be reused
+        before the future resolves.
         """
-        future = self.request_focus_analysis_async(frame, width, height)
-        future.add_done_callback(self._signal_from_future)
-        return True
+        return self._focus_queue.submit_guaranteed((bytes(frame), frame.shape[1], frame.shape[0]))
 
-    def request_inspect_calibration_async(
+    def request_inspect_calibration(
         self,
         frame: np.ndarray,
         width: int,
@@ -435,53 +534,35 @@ class MachineVisionManager(QObject):
         ``Future[InspectCalibrationResult]``.
 
         Pass ``snap=True`` to use snap-mode parameters (2x downsampling,
-        tick_min_length 200).  The default uses preview-mode parameters
-        (no downsampling, tick_min_length 150).
-
-        Uses the same latest-frame-wins policy as focus analysis: if a
-        request is already queued but not yet dispatched it is cancelled and
-        replaced by this one.
+        tick_min_length 200).
 
         The frame is copied immediately so the camera buffer may be reused
         before the future resolves.
-
-        This method is safe to call from the GUI thread only.
         """
-        future: Future[InspectCalibrationResult] = Future()
-        pending = _PendingInspectCalibration(
-            frame_bytes=bytes(frame),
-            width=width,
-            height=height,
-            snap=snap,
-            future=future,
-        )
+        return self._inspect_queue.submit((bytes(frame), width, height, snap))
 
-        if self._pending_inspect is not None:
-            self._pending_inspect.future.cancel()
-
-        self._pending_inspect = pending
-        self._try_dispatch_inspect()
-        return future
-
-    def request_inspect_calibration(
+    def request_inspect_calibration_guaranteed(
         self,
         frame: np.ndarray,
         width: int,
         height: int,
         snap: bool = False,
-    ) -> bool:
+    ) -> Future[InspectCalibrationResult]:
         """
-        Fire-and-forget wrapper around ``request_inspect_calibration_async``.
+        Submit a calibration-bar inspection request that is guaranteed to be executed.
 
-        Pass ``snap=True`` to use snap-mode parameters.  Results arrive via
-        ``inspect_calibration_result_ready``; errors arrive via
-        ``analysis_error``.  Always returns ``True``.
+        The request is appended to a FIFO queue that is never dropped or
+        cancelled.  Guaranteed requests are always drained before any waiting
+        droppable preview request is dispatched.  Use this when a result for a
+        specific captured frame must be obtained.
 
-        The frame is copied immediately so the camera buffer may be reused.
+        Pass ``snap=True`` to use snap-mode parameters (2x downsampling,
+        tick_min_length 200).
+
+        The frame is copied immediately so the camera buffer may be reused
+        before the future resolves.
         """
-        future = self.request_inspect_calibration_async(frame, width, height, snap=snap)
-        future.add_done_callback(self._signal_from_inspect_future)
-        return True
+        return self._inspect_queue.submit_guaranteed((bytes(frame), width, height, snap))
 
     def reset_inspect_calibration_state(self) -> None:
         """
@@ -492,7 +573,7 @@ class MachineVisionManager(QObject):
         """
         self._worker.reset_inspect_calibration_state()
 
-    def request_red_mark_detection_async(
+    def request_red_mark_detection(
         self,
         frame: np.ndarray,
         width: int,
@@ -502,47 +583,29 @@ class MachineVisionManager(QObject):
         Submit a red-mark detection request and return a
         ``Future[RedMarkDetectionResult]``.
 
-        Uses the same latest-frame-wins policy as focus analysis: if a request
-        is already queued but not yet dispatched it is cancelled and replaced
-        by this one.
-
         The frame is copied immediately so the camera buffer may be reused
         before the future resolves.
-
-        This method is safe to call from the GUI thread only.
         """
-        future: Future[RedMarkDetectionResult] = Future()
-        pending = _PendingRedMarkDetection(
-            frame_bytes=bytes(frame),
-            width=width,
-            height=height,
-            future=future,
-        )
+        return self._red_mark_queue.submit((bytes(frame), width, height))
 
-        if self._pending_red_mark is not None:
-            self._pending_red_mark.future.cancel()
-
-        self._pending_red_mark = pending
-        self._try_dispatch_red_mark()
-        return future
-
-    def request_red_mark_detection(
+    def request_red_mark_detection_guaranteed(
         self,
         frame: np.ndarray,
         width: int,
         height: int,
-    ) -> bool:
+    ) -> Future[RedMarkDetectionResult]:
         """
-        Fire-and-forget wrapper around ``request_red_mark_detection_async``.
+        Submit a red-mark detection request that is guaranteed to be executed.
 
-        Results arrive via ``red_mark_detection_result_ready``; errors arrive
-        via ``analysis_error``.  Always returns ``True``.
+        The request is appended to a FIFO queue that is never dropped or
+        cancelled.  Guaranteed requests are always drained before any waiting
+        droppable preview request is dispatched.  Use this when a result for a
+        specific captured frame must be obtained.
 
-        The frame is copied immediately so the camera buffer may be reused.
+        The frame is copied immediately so the camera buffer may be reused
+        before the future resolves.
         """
-        future = self.request_red_mark_detection_async(frame, width, height)
-        future.add_done_callback(self._signal_from_red_mark_future)
-        return True
+        return self._red_mark_queue.submit_guaranteed((bytes(frame), width, height))
 
     def reset_red_mark_state(self) -> None:
         """
@@ -554,92 +617,29 @@ class MachineVisionManager(QObject):
         self._worker.reset_red_mark_state()
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Lifecycle
     # ------------------------------------------------------------------
 
-    def _try_dispatch_inspect(self) -> None:
-        """Dispatch the pending inspect request if the worker is free."""
-        if self._inspect_busy or self._pending_inspect is None:
+    def shutdown(self) -> None:
+        if not self._thread.isRunning():
             return
-        pending = self._pending_inspect
-        self._pending_inspect = None
-        self._inspect_busy = True
-        self._current_inspect = pending
-        self._request_inspect_calibration.emit(pending.frame_bytes, pending.width, pending.height, pending.snap)
+        info("MachineVisionManager: shutting down worker thread...")
 
-    def _signal_from_inspect_future(self, future: Future[InspectCalibrationResult]) -> None:
-        """Done-callback that fans out a resolved inspect future to the public signals."""
-        if future.cancelled():
-            return
-        exc = future.exception()
-        if exc is not None:
-            self.analysis_error.emit(str(exc))
-        else:
-            self.inspect_calibration_result_ready.emit(future.result())
+        self._focus_queue.cancel_pending()
+        self._calibration_queue.cancel_pending()
+        self._inspect_queue.cancel_pending()
+        self._red_mark_queue.cancel_pending()
 
-    def _try_dispatch_red_mark(self) -> None:
-        """Dispatch the pending red-mark request if the worker is free."""
-        if self._red_mark_busy or self._pending_red_mark is None:
-            return
-        pending = self._pending_red_mark
-        self._pending_red_mark = None
-        self._red_mark_busy = True
-        self._current_red_mark = pending
-        self._request_red_mark_detection.emit(pending.frame_bytes, pending.width, pending.height)
+        self._thread.quit()
+        if not self._thread.wait(3000):
+            warning("MachineVisionManager: worker thread did not exit in time; terminating")
+            self._thread.terminate()
+            self._thread.wait()
+        info("MachineVisionManager: worker thread stopped")
 
-    def _signal_from_red_mark_future(self, future: Future[RedMarkDetectionResult]) -> None:
-        """Done-callback that fans out a resolved red-mark future to the public signals."""
-        if future.cancelled():
-            return
-        exc = future.exception()
-        if exc is not None:
-            self.analysis_error.emit(str(exc))
-        else:
-            self.red_mark_detection_result_ready.emit(future.result())
-
-    def _try_dispatch(self) -> None:
-        """Dispatch the pending request if the worker is free."""
-        if self._busy or self._pending is None:
-            return
-        pending = self._pending
-        self._pending = None
-        self._busy = True
-        self._current_pending = pending
-        self._request_focus.emit(pending.frame_bytes, pending.width, pending.height)
-
-    def _signal_from_future(self, future: Future[FocusResult]) -> None:
-        """Done-callback that fans out a resolved future to the public signals."""
-        if future.cancelled():
-            return
-        exc = future.exception()
-        if exc is not None:
-            self.analysis_error.emit(str(exc))
-        else:
-            self.focus_result_ready.emit(future.result())
-
-    def _try_dispatch_calibration(self) -> None:
-        """Dispatch the pending calibration build if the worker is free."""
-        if self._calibration_busy or self._pending_calibration is None:
-            return
-        pending = self._pending_calibration
-        self._pending_calibration = None
-        self._calibration_busy = True
-        self._current_calibration = pending
-        self._request_calibration_build.emit(
-            pending.base_bytes, pending.base_width, pending.base_height,
-            pending.x_bytes,    pending.x_width,    pending.x_height,
-            pending.y_bytes,    pending.y_width,    pending.y_height,
-            pending.move_x_ticks, pending.move_y_ticks,
-            pending.ref_x, pending.ref_y, pending.ref_z,
-        )
-
-    def _signal_from_calibration_future(self, future: Future[CameraCalibration]) -> None:
-        """Done-callback that fans out a resolved calibration future to signals."""
-        if future.cancelled():
-            return
-        exc = future.exception()
-        if exc is not None:
-            self.analysis_error.emit(str(exc))
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
     def _load_settings(self) -> MachineVisionSettings:
         try:
@@ -649,61 +649,6 @@ class MachineVisionManager(QObject):
         except Exception as exc:
             error(f"MachineVisionManager: failed to load settings — {exc}; using defaults")
             return MachineVisionSettings()
-
-    def _apply_settings(self, settings: MachineVisionSettings) -> None:
-        """Push all settings values onto the worker."""
-        f = settings.focus
-        w = self._worker
-
-        w.focus_method = f.method
-
-        t = f.tenengrad
-        w.tenengrad_kernel_size = t.kernel_size
-        w.tenengrad_radius = t.radius
-        w.tenengrad_threshold = t.threshold
-        w.tenengrad_half_resolution = t.half_resolution
-        w.tenengrad_overlay_alpha = t.overlay_alpha
-        w.tenengrad_score_ceiling = t.score_ceiling
-        w.tenengrad_auto_ceiling = t.auto_ceiling
-
-        lap = f.laplacian
-        w.laplacian_window_size = lap.window_size
-        w.laplacian_radius = lap.radius
-        w.laplacian_threshold = lap.threshold
-        w.laplacian_half_resolution = lap.half_resolution
-        w.laplacian_overlay_alpha = lap.overlay_alpha
-        w.laplacian_score_ceiling = lap.score_ceiling
-        w.laplacian_auto_ceiling = lap.auto_ceiling
-
-        fr = f.focus_region
-        w.focus_region_enabled = fr.enabled
-        w.focus_region_left = fr.left
-        w.focus_region_right = fr.right
-        w.focus_region_top = fr.top
-        w.focus_region_bottom = fr.bottom
-
-        ic = settings.inspect_calibration
-        w.inspect_calibration_preview_downsample = ic.preview.downsample
-        w.inspect_calibration_preview_tick_min_length = ic.preview.tick_min_length
-        w.inspect_calibration_snap_downsample = ic.snap.downsample
-        w.inspect_calibration_snap_tick_min_length = ic.snap.tick_min_length
-
-        rm = settings.red_mark
-        w.red_mark_scale = rm.scale
-        w.red_mark_open_kernel_size = rm.open_kernel_size
-        w.red_mark_min_area = rm.min_area
-        w.red_mark_max_aspect_ratio = rm.max_aspect_ratio
-        w.red_mark_min_area_fraction = rm.min_area_fraction
-        w.red_mark_hue_low = rm.hue_low
-        w.red_mark_hue_high = rm.hue_high
-        w.red_mark_sat_min = rm.sat_min
-        w.red_mark_val_min = rm.val_min
-        w.red_mark_smoothing_alpha = rm.smoothing_alpha
-        w.red_mark_deadband_px = rm.deadband_px
-        w.red_mark_max_step_px = rm.max_step_px
-        w.red_mark_jump_threshold_px = rm.jump_threshold_px
-        w.red_mark_side_cluster_fraction = rm.side_cluster_fraction
-        w.red_mark_side_cluster_margin = rm.side_cluster_margin
 
     def _copy_settings(self) -> MachineVisionSettings:
         """Return a deep copy of the current settings for mutation."""
@@ -745,7 +690,7 @@ class MachineVisionManager(QObject):
             camera_calibration=CameraCalibrationSettings(
                 move_x_ticks=cc.move_x_ticks,
                 move_y_ticks=cc.move_y_ticks,
-                calibration=cc.calibration,  # CameraCalibration is immutable; no need to copy.
+                calibration=cc.calibration,
             ),
             inspect_calibration=InspectCalibrationSettings(
                 preview=InspectCalibrationModeSettings(
@@ -782,88 +727,3 @@ class MachineVisionManager(QObject):
                 side_cluster_margin=rm.side_cluster_margin,
             ),
         )
-
-    # ------------------------------------------------------------------
-    # Slots
-    # ------------------------------------------------------------------
-
-    @Slot(object)
-    def _on_focus_result(self, result: FocusResult) -> None:
-        pending = self._current_pending
-        self._busy = False
-        pending.future.set_result(result)
-        self._try_dispatch()
-
-    @Slot(str)
-    def _on_analysis_error(self, msg: str) -> None:
-        pending = self._current_pending
-        self._busy = False
-        error(f"MachineVisionManager: worker error: {msg}")
-        pending.future.set_exception(RuntimeError(msg))
-        self._try_dispatch()
-
-    @Slot(object)
-    def _on_calibration_ready(self, calibration: CameraCalibration) -> None:
-        pending = self._current_calibration
-        self._calibration_busy = False
-        self._calibration = calibration
-        self._settings.camera_calibration.calibration = calibration
-        self.save_settings()
-        pending.future.set_result(calibration)
-        info("MachineVisionManager: calibration complete")
-        self._try_dispatch_calibration()
-
-    @Slot(str)
-    def _on_calibration_error(self, msg: str) -> None:
-        pending = self._current_calibration
-        self._calibration_busy = False
-        error(f"MachineVisionManager: calibration error: {msg}")
-        pending.future.set_exception(RuntimeError(msg))
-        self._try_dispatch_calibration()
-
-    @Slot(object)
-    def _on_inspect_calibration_result(self, result: InspectCalibrationResult) -> None:
-        pending = self._current_inspect
-        self._inspect_busy = False
-        pending.future.set_result(result)
-        self._try_dispatch_inspect()
-
-    @Slot(object)
-    def _on_red_mark_result(self, result: RedMarkDetectionResult) -> None:
-        pending = self._current_red_mark
-        self._red_mark_busy = False
-        pending.future.set_result(result)
-        self._try_dispatch_red_mark()
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def shutdown(self) -> None:
-        if not self._thread.isRunning():
-            return
-        info("MachineVisionManager: shutting down worker thread...")
-
-        # Cancel any waiting requests that will never be dispatched.
-        if self._pending is not None:
-            self._pending.future.cancel()
-            self._pending = None
-
-        if self._pending_calibration is not None:
-            self._pending_calibration.future.cancel()
-            self._pending_calibration = None
-
-        if self._pending_inspect is not None:
-            self._pending_inspect.future.cancel()
-            self._pending_inspect = None
-
-        if self._pending_red_mark is not None:
-            self._pending_red_mark.future.cancel()
-            self._pending_red_mark = None
-
-        self._thread.quit()
-        if not self._thread.wait(3000):
-            warning("MachineVisionManager: worker thread did not exit in time; terminating")
-            self._thread.terminate()
-            self._thread.wait()
-        info("MachineVisionManager: worker thread stopped")

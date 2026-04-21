@@ -14,7 +14,6 @@ Core pipeline
 Single-frame visualisation
 --------------------------
   apply_focus_overlay   -- blend a colourised focus heatmap onto the source image
-  add_colorbar          -- append a vertical legend bar to an image
   build_frame           -- end-to-end: image → composited BGR frame + FocusScores
 """
 
@@ -25,6 +24,9 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+from machine_vision.algorithms.vision_algorithm import VisionAlgorithm
+
 
 # Literal type for focus detection method selection.
 FocusMethod = str  # "tenengrad" | "laplacian"
@@ -456,35 +458,10 @@ def apply_focus_overlay(
     return overlay
 
 
-def add_colorbar(
-    image: np.ndarray,
-    colormap: int = cv2.COLORMAP_JET,
-    bar_width: int = 40,
-    label_low: str = "Soft",
-    label_high: str = "Sharp",
-    side: str = "right",
-) -> np.ndarray:
-    """Append a vertical colorbar legend on the right (or left) side of the image."""
-    h = image.shape[0]
-    gradient = np.linspace(255, 0, h, dtype=np.uint8).reshape(h, 1)
-    bar = cv2.applyColorMap(np.repeat(gradient, bar_width, axis=1), colormap)
-
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.45
-    thickness = 1
-    pad = 4
-
-    cv2.putText(bar, label_high, (2, 14), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
-    cv2.putText(bar, label_low, (2, h - pad), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
-
-    return np.hstack([bar, image]) if side == "left" else np.hstack([image, bar])
-
-
 def build_frame(
     image: np.ndarray,
     colormap: int,
     alpha: float,
-    colorbar_side: str,
     kernel_size: int,
     radius: float,
     threshold: float,
@@ -539,7 +516,6 @@ def build_frame(
             )
     scores = compute_focus_scores(score_map, focus_region=focus_region)
     overlay = apply_focus_overlay(image, score_map, alpha=alpha, colormap=colormap)
-    overlay = add_colorbar(overlay, colormap=colormap, side=colorbar_side)
 
     if side_by_side:
         original = image if len(image.shape) == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
@@ -553,3 +529,103 @@ def build_frame(
         frame = overlay
 
     return frame, scores
+
+# ---------------------------------------------------------------------------
+# FocusAnalysis — settings-aware algorithm class
+# ---------------------------------------------------------------------------
+_TENENGRAD = "tenengrad"
+
+
+@dataclass
+class FocusResult:
+    """
+    Result of a single focus analysis pass.
+
+    All arrays are freshly allocated (not views into any shared buffer) and
+    are safe to read from the GUI thread after the signal is delivered.
+    """
+    scores: FocusScores
+    heatmap_rgb: np.ndarray
+    """Composited heatmap, RGB888, shape (H, W, 3), dtype uint8."""
+    source_width: int
+    source_height: int
+    raw_score_max: float
+    """Maximum raw (un-normalised) score map value for this frame."""
+    method: FocusMethod
+    """Which focus measure produced this result."""
+
+
+class FocusAnalysis(VisionAlgorithm):
+    """Tenengrad / Laplacian focus scoring with heatmap overlay."""
+
+    def process(self, frame_bytes: bytes, width: int, height: int) -> FocusResult:
+        f = self._settings.focus
+        arr = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3)).copy()
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+        fr = f.focus_region
+        focus_region: FocusRegion | None = (
+            FocusRegion(
+                left=fr.left / 100.0,
+                right=fr.right / 100.0,
+                top=fr.top / 100.0,
+                bottom=fr.bottom / 100.0,
+            )
+            if fr.enabled
+            else None
+        )
+
+        if f.method == _TENENGRAD:
+            raw_map, ceiling, alpha = self._run_tenengrad(bgr, focus_region)
+        else:
+            raw_map, ceiling, alpha = self._run_laplacian(bgr, focus_region)
+
+        raw_score_max = float(raw_map.max())
+        score_map = normalize_score_map(raw_map, ceiling=ceiling)
+        scores = compute_focus_scores(score_map, focus_region=focus_region)
+        overlay_bgr = apply_focus_overlay(bgr, score_map, alpha=alpha, colormap=cv2.COLORMAP_JET)
+
+        return FocusResult(
+            scores=scores,
+            heatmap_rgb=cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB),
+            source_width=width,
+            source_height=height,
+            raw_score_max=raw_score_max,
+            method=f.method,
+        )
+
+    def _run_tenengrad(
+        self, bgr: np.ndarray, focus_region: FocusRegion | None
+    ) -> tuple[np.ndarray, float | None, float]:
+        t = self._settings.focus.tenengrad
+        raw_map = generate_focus_map(
+            bgr,
+            kernel_size=t.kernel_size,
+            radius=t.radius,
+            threshold=t.threshold,
+            half_resolution=t.half_resolution,
+            box_blur=True,
+            verbose=False,
+            normalize=False,
+            focus_region=focus_region,
+        )
+        ceiling = None if t.auto_ceiling else t.score_ceiling
+        return raw_map, ceiling, t.overlay_alpha
+
+    def _run_laplacian(
+        self, bgr: np.ndarray, focus_region: FocusRegion | None
+    ) -> tuple[np.ndarray, float | None, float]:
+        lap = self._settings.focus.laplacian
+        raw_map = generate_focus_map_laplacian(
+            bgr,
+            window_size=lap.window_size,
+            radius=lap.radius,
+            threshold=lap.threshold,
+            half_resolution=lap.half_resolution,
+            box_blur=True,
+            verbose=False,
+            normalize=False,
+            focus_region=focus_region,
+        )
+        ceiling = None if lap.auto_ceiling else lap.score_ceiling
+        return raw_map, ceiling, lap.overlay_alpha

@@ -14,11 +14,17 @@ Public API
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 import time
 from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
+
+from machine_vision.algorithms.vision_algorithm import VisionAlgorithm
+
+if TYPE_CHECKING:
+    from machine_vision.machine_vision_config import MachineVisionSettings as _MachineVisionSettings
 
 
 # ---------------------------------------------------------------------------
@@ -384,3 +390,44 @@ def process_frame(
         _clusters=clusters,
         _downsample=effective_downsample,
     )
+
+# ---------------------------------------------------------------------------
+# InspectCalibration — settings-aware algorithm class
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InspectCalibrationResult:
+    """
+    Result of a single calibration-bar inspection pass.
+
+    All arrays are freshly allocated (not views into any shared buffer) and
+    are safe to read from the GUI thread after the signal is delivered.
+    """
+    detection: BarDetectionResult
+    """Raw detection result from the vision pipeline."""
+    source_width: int
+    source_height: int
+
+
+class InspectCalibration(VisionAlgorithm):
+    """Detects calibration-bar orientation and tick marks in a live frame."""
+
+    def __init__(self, settings: _MachineVisionSettings) -> None:
+        super().__init__(settings)
+        self._axis_state = AxisState()
+
+    def reset(self) -> None:
+        self._axis_state = AxisState()
+
+    def process(self, frame_bytes: bytes, width: int, height: int, snap: bool = False) -> InspectCalibrationResult:
+        ic = self._settings.inspect_calibration
+        mode = ic.snap if snap else ic.preview
+        arr = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3)).copy()
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        detection = process_frame(
+            bgr, self._axis_state,
+            downsample=mode.downsample,
+            tick_min_length=mode.tick_min_length,
+        )
+        return InspectCalibrationResult(detection=detection, source_width=width, source_height=height)

@@ -2,16 +2,166 @@
 red_mark_detection.py
 
 Red registration-mark detection algorithm.
-
-Isolated here so it can be imported by MachineVisionWorker without
-bloating that file, and tested independently.
 """
 
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
 import cv2
 import numpy as np
 
+if TYPE_CHECKING:
+    from machine_vision.machine_vision_config import MachineVisionSettings
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RedMarkDetectionResult:
+    """
+    Result of a single red-mark detection pass.
+
+    All coordinate values are in full source-image pixel space (not
+    downsampled), matching the frame dimensions in ``source_width`` /
+    ``source_height``.  The overlay reprojects them into display space at
+    paint time.
+    """
+
+    valid_centers: list[tuple[float, float]]
+    """Centroids of accepted red-mark blobs, (x, y) in source pixels."""
+
+    filtered_centers: list[tuple[float, float]]
+    """Centroids of blobs that were rejected by area, aspect-ratio, or
+    position filters, kept for diagnostic display."""
+
+    valid_mask: np.ndarray
+    """
+    uint8 pixel mask of accepted blob footprints (255 = blob, 0 = background),
+    shape (source_height, source_width).  Used by the overlay to paint actual
+    blob pixels rather than just centroid markers.
+    """
+
+    filtered_mask: np.ndarray
+    """uint8 pixel mask of rejected blob footprints, same shape as valid_mask."""
+
+    mean_x: float | None
+    """Mean X of valid centroid coordinates, or None when no valid blobs."""
+
+    mean_y: float | None
+    """Mean Y of valid centroid coordinates, or None when no valid blobs."""
+
+    stabilized_x: float | None
+    """
+    EMA-smoothed mean X of valid mark centroids; used for the vertical
+    reference line.  ``None`` when no valid marks are present.
+    """
+
+    stabilized_y: float | None
+    """
+    EMA-smoothed mean Y of valid mark centroids; used for the horizontal
+    reference line.  ``None`` when no valid marks are present.
+    """
+
+    image_center_x: float | None
+    """Horizontal midpoint of the source frame (source_width / 2)."""
+
+    image_center_y: float | None
+    """Vertical midpoint of the source frame (source_height / 2)."""
+
+    line_orientation: str
+    """``'vertical'`` or ``'horizontal'`` — which axis the marks indicate."""
+
+    elapsed_ms: float
+    """Wall-clock time taken for this detection pass in milliseconds."""
+
+    source_width: int
+    source_height: int
+
+
+# ---------------------------------------------------------------------------
+# RedMarkDetection
+# ---------------------------------------------------------------------------
+
+class RedMarkDetection:
+    """
+    Detects red registration marks with EMA smoothing and orientation hysteresis.
+
+    Holds a reference to the shared ``MachineVisionSettings`` so parameter
+    changes take effect on the next ``process()`` call without any explicit
+    fan-out.
+    """
+
+    def __init__(self, settings: MachineVisionSettings) -> None:
+        self._settings = settings
+        self._smoothed_x: float | None = None
+        self._smoothed_y: float | None = None
+        self._cluster_frames: int = 0
+
+    def reset(self) -> None:
+        """Reset EMA and orientation hysteresis state for a new detection session."""
+        self._smoothed_x = None
+        self._smoothed_y = None
+        self._cluster_frames = 0
+
+    def process(self, frame_bytes: bytes, width: int, height: int) -> RedMarkDetectionResult:
+        t0 = time.perf_counter()
+        rm = self._settings.red_mark
+
+        arr = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3)).copy()
+        height, width = arr.shape[:2]
+
+        valid, filtered, valid_mask, filtered_mask, mean_x, mean_y = detect_red_marks(
+            arr,
+            open_kernel_size=rm.open_kernel_size,
+            min_area=rm.min_area,
+            scale=rm.scale,
+            max_aspect_ratio=rm.max_aspect_ratio,
+            min_area_fraction=rm.min_area_fraction,
+            hue_low=rm.hue_low,
+            hue_high=rm.hue_high,
+            sat_min=rm.sat_min,
+            val_min=rm.val_min,
+        )
+
+        self._smoothed_x = smooth_value(
+            self._smoothed_x, mean_x,
+            rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
+        )
+        self._smoothed_y = smooth_value(
+            self._smoothed_y, mean_y,
+            rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
+        )
+
+        orientation, self._cluster_frames = line_orientation(
+            valid, width, rm.side_cluster_fraction, rm.side_cluster_margin, self._cluster_frames,
+        )
+
+        return RedMarkDetectionResult(
+            valid_centers=valid,
+            filtered_centers=filtered,
+            valid_mask=valid_mask,
+            filtered_mask=filtered_mask,
+            mean_x=mean_x,
+            mean_y=mean_y,
+            stabilized_x=self._smoothed_x,
+            stabilized_y=self._smoothed_y,
+            image_center_x=float(width) / 2.0,
+            image_center_y=float(height) / 2.0,
+            line_orientation=orientation,
+            elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+            source_width=width,
+            source_height=height,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pure functions
+# ---------------------------------------------------------------------------
 
 def detect_red_marks(
     img_rgb: np.ndarray,
@@ -35,7 +185,7 @@ def detect_red_marks(
     """
     Detect red blobs in an RGB frame.
 
-    Pipeline (matching main.py):
+    Pipeline:
       1. Optionally downsample by 1/scale for speed.
       2. Convert RGB -> HSV, isolate red with two inRange masks (handles
          hue wrap-around at 0/180), morphological opening to kill noise.

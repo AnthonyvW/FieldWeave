@@ -28,7 +28,6 @@ import numpy as np
 from focus_detection import (
     FocusScores,
     apply_focus_overlay,
-    add_colorbar,
     build_frame,
     generate_focus_map,
     normalize_score_map,
@@ -270,7 +269,6 @@ def process_single(
         image,
         colormap=colormap,
         alpha=args.alpha,
-        colorbar_side=args.colorbar_side,
         kernel_size=args.kernel_size,
         radius=args.radius,
         threshold=args.threshold,
@@ -394,7 +392,6 @@ def process_folder(
             image,
             colormap=colormap,
             alpha=args.alpha,
-            colorbar_side=args.colorbar_side,
             kernel_size=args.kernel_size,
             radius=args.radius,
             threshold=args.threshold,
@@ -447,7 +444,6 @@ def process_folder(
             if img.shape[0] == canonical_h and img.shape[1] == canonical_w
         )
         max_overlay = apply_focus_overlay(base_image, max_norm_map, alpha=args.alpha, colormap=colormap)
-        max_overlay = add_colorbar(max_overlay, colormap=colormap, side=args.colorbar_side)
         max_out_path = str(Path(folder_path) / f"{Path(folder_path).name}_focus_max.jpg")
         cv2.imwrite(max_out_path, max_overlay)
         print(f"Saved max overlay: {max_out_path}")

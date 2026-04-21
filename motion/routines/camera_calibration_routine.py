@@ -294,7 +294,7 @@ class CameraCalibrationRoutine(AutomationRoutine):
         self._set_status("Computing calibration…", _STEP_SUBMIT - 1, _TOTAL_STEPS)
         info("[CameraCalibration] Submitting frames to MachineVisionManager")
 
-        future = mv.submit_calibration_frames_async(
+        future = mv.submit_calibration_frames_guaranteed(
             base_frame=frame_base,
             base_width=frame_base.shape[1],
             base_height=frame_base.shape[0],

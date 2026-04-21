@@ -387,15 +387,9 @@ class CameraPreview(QFrame):
 
         self._video_label.set_click_handler(self._click_to_move_overlay)
 
-        get_app_context().machine_vision.focus_result_ready.connect(
-            lambda _result: self._video_label.update()
-        )
-        get_app_context().machine_vision.inspect_calibration_result_ready.connect(
-            lambda _result: self._video_label.update()
-        )
-        get_app_context().machine_vision.red_mark_detection_result_ready.connect(
-            lambda _result: self._video_label.update()
-        )
+        self._focus_overlay._relay.result_ready.connect(self._video_label.update)
+        self._inspect_calibration_overlay._relay.result_ready.connect(self._video_label.update)
+        self._red_mark_overlay._relay.result_ready.connect(self._video_label.update)
 
         self._connect_to_camera_manager()
 

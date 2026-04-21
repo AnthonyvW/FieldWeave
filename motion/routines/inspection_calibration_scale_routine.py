@@ -55,7 +55,7 @@ from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame, move_z_and_wait
 from motion.routines.autofocus.autofocus_routine import Autofocus
-from machine_vision.calibration_bar_detection import AxisState, process_frame
+from machine_vision.algorithms.calibration_bar_detection import AxisState, process_frame
 from post_processing.routines.stitch_and_measure import StitchAndMeasureRoutine
 
 _NM_PER_MM = 1_000_000

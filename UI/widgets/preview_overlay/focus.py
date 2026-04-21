@@ -6,15 +6,15 @@ Focus overlay and its toolbar button.
 FocusOverlay receives FocusResult objects produced by MachineVisionManager
 and composites the pre-rendered heatmap into the camera preview.  All heavy
 OpenCV work happens off the GUI thread; this file only handles display.
-
 """
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PySide6.QtCore import Qt, QRect, Slot, Signal
+from PySide6.QtCore import Qt, QRect, QObject, Signal, Slot
 from PySide6.QtGui import QPainter, QImage, QPixmap, QColor, QPen
 from PySide6.QtWidgets import QLabel, QPushButton, QWidget
 
@@ -23,7 +23,11 @@ from common.logger import info
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
 if TYPE_CHECKING:
-    from machine_vision.machine_vision_manager import FocusResult
+    from machine_vision.algorithms.focus_detection import FocusResult
+
+
+class _ResultRelay(QObject):
+    result_ready = Signal(object)
 
 
 class FocusOverlay(Overlay):
@@ -31,7 +35,7 @@ class FocusOverlay(Overlay):
     Overlay that displays a Laplacian focus heatmap.
 
     The heatmap is rendered by MachineVisionWorker off-thread.  This class
-    only stores the latest result pixmap and paints it when Qt asks.
+    stores the latest result pixmap and paints it when Qt asks.
 
     When a focus region is active a dashed rectangle is drawn on top of the
     heatmap showing exactly which area of the frame is being analysed.
@@ -41,7 +45,8 @@ class FocusOverlay(Overlay):
         super().__init__()
         self._result_pixmap: QPixmap | None = None
         self._scores_text: str = ""
-        get_app_context().machine_vision.focus_result_ready.connect(self.receive_result)
+        self._relay = _ResultRelay()
+        self._relay.result_ready.connect(self._on_result)
 
     # ------------------------------------------------------------------
     # Called by OverlayLabel on every rendered frame (GUI thread)
@@ -51,26 +56,28 @@ class FocusOverlay(Overlay):
         """
         Called by OverlayLabel.notify_full() with each full-resolution frame.
 
-        Submits an analysis job to the vision manager when the overlay is
-        enabled.  The manager silently drops the request if it is still
-        processing the previous frame.
+        Submits an analysis job to the vision manager and attaches a
+        done-callback to deliver the result back to the GUI thread.
         """
         h, w = frame.shape[:2]
-        get_app_context().machine_vision.request_focus_analysis(frame, w, h)
+        future = get_app_context().machine_vision.request_focus_analysis(frame, w, h)
+        future.add_done_callback(self._on_future_done)
 
     # ------------------------------------------------------------------
-    # Receive results from MachineVisionManager (GUI thread, queued signal)
+    # Future done-callback (called on worker thread)
+    # ------------------------------------------------------------------
+
+    def _on_future_done(self, future: Future) -> None:
+        if future.cancelled() or future.exception() is not None:
+            return
+        self._relay.result_ready.emit(future.result())
+
+    # ------------------------------------------------------------------
+    # Slot — receives result on GUI thread via queued signal
     # ------------------------------------------------------------------
 
     @Slot(object)
-    def receive_result(self, result: FocusResult) -> None:
-        """
-        Store and display the latest focus analysis result.
-
-        This slot is connected to MachineVisionManager.focus_result_ready.
-        It is always called on the GUI thread (Qt queued connection across
-        the worker thread boundary).
-        """
+    def _on_result(self, result: FocusResult) -> None:
         arr = result.heatmap_rgb
         image = QImage(
             arr,
@@ -106,7 +113,6 @@ class FocusOverlay(Overlay):
         if not self.enabled or self._result_pixmap is None:
             return
 
-        # Scale the heatmap to exactly fill the image rect.
         scaled = self._result_pixmap.scaled(
             rect.width(),
             rect.height(),
@@ -114,9 +120,6 @@ class FocusOverlay(Overlay):
             Qt.TransformationMode.FastTransformation,
         )
 
-        # When a focus region is active, clip the heatmap draw to that
-        # rectangle so the camera image shows through outside it naturally.
-        # When disabled, paint the heatmap over the full frame as before.
         fr = get_app_context().machine_vision.settings.focus.focus_region
         painter.setOpacity(1.0)
         if fr.enabled:
@@ -133,23 +136,17 @@ class FocusOverlay(Overlay):
         else:
             painter.drawPixmap(rect.topLeft(), scaled)
 
-        # Draw the focus region border/dimming if the setting is active.
         self._draw_region_rect(painter, rect)
 
-        # Score legend — bottom-left corner of the image rect.
         if self._scores_text:
             painter.save()
             font = painter.font()
             font.setPointSize(8)
             painter.setFont(font)
-
-            # Shadow pass for readability.
             painter.setPen(QPen(QColor(0, 0, 0, 200)))
             painter.drawText(rect.left() + 6, rect.bottom() - 7, self._scores_text)
-            # White foreground pass.
             painter.setPen(QPen(QColor(255, 255, 255, 220)))
             painter.drawText(rect.left() + 5, rect.bottom() - 8, self._scores_text)
-
             painter.restore()
 
     def _draw_region_rect(self, painter: QPainter, rect: QRect) -> None:
@@ -178,20 +175,14 @@ class FocusOverlay(Overlay):
 
         painter.save()
 
-        # Subtle dark fill outside the region to emphasise the active area.
         painter.setOpacity(0.25)
         painter.setBrush(QColor(0, 0, 0))
         painter.setPen(Qt.PenStyle.NoPen)
-        # Top strip
         painter.drawRect(QRect(rect.left(), rect.top(), rw, y0 - rect.top()))
-        # Bottom strip
         painter.drawRect(QRect(rect.left(), y1, rw, rect.bottom() - y1 + 1))
-        # Left strip (between top and bottom strips)
         painter.drawRect(QRect(rect.left(), y0, x0 - rect.left(), y1 - y0))
-        # Right strip (between top and bottom strips)
         painter.drawRect(QRect(x1, y0, rect.right() - x1 + 1, y1 - y0))
 
-        # Dashed white border around the active rectangle.
         painter.setOpacity(1.0)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         pen = QPen(QColor(255, 255, 255, 220))
@@ -200,7 +191,6 @@ class FocusOverlay(Overlay):
         painter.setPen(pen)
         painter.drawRect(region_rect)
 
-        # Thin black shadow border for contrast on light backgrounds.
         pen_shadow = QPen(QColor(0, 0, 0, 160))
         pen_shadow.setWidth(1)
         pen_shadow.setStyle(Qt.PenStyle.DashLine)
