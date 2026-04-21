@@ -10,13 +10,14 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info, error, warning
 from UI.widgets.preview_overlay.channel import ChannelButton, ChannelOverlay
+from UI.widgets.preview_overlay.machine_vision import MachineVisionButton
 from UI.widgets.preview_overlay.click_to_move import ClickToMoveOverlay
 from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverlay
-from UI.widgets.preview_overlay.focus import FocusButton, FocusOverlay
+from UI.widgets.preview_overlay.focus import FocusOverlay
 from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
-from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay, RedMarkButton
+from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
 
 
 class EyeToggleButton(QPushButton):
@@ -223,7 +224,6 @@ class OverlayController:
 
     @focus.setter
     def focus(self, enabled: bool) -> None:
-        self._preview._focus_button.setChecked(enabled)
         self._preview._focus_overlay.set_enabled(enabled)
         self._preview._video_label.update()
 
@@ -242,7 +242,6 @@ class OverlayController:
 
     @red_mark.setter
     def red_mark(self, enabled: bool) -> None:
-        self._preview._red_mark_button.setChecked(enabled)
         self._preview._red_mark_overlay.set_enabled(enabled)
         self._preview._video_label.update()
 
@@ -360,11 +359,11 @@ class CameraPreview(QFrame):
         self._grid_button.toggled_grid.connect(self._grid_overlay.set_enabled)
         self._grid_button.toggled_grid.connect(self._video_label.update)
 
-        self._focus_button = FocusButton(self)
-        self._focus_button.move(10, 80)
-        self._focus_button.raise_()
-        self._focus_button.toggled_focus.connect(self._focus_overlay.set_enabled)
-        self._focus_button.toggled_focus.connect(self._video_label.update)
+        self._machine_vision_button = MachineVisionButton(self)
+        self._machine_vision_button.move(10, 80)
+        self._machine_vision_button.raise_()
+        self._machine_vision_button.menu.raise_()
+        self._machine_vision_button.vision_mode_changed.connect(self._on_vision_mode_changed)
 
         self._channel_button = ChannelButton(self)
         self._channel_button.move(10, 115)
@@ -376,12 +375,6 @@ class CameraPreview(QFrame):
         self._hide_preview_button.move(10, 150)
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
-
-        self._red_mark_button = RedMarkButton(self)
-        self._red_mark_button.move(10, 185)
-        self._red_mark_button.raise_()
-        self._red_mark_button.toggled_red_mark.connect(self._red_mark_overlay.set_enabled)
-        self._red_mark_button.toggled_red_mark.connect(self._video_label.update)
 
         self._overlays = OverlayController(self)
 
@@ -438,6 +431,18 @@ class CameraPreview(QFrame):
         self._channel_overlay.show_green = show_green
         self._channel_overlay.show_blue = show_blue
         self._channel_overlay.show_grayscale = show_grayscale
+
+    @Slot(bool, bool, bool)
+    def _on_vision_mode_changed(
+        self,
+        focus: bool,
+        red_mark: bool,
+        scale: bool,
+    ) -> None:
+        self._focus_overlay.set_enabled(focus)
+        self._red_mark_overlay.set_enabled(red_mark)
+        self._inspect_calibration_overlay.set_enabled(scale)
+        self._video_label.update()
 
     def _toggle_preview_visibility(self) -> None:
         if self._preview_hidden:
