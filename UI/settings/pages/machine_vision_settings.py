@@ -48,6 +48,7 @@ from machine_vision.machine_vision_config import (
     InspectionCalibrationPosition,
     LaplacianSettings,
     MachineVisionSettings,
+    RedMarkDetectionSettings,
     TenengradSettings,
     FOCUS_METHOD_TENENGRAD,
     FOCUS_METHOD_LAPLACIAN,
@@ -431,8 +432,184 @@ class _InspectCalibrationModePanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Main settings widget
+# Red Mark Detection panel
 # ---------------------------------------------------------------------------
+
+class _RedMarkPanel(QWidget):
+    """Parameter controls for the red registration-mark detection algorithm."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._w: dict[str, QWidget] = {}
+        self._build()
+
+    def _build(self) -> None:
+        form = QFormLayout(self)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        # scale
+        scale_spin = QSpinBox()
+        scale_spin.setMinimum(1)
+        scale_spin.setMaximum(16)
+        scale_spin.setSingleStep(1)
+        scale_spin.setFixedWidth(90)
+        scale_spin.setToolTip(
+            "Downsample factor applied before processing.\n"
+            "The image is resized to 1/scale in each dimension.\n"
+            "Higher values reduce processing time at the cost of precision."
+        )
+        form.addRow("Scale:", scale_spin)
+        self._w["scale"] = scale_spin
+
+        # open_kernel_size
+        kernel_spin = QSpinBox()
+        kernel_spin.setMinimum(1)
+        kernel_spin.setMaximum(51)
+        kernel_spin.setSingleStep(2)
+        kernel_spin.setFixedWidth(90)
+        kernel_spin.setToolTip(
+            "Side length of the elliptical morphological opening kernel.\n"
+            "Larger values remove more noise but may break up small marks."
+        )
+        form.addRow("Open kernel size:", kernel_spin)
+        self._w["open_kernel_size"] = kernel_spin
+
+        # min_area
+        min_area_spin = QSpinBox()
+        min_area_spin.setMinimum(0)
+        min_area_spin.setMaximum(100_000)
+        min_area_spin.setSingleStep(50)
+        min_area_spin.setFixedWidth(90)
+        min_area_spin.setToolTip("Minimum blob area in pixels. Smaller blobs are discarded as noise.")
+        form.addRow("Min area (px):", min_area_spin)
+        self._w["min_area"] = min_area_spin
+
+        # max_aspect_ratio
+        container, _spin, _slider = _make_float_row(
+            "max_aspect_ratio", self._w, 1.0, 20.0, 1, 0.5,
+            "Maximum ratio of longer to shorter side of a blob's bounding box.\n"
+            "Elongated blobs (e.g. scratches) are discarded above this value.",
+        )
+        form.addRow("Max aspect ratio:", container)
+
+        # min_area_fraction
+        container, _spin, _slider = _make_float_row(
+            "min_area_fraction", self._w, 0.0, 1.0, 2, 0.05,
+            "Minimum blob area as a fraction of the largest surviving blob.\n"
+            "Discards small stray marks when a large registration mark is present.",
+        )
+        form.addRow("Min area fraction:", container)
+
+        # HSV colour range — section label
+        hsv_label = QLabel("HSV Colour Range")
+        hsv_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
+        form.addRow(hsv_label)
+
+        # hue_low
+        hue_low_spin = QSpinBox()
+        hue_low_spin.setMinimum(0)
+        hue_low_spin.setMaximum(180)
+        hue_low_spin.setSingleStep(1)
+        hue_low_spin.setFixedWidth(90)
+        hue_low_spin.setToolTip(
+            "Lower hue boundary for the upper red range (160–180 in OpenCV HSV).\n"
+            "Red wraps around 0/180, so two ranges are combined."
+        )
+        form.addRow("Hue low:", hue_low_spin)
+        self._w["hue_low"] = hue_low_spin
+
+        # hue_high
+        hue_high_spin = QSpinBox()
+        hue_high_spin.setMinimum(0)
+        hue_high_spin.setMaximum(180)
+        hue_high_spin.setSingleStep(1)
+        hue_high_spin.setFixedWidth(90)
+        hue_high_spin.setToolTip("Upper hue boundary for the lower red range (0–hue_high in OpenCV HSV).")
+        form.addRow("Hue high:", hue_high_spin)
+        self._w["hue_high"] = hue_high_spin
+
+        # sat_min
+        sat_spin = QSpinBox()
+        sat_spin.setMinimum(0)
+        sat_spin.setMaximum(255)
+        sat_spin.setSingleStep(5)
+        sat_spin.setFixedWidth(90)
+        sat_spin.setToolTip("Minimum HSV saturation for a pixel to count as red [0–255].")
+        form.addRow("Sat min:", sat_spin)
+        self._w["sat_min"] = sat_spin
+
+        # val_min
+        val_spin = QSpinBox()
+        val_spin.setMinimum(0)
+        val_spin.setMaximum(255)
+        val_spin.setSingleStep(5)
+        val_spin.setFixedWidth(90)
+        val_spin.setToolTip("Minimum HSV value for a pixel to count as red [0–255].")
+        form.addRow("Val min:", val_spin)
+        self._w["val_min"] = val_spin
+
+        # Smoothing / stabilisation — section label
+        smooth_label = QLabel("Centroid Smoothing")
+        smooth_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
+        form.addRow(smooth_label)
+
+        # smoothing_alpha
+        container, _spin, _slider = _make_float_row(
+            "smoothing_alpha", self._w, 0.0, 1.0, 2, 0.05,
+            "EMA weight for the stabilised centroid position [0.0–1.0].\n"
+            "Lower values give more smoothing; higher values track faster.",
+        )
+        form.addRow("Smoothing alpha:", container)
+
+        # deadband_px
+        container, _spin, _slider = _make_float_row(
+            "deadband_px", self._w, 0.0, 50.0, 1, 0.5,
+            "Changes smaller than this (in pixels) are ignored to prevent jitter.",
+        )
+        form.addRow("Deadband (px):", container)
+
+        # max_step_px
+        container, _spin, _slider = _make_float_row(
+            "max_step_px", self._w, 0.0, 200.0, 1, 1.0,
+            "Maximum centroid movement per frame in pixels (slew-rate limit).",
+        )
+        form.addRow("Max step (px):", container)
+
+        # jump_threshold_px
+        container, _spin, _slider = _make_float_row(
+            "jump_threshold_px", self._w, 0.0, 500.0, 1, 5.0,
+            "If the raw centroid moves more than this many pixels from the smoothed\n"
+            "value in a single frame, the smoothed value jumps directly to the raw value.",
+        )
+        form.addRow("Jump threshold (px):", container)
+
+        # Side cluster — section label
+        cluster_label = QLabel("Side Cluster")
+        cluster_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
+        form.addRow(cluster_label)
+
+        # side_cluster_fraction
+        container, _spin, _slider = _make_float_row(
+            "side_cluster_fraction", self._w, 0.0, 1.0, 2, 0.05,
+            "Fraction of marks that must be within side_cluster_margin of one\n"
+            "horizontal edge before the line orientation switches to 'horizontal'.",
+        )
+        form.addRow("Cluster fraction:", container)
+
+        # side_cluster_margin
+        container, _spin, _slider = _make_float_row(
+            "side_cluster_margin", self._w, 0.0, 0.45, 2, 0.01,
+            "Fraction of image width defining the left/right edge zones used\n"
+            "by the side-cluster test.",
+        )
+        form.addRow("Cluster margin:", container)
+
+    @property
+    def widgets(self) -> dict[str, QWidget]:
+        return self._w
+
+
+
 
 class MachineVisionSettingsWidget(QWidget):
     """
@@ -442,7 +619,7 @@ class MachineVisionSettingsWidget(QWidget):
     """
 
     # Group names exposed for SettingsDialog sidebar sub-items.
-    _GROUP_NAMES = ["Focus Detection", "Inspection Calibration"]
+    _GROUP_NAMES = ["Focus Detection", "Inspection Calibration", "Red Mark Detection"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -462,6 +639,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._focus_region_panel = _FocusRegionPanel()
         self._inspect_preview_panel = _InspectCalibrationModePanel("preview")
         self._inspect_snap_panel = _InspectCalibrationModePanel("snap")
+        self._red_mark_panel = _RedMarkPanel()
 
         self._build_ui()
         self._populate_from_settings(self._mv.settings)
@@ -501,10 +679,15 @@ class MachineVisionSettingsWidget(QWidget):
         cl.addWidget(inspect_group)
         self._group_boxes["Inspection Calibration"] = inspect_group
 
+        red_mark_group = self._build_red_mark_group()
+        cl.addWidget(red_mark_group)
+        self._group_boxes["Red Mark Detection"] = red_mark_group
+
         # Register group boxes with parent dialog for scroll-to support.
         if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
             self.parent_dialog.register_group_box("Machine Vision", "Focus Detection", focus_group)
             self.parent_dialog.register_group_box("Machine Vision", "Inspection Calibration", inspect_group)
+            self.parent_dialog.register_group_box("Machine Vision", "Red Mark Detection", red_mark_group)
 
         cl.addStretch()
 
@@ -594,6 +777,13 @@ class MachineVisionSettingsWidget(QWidget):
 
         return group
 
+    def _build_red_mark_group(self) -> QGroupBox:
+        group = QGroupBox("Red Mark Detection")
+        vbox = QVBoxLayout(group)
+        vbox.setContentsMargins(6, 6, 6, 6)
+        vbox.addWidget(self._red_mark_panel)
+        return group
+
     def _build_focus_group(self) -> QGroupBox:
         group = QGroupBox("Focus Detection")
         vbox = QVBoxLayout(group)
@@ -644,6 +834,24 @@ class MachineVisionSettingsWidget(QWidget):
         self._connect_laplacian_signals()
         self._connect_focus_region_signals()
         self._connect_inspect_calibration_signals()
+        self._connect_red_mark_signals()
+
+    def _connect_red_mark_signals(self) -> None:
+        w = self._red_mark_panel.widgets
+        for field in ("scale", "open_kernel_size", "min_area", "hue_low", "hue_high", "sat_min", "val_min"):
+            w[field].valueChanged.connect(
+                lambda v, f=field: self._on_red_mark_changed(f, v)
+            )
+        for field in ("max_aspect_ratio", "min_area_fraction", "smoothing_alpha",
+                      "deadband_px", "max_step_px", "jump_threshold_px",
+                      "side_cluster_fraction", "side_cluster_margin"):
+            w[field].valueChanged.connect(
+                lambda v, f=field: self._on_red_mark_changed(f, v)
+            )
+            if f"{field}_slider" in w:
+                w[f"{field}_slider"].valueChanged.connect(
+                    lambda _, f=field: self._on_red_mark_changed(f, w[f].value())
+                )
 
     def _connect_inspect_calibration_signals(self) -> None:
         for mode, panel in (("preview", self._inspect_preview_panel), ("snap", self._inspect_snap_panel)):
@@ -740,6 +948,7 @@ class MachineVisionSettingsWidget(QWidget):
             self._populate_laplacian(f.laplacian)
             self._populate_focus_region(f.focus_region)
             self._populate_inspect_calibration(settings.inspect_calibration)
+            self._populate_red_mark(settings.red_mark)
         finally:
             self._block_all_signals(False)
 
@@ -795,6 +1004,24 @@ class MachineVisionSettingsWidget(QWidget):
             w["downsample"].setValue(mode_settings.downsample if mode_settings.downsample is not None else 1)
             w["tick_min_length"].setValue(mode_settings.tick_min_length)
 
+    def _populate_red_mark(self, rm: RedMarkDetectionSettings) -> None:
+        w = self._red_mark_panel.widgets
+        w["scale"].setValue(rm.scale)
+        w["open_kernel_size"].setValue(rm.open_kernel_size)
+        w["min_area"].setValue(rm.min_area)
+        self._set_float_row(w, "max_aspect_ratio", rm.max_aspect_ratio, 1.0, 20.0)
+        self._set_float_row(w, "min_area_fraction", rm.min_area_fraction, 0.0, 1.0)
+        w["hue_low"].setValue(rm.hue_low)
+        w["hue_high"].setValue(rm.hue_high)
+        w["sat_min"].setValue(rm.sat_min)
+        w["val_min"].setValue(rm.val_min)
+        self._set_float_row(w, "smoothing_alpha", rm.smoothing_alpha, 0.0, 1.0)
+        self._set_float_row(w, "deadband_px", rm.deadband_px, 0.0, 50.0)
+        self._set_float_row(w, "max_step_px", rm.max_step_px, 0.0, 200.0)
+        self._set_float_row(w, "jump_threshold_px", rm.jump_threshold_px, 0.0, 500.0)
+        self._set_float_row(w, "side_cluster_fraction", rm.side_cluster_fraction, 0.0, 1.0)
+        self._set_float_row(w, "side_cluster_margin", rm.side_cluster_margin, 0.0, 0.45)
+
     def _set_float_row(
         self,
         w: dict[str, QWidget],
@@ -844,6 +1071,21 @@ class MachineVisionSettingsWidget(QWidget):
             "inspect_calibration.preview.tick_min_length": settings.inspect_calibration.preview.tick_min_length,
             "inspect_calibration.snap.downsample": settings.inspect_calibration.snap.downsample,
             "inspect_calibration.snap.tick_min_length": settings.inspect_calibration.snap.tick_min_length,
+            "red_mark.scale": settings.red_mark.scale,
+            "red_mark.open_kernel_size": settings.red_mark.open_kernel_size,
+            "red_mark.min_area": settings.red_mark.min_area,
+            "red_mark.max_aspect_ratio": settings.red_mark.max_aspect_ratio,
+            "red_mark.min_area_fraction": settings.red_mark.min_area_fraction,
+            "red_mark.hue_low": settings.red_mark.hue_low,
+            "red_mark.hue_high": settings.red_mark.hue_high,
+            "red_mark.sat_min": settings.red_mark.sat_min,
+            "red_mark.val_min": settings.red_mark.val_min,
+            "red_mark.smoothing_alpha": settings.red_mark.smoothing_alpha,
+            "red_mark.deadband_px": settings.red_mark.deadband_px,
+            "red_mark.max_step_px": settings.red_mark.max_step_px,
+            "red_mark.jump_threshold_px": settings.red_mark.jump_threshold_px,
+            "red_mark.side_cluster_fraction": settings.red_mark.side_cluster_fraction,
+            "red_mark.side_cluster_margin": settings.red_mark.side_cluster_margin,
         }
 
     def _check_modified(self, key: str, current_value: object) -> bool:
@@ -922,6 +1164,16 @@ class MachineVisionSettingsWidget(QWidget):
 
         panel = self._tenengrad_panel if section == "tenengrad" else self._laplacian_panel
         self._mark_field(f"{section}.{field}", field, panel.widgets, value)
+        self._set_unsaved(True)
+
+    def _on_red_mark_changed(self, field: str, value: object) -> None:
+        """Apply a changed red-mark field to the manager and update orange state."""
+        s = self._mv._copy_settings()
+        setattr(s.red_mark, field, value)
+        self._applying_settings = True
+        self._mv.apply_settings(s)
+        self._applying_settings = False
+        self._mark_field(f"red_mark.{field}", field, self._red_mark_panel.widgets, value)
         self._set_unsaved(True)
 
     def _on_focus_region_changed(self, field: str, value: object) -> None:
@@ -1091,6 +1343,7 @@ class MachineVisionSettingsWidget(QWidget):
             self._focus_region_panel,
             self._inspect_preview_panel,
             self._inspect_snap_panel,
+            self._red_mark_panel,
         ):
             for w in panel.widgets.values():
                 self._apply_orange(w, False)
@@ -1132,6 +1385,7 @@ class MachineVisionSettingsWidget(QWidget):
             self._focus_region_panel,
             self._inspect_preview_panel,
             self._inspect_snap_panel,
+            self._red_mark_panel,
         ):
             for w in panel.widgets.values():
                 w.blockSignals(block)
