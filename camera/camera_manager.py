@@ -440,24 +440,16 @@ class CameraManager(QObject):
             return None
         
         try:
-            # Create numpy array from buffer
-            # Calculate stride
-            base_camera = self._active_camera.underlying_camera
-            base_camera_class = type(base_camera)
+            base_camera_class = type(self._active_camera.underlying_camera)
             stride = base_camera_class.calculate_stride(self._frame_width, 24)
-            
-            # Create view of buffer
-            arr = np.frombuffer(self._current_frame_buffer, dtype=np.uint8)
-            
-            # Reshape to image dimensions
-            # Note: stride may be larger than width*3 due to alignment
+            required = stride * self._frame_height
+
+            arr = np.frombuffer(self._current_frame_buffer[:required], dtype=np.uint8)
+
             bytes_per_pixel = 3
             if stride == self._frame_width * bytes_per_pixel:
-                # No padding, simple reshape
                 return arr.reshape((self._frame_height, self._frame_width, bytes_per_pixel)).copy()
             else:
-                # Has padding, need to account for it
-                # Reshape to include stride, then slice off padding
                 arr_2d = arr.reshape((self._frame_height, stride))
                 return arr_2d[:, :self._frame_width * bytes_per_pixel].reshape(
                     (self._frame_height, self._frame_width, bytes_per_pixel)
