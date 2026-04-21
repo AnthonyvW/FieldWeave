@@ -94,6 +94,14 @@ class RedMarkDetection:
     Holds a reference to the shared ``MachineVisionSettings`` so parameter
     changes take effect on the next ``process()`` call without any explicit
     fan-out.
+
+    When a ``CameraCalibration`` is present on the settings, the line
+    orientation is determined directly from ``y_axis_orientation`` and the
+    side-cluster heuristic is skipped entirely.  EMA smoothing is also
+    restricted to the single axis relevant to the known orientation.
+
+    When no calibration is present the algorithm falls back to the
+    side-cluster heuristic with hysteresis (original behaviour).
     """
 
     def __init__(self, settings: MachineVisionSettings) -> None:
@@ -128,18 +136,44 @@ class RedMarkDetection:
             val_min=rm.val_min,
         )
 
-        self._smoothed_x = smooth_value(
-            self._smoothed_x, mean_x,
-            rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
-        )
-        self._smoothed_y = smooth_value(
-            self._smoothed_y, mean_y,
-            rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
-        )
+        y_axis_orientation = self._settings.camera_calibration.y_axis_orientation
 
-        orientation, self._cluster_frames = line_orientation(
-            valid, width, rm.side_cluster_fraction, rm.side_cluster_margin, self._cluster_frames,
-        )
+        if y_axis_orientation is not None:
+            # Calibration is available: orientation is known, so skip the
+            # side-cluster heuristic and only smooth the relevant axis.
+            #
+            # y_axis_orientation describes which image axis world-Y maps to:
+            #   "vertical"   → stage Y moves marks up/down → vertical reference line
+            #                  → smooth X (the line's horizontal position)
+            #   "horizontal" → stage Y moves marks left/right → horizontal reference line
+            #                  → smooth Y (the line's vertical position)
+            orientation = y_axis_orientation
+            if orientation == "vertical":
+                self._smoothed_x = smooth_value(
+                    self._smoothed_x, mean_x,
+                    rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
+                )
+                smoothed_y = self._smoothed_y
+            else:
+                self._smoothed_y = smooth_value(
+                    self._smoothed_y, mean_y,
+                    rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
+                )
+                smoothed_y = self._smoothed_y
+        else:
+            # No calibration: smooth both axes and use the heuristic.
+            self._smoothed_x = smooth_value(
+                self._smoothed_x, mean_x,
+                rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
+            )
+            self._smoothed_y = smooth_value(
+                self._smoothed_y, mean_y,
+                rm.smoothing_alpha, rm.deadband_px, rm.max_step_px, rm.jump_threshold_px,
+            )
+            smoothed_y = self._smoothed_y
+            orientation, self._cluster_frames = line_orientation(
+                valid, width, rm.side_cluster_fraction, rm.side_cluster_margin, self._cluster_frames,
+            )
 
         return RedMarkDetectionResult(
             valid_centers=valid,
@@ -149,7 +183,7 @@ class RedMarkDetection:
             mean_x=mean_x,
             mean_y=mean_y,
             stabilized_x=self._smoothed_x,
-            stabilized_y=self._smoothed_y,
+            stabilized_y=smoothed_y,
             image_center_x=float(width) / 2.0,
             image_center_y=float(height) / 2.0,
             line_orientation=orientation,
@@ -354,6 +388,8 @@ def line_orientation(
     Returns ``'horizontal'`` when most marks cluster within
     ``side_cluster_margin`` of one horizontal edge for at least two
     consecutive frames (hysteresis), otherwise ``'vertical'``.
+
+    Only called when no camera calibration is available.
     """
     if not centers or img_width <= 0:
         return "vertical", 0
