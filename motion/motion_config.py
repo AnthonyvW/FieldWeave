@@ -32,6 +32,62 @@ class CameraCalibrationPosition:
 
 
 @dataclass
+class TreeCoreSlot:
+    """A single slot in a tree core slide.
+
+    ``position_nm`` is the coordinate along the automation axis for this slot.
+    ``offset_nm`` is an additional fine-tune offset applied on top of the slot
+    position, also along the automation axis.
+    """
+
+    position_nm: int = 0
+    offset_nm: int = 0
+
+
+@dataclass
+class TreeCoreAutomationSettings:
+    """Settings for automated tree core slot imaging.
+
+    The stage steps along a fixed axis (currently Y) to image each slot in
+    sequence.  A mark is imaged at a known X/Y position before the run begins.
+
+    All positions and offsets are in nanometres.
+    """
+
+    # Axis driven during automation — hard-coded to Y for now.
+    axis: str = "y"
+
+    # Position of the reference mark imaged before the run.
+    mark_reference_nm: int = 0
+    mark_z_nm: int = 0
+
+    # Z height to move to at the start of the run.
+    starting_height_nm: int = 0
+
+    # Offset applied along the automation axis before the first slot.
+    starting_offset_nm: int = 0
+
+    # Distance between consecutive slots along the automation axis.
+    slot_separation_nm: int = 11_200_000
+
+    # ISO-8601 timestamp of the most recent successful calibration, or an empty
+    # string if no calibration has been completed yet.
+    last_calibrated_iso: str = ""
+
+    # Ordered list of slot definitions (defaults to 20 empty slots).
+    slots: list[TreeCoreSlot] = field(default_factory=lambda: [TreeCoreSlot() for _ in range(20)])
+
+    @property
+    def num_slots(self) -> int:
+        return len(self.slots)
+
+    @property
+    def has_been_calibrated(self) -> bool:
+        """True if a successful calibration has been recorded."""
+        return bool(self.last_calibrated_iso)
+
+
+@dataclass
 class MotionSystemSettings:
     FIRMWARE_NAME: str = "Marlin"
     MACHINE_TYPE: str = "Ender-3"
@@ -65,6 +121,11 @@ class MotionSystemSettings:
     # Saved stage position for camera calibration and last-calibrated timestamp.
     camera_calibration_position: CameraCalibrationPosition = field(
         default_factory=CameraCalibrationPosition
+    )
+
+    # Tree core slot automation settings.
+    tree_core_automation: TreeCoreAutomationSettings = field(
+        default_factory=TreeCoreAutomationSettings
     )
 
     def validate(self) -> None:
@@ -131,6 +192,24 @@ class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
             )
         else:
             filtered_data.pop("camera_calibration_position", None)
+
+        # Deserialise the nested TreeCoreAutomationSettings if present.
+        raw_tca = filtered_data.get("tree_core_automation")
+        if isinstance(raw_tca, dict):
+            valid_tca_fields = {f.name for f in fields(TreeCoreAutomationSettings)}
+            tca_data = {k: v for k, v in raw_tca.items() if k in valid_tca_fields}
+
+            raw_slots = tca_data.get("slots", [])
+            valid_slot_fields = {f.name for f in fields(TreeCoreSlot)}
+            tca_data["slots"] = [
+                TreeCoreSlot(**{k: v for k, v in s.items() if k in valid_slot_fields})
+                if isinstance(s, dict) else TreeCoreSlot()
+                for s in raw_slots
+            ]
+
+            filtered_data["tree_core_automation"] = TreeCoreAutomationSettings(**tca_data)
+        else:
+            filtered_data.pop("tree_core_automation", None)
 
         return MotionSystemSettings(**filtered_data)
 
