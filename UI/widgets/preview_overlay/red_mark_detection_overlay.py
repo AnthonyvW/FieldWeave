@@ -137,6 +137,9 @@ class RedMarkDetectionOverlay(Overlay):
 
     @Slot(object)
     def _on_result(self, result: RedMarkDetectionResult) -> None:
+        if not result.valid_centers:
+            self._result = None
+            return
         self._result = result
         self._source_width = result.source_width
         self._source_height = result.source_height
