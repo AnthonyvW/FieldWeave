@@ -14,7 +14,10 @@ from UI.tabs.calibration_pages.camera_space_calibration import (
     CameraSpaceCalibrationWidget,
 )
 from UI.tabs.calibration_pages.dpi_calibration import DpiCalibrationPage, DpiCalibrationWidget
-from UI.tabs.calibration_pages.slot_calibration import SlotCalibrationWidget
+from UI.tabs.calibration_pages.slot_calibration import (
+    SlotCalibrationPage,
+    SlotCalibrationWidget,
+)
 
 _SIDEBAR_TITLES: list[str] = [
     "Camera Space Calibration",
@@ -24,6 +27,7 @@ _SIDEBAR_TITLES: list[str] = [
 
 _CAMERA_SPACE_INDEX = 0
 _DPI_INDEX = 1
+_SLOT_INDEX = 2
 
 
 class CalibrationTab(QWidget):
@@ -75,12 +79,15 @@ class CalibrationTab(QWidget):
         self._content_stack.addWidget(self._dpi_widget)
 
         self._slot_widget = SlotCalibrationWidget()
+        self._slot_widget.calibration_started.connect(
+            lambda: self._on_calibration_started(_SLOT_INDEX)
+        )
         self._content_stack.addWidget(self._slot_widget)
 
         main_layout.addWidget(self._content_stack, 1)
         self._outer_stack.addWidget(calibration_widget)
 
-        # --- Live calibration pages (outer stack indices 1, 2) ---
+        # --- Live calibration pages (outer stack indices 1, 2, 3) ---
         self._camera_space_page = CameraSpaceCalibrationPage()
         self._camera_space_page.finished.connect(self._on_calibration_finished)
         self._outer_stack.addWidget(self._camera_space_page)
@@ -89,9 +96,14 @@ class CalibrationTab(QWidget):
         self._dpi_page.finished.connect(self._on_calibration_finished)
         self._outer_stack.addWidget(self._dpi_page)
 
+        self._slot_page = SlotCalibrationPage()
+        self._slot_page.finished.connect(self._on_calibration_finished)
+        self._outer_stack.addWidget(self._slot_page)
+
         self._live_page_indices: dict[int, int] = {
             _CAMERA_SPACE_INDEX: 1,
             _DPI_INDEX: 2,
+            _SLOT_INDEX: 3,
         }
         self._active_list_index: int = 0
 
@@ -109,15 +121,17 @@ class CalibrationTab(QWidget):
         self._active_list_index = list_index
         if list_index == _CAMERA_SPACE_INDEX:
             self._camera_space_page.start()
-            self._outer_stack.setCurrentIndex(self._live_page_indices[_CAMERA_SPACE_INDEX])
         elif list_index == _DPI_INDEX:
             self._dpi_page.start()
-            self._outer_stack.setCurrentIndex(self._live_page_indices[_DPI_INDEX])
+        elif list_index == _SLOT_INDEX:
+            self._slot_page.start()
+        self._outer_stack.setCurrentIndex(self._live_page_indices[list_index])
 
     @Slot()
     def _on_calibration_finished(self) -> None:
         self._outer_stack.setCurrentIndex(0)
         self._calibration_list.setCurrentRow(self._active_list_index)
-        widget = self._content_stack.widget(self._active_list_index)
-        if hasattr(widget, "reset"):
-            widget.reset()
+        for i in range(self._content_stack.count()):
+            widget = self._content_stack.widget(i)
+            if hasattr(widget, "reset"):
+                widget.reset()

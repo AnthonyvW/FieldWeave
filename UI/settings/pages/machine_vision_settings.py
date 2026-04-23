@@ -619,7 +619,7 @@ class MachineVisionSettingsWidget(QWidget):
     """
 
     # Group names exposed for SettingsDialog sidebar sub-items.
-    _GROUP_NAMES = ["Focus Detection", "Inspection Calibration", "Red Mark Detection"]
+    _GROUP_NAMES = ["Focus Detection", "Camera Calibration", "Inspection Calibration", "Red Mark Detection"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -675,6 +675,10 @@ class MachineVisionSettingsWidget(QWidget):
         cl.addWidget(focus_group)
         self._group_boxes["Focus Detection"] = focus_group
 
+        camera_cal_group = self._build_camera_calibration_group()
+        cl.addWidget(camera_cal_group)
+        self._group_boxes["Camera Calibration"] = camera_cal_group
+
         inspect_group = self._build_inspect_calibration_group()
         cl.addWidget(inspect_group)
         self._group_boxes["Inspection Calibration"] = inspect_group
@@ -686,6 +690,7 @@ class MachineVisionSettingsWidget(QWidget):
         # Register group boxes with parent dialog for scroll-to support.
         if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
             self.parent_dialog.register_group_box("Machine Vision", "Focus Detection", focus_group)
+            self.parent_dialog.register_group_box("Machine Vision", "Camera Calibration", camera_cal_group)
             self.parent_dialog.register_group_box("Machine Vision", "Inspection Calibration", inspect_group)
             self.parent_dialog.register_group_box("Machine Vision", "Red Mark Detection", red_mark_group)
 
@@ -707,6 +712,143 @@ class MachineVisionSettingsWidget(QWidget):
             self.parent_dialog.save_btn.clicked.connect(self._on_save)
 
         self._refresh_inspection_position_display()
+        self._refresh_camera_calibration_display()
+
+    def _build_camera_calibration_group(self) -> QGroupBox:
+        group = QGroupBox("Camera Calibration")
+        vbox = QVBoxLayout(group)
+        vbox.setContentsMargins(6, 6, 6, 6)
+        vbox.setSpacing(6)
+
+        # --- DPI sub-box ---
+        dpi_box = QGroupBox("DPI")
+        dpi_vbox = QVBoxLayout(dpi_box)
+        dpi_vbox.setContentsMargins(6, 6, 6, 6)
+        dpi_vbox.setSpacing(6)
+
+        self._dpi_label = QLabel("Current DPI: Not set")
+        self._dpi_label.setObjectName("DpiLabel")
+        dpi_vbox.addWidget(self._dpi_label)
+
+        manual_row = QHBoxLayout()
+        manual_row.setSpacing(6)
+
+        self._dpi_spin = QDoubleSpinBox()
+        self._dpi_spin.setMinimum(1.0)
+        self._dpi_spin.setMaximum(100_000.0)
+        self._dpi_spin.setDecimals(2)
+        self._dpi_spin.setSingleStep(10.0)
+        self._dpi_spin.setFixedWidth(110)
+        self._dpi_spin.setToolTip("Enter a DPI value to store as the known optical resolution.")
+
+        self._dpi_apply_btn = QPushButton("Set DPI")
+        self._dpi_apply_btn.setMaximumWidth(80)
+        self._dpi_apply_btn.setToolTip("Save the entered DPI value to settings.")
+        self._dpi_apply_btn.clicked.connect(self._on_dpi_apply_clicked)
+
+        self._dpi_clear_btn = QPushButton("Clear DPI")
+        self._dpi_clear_btn.setMaximumWidth(90)
+        self._dpi_clear_btn.setToolTip("Remove the stored DPI value.")
+        self._dpi_clear_btn.clicked.connect(self._on_dpi_clear_clicked)
+
+        manual_row.addWidget(self._dpi_spin)
+        manual_row.addWidget(self._dpi_apply_btn)
+        manual_row.addWidget(self._dpi_clear_btn)
+        manual_row.addStretch()
+        dpi_vbox.addLayout(manual_row)
+
+        self._dpi_status = QLabel("")
+        self._dpi_status.setObjectName("DpiStatusLabel")
+        self._dpi_status.setWordWrap(False)
+        self._dpi_status.hide()
+        dpi_vbox.addWidget(self._dpi_status)
+
+        vbox.addWidget(dpi_box)
+
+        # --- Camera Space Calibration sub-box ---
+        cam_space_box = QGroupBox("Camera Space Calibration")
+        cam_space_vbox = QVBoxLayout(cam_space_box)
+        cam_space_vbox.setContentsMargins(6, 6, 6, 6)
+        cam_space_vbox.setSpacing(6)
+
+        self._cam_space_label = QLabel("Calibration: Not set")
+        self._cam_space_label.setObjectName("CamSpaceLabel")
+        cam_space_vbox.addWidget(self._cam_space_label)
+
+        cam_space_btn_row = QHBoxLayout()
+        cam_space_btn_row.setSpacing(6)
+
+        self._cam_space_clear_btn = QPushButton("Clear Calibration")
+        self._cam_space_clear_btn.setToolTip("Remove the saved camera space calibration matrix.")
+        self._cam_space_clear_btn.setEnabled(False)
+        self._cam_space_clear_btn.clicked.connect(self._on_cam_space_clear_clicked)
+
+        cam_space_btn_row.addWidget(self._cam_space_clear_btn)
+        cam_space_btn_row.addStretch()
+        cam_space_vbox.addLayout(cam_space_btn_row)
+
+        self._cam_space_status = QLabel("")
+        self._cam_space_status.setObjectName("CamSpaceStatusLabel")
+        self._cam_space_status.setWordWrap(False)
+        self._cam_space_status.hide()
+        cam_space_vbox.addWidget(self._cam_space_status)
+
+        vbox.addWidget(cam_space_box)
+
+        return group
+
+    def _refresh_camera_calibration_display(self) -> None:
+        settings = self._mv.settings
+        dpi = settings.dpi
+        if dpi is not None:
+            self._dpi_label.setText(f"Current DPI: {dpi:.2f}")
+            self._dpi_spin.setValue(dpi)
+        else:
+            self._dpi_label.setText("Current DPI: Not set")
+
+        cal = settings.camera_calibration.calibration
+        if cal is not None:
+            self._cam_space_label.setText("Calibration: Set")
+            self._cam_space_clear_btn.setEnabled(True)
+        else:
+            self._cam_space_label.setText("Calibration: Not set")
+            self._cam_space_clear_btn.setEnabled(False)
+
+    def _set_dpi_status(self, text: str) -> None:
+        self._dpi_status.setText(text)
+        self._dpi_status.setVisible(bool(text))
+
+    def _set_cam_space_status(self, text: str) -> None:
+        self._cam_space_status.setText(text)
+        self._cam_space_status.setVisible(bool(text))
+
+    def _on_dpi_apply_clicked(self) -> None:
+        dpi = self._dpi_spin.value()
+        s = self._mv._copy_settings()
+        s.dpi = dpi
+        self._mv.apply_settings(s)
+        self._mv.save_settings()
+        info(f"[MachineVisionSettings] DPI set to {dpi:.2f}")
+        self._refresh_camera_calibration_display()
+        self._set_dpi_status(f"DPI set to {dpi:.2f}")
+
+    def _on_dpi_clear_clicked(self) -> None:
+        s = self._mv._copy_settings()
+        s.dpi = None
+        self._mv.apply_settings(s)
+        self._mv.save_settings()
+        info("[MachineVisionSettings] DPI cleared")
+        self._refresh_camera_calibration_display()
+        self._set_dpi_status("DPI cleared.")
+
+    def _on_cam_space_clear_clicked(self) -> None:
+        s = self._mv._copy_settings()
+        s.camera_calibration.calibration = None
+        self._mv.apply_settings(s)
+        self._mv.save_settings()
+        info("[MachineVisionSettings] Camera space calibration cleared")
+        self._refresh_camera_calibration_display()
+        self._set_cam_space_status("Camera space calibration cleared.")
 
     def _build_inspect_calibration_group(self) -> QGroupBox:
         group = QGroupBox("Inspection Calibration")
@@ -1314,6 +1456,7 @@ class MachineVisionSettingsWidget(QWidget):
         if self._applying_settings:
             return
         self._populate_from_settings(self._mv.settings)
+        self._refresh_camera_calibration_display()
         self._set_unsaved(True)
 
     # ------------------------------------------------------------------

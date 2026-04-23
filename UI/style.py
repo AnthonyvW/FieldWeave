@@ -501,6 +501,16 @@ def apply_style(app: QApplication) -> None:
             height: 14px;
         }}
 
+        /* Calibration prerequisite warning box */
+        QLabel#CalWarningLabel {{
+            font-size: 13px;
+            font-weight: bold;
+            color: #7a0000;
+            background: #fde8e8;
+            border: 1px solid #e57373;
+            padding: 10px 14px;
+        }}
+
         /* Camera space calibration — intro page */
         QLabel#CalPageTitle {{
             font-size: 22px;

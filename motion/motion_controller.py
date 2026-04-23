@@ -459,6 +459,19 @@ class MotionController:
         if wait:
             self.wait_for_idle()
 
+    def save_settings(self) -> bool:
+        """Persist the current config to disk.
+
+        Returns True on success, False if the save fails for any reason
+        (validation error, I/O error, etc.).
+        """
+        try:
+            self._config_manager.save(self.config)
+            return True
+        except Exception as exc:
+            error(f"Failed to save motion settings: {exc}")
+            return False
+
     def reset_fault(self) -> None:
         """Clear a faulted state so the controller can accept commands again."""
         self.faulted = False

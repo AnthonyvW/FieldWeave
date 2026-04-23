@@ -356,6 +356,17 @@ class MotionControllerManager:
             return self._controller.config
         return None
 
+    def save_settings(self) -> bool:
+        """Persist the current controller settings to disk.
+
+        Returns True on success, False if the controller is unavailable or
+        the save fails.
+        """
+        ctrl = self._controller
+        if ctrl is None:
+            return False
+        return ctrl.save_settings()
+
     # ------------------------------------------------------------------
     # Message listeners
     # ------------------------------------------------------------------
