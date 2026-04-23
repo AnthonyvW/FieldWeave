@@ -20,6 +20,7 @@ from machine_vision.algorithms.camera_calibration import CameraCalibration, Cali
 from machine_vision.algorithms.focus_detection import FocusAnalysis, FocusResult
 from machine_vision.algorithms.calibration_bar_detection import InspectCalibration, InspectCalibrationResult
 from machine_vision.algorithms.red_mark_detection import RedMarkDetection, RedMarkDetectionResult
+from machine_vision.algorithms.background_detection import BackgroundDetection, BackgroundDetectionResult
 from machine_vision.machine_vision_config import (
     CameraCalibrationSettings,
     FocusDetectionSettings,
@@ -31,6 +32,7 @@ from machine_vision.machine_vision_config import (
     MachineVisionSettings,
     MachineVisionSettingsManager,
     RedMarkDetectionSettings,
+    BackgroundDetectionSettings,
     TenengradSettings,
 )
 
@@ -156,6 +158,8 @@ class _VisionWorker(QObject):
     inspect_calibration_error = Signal(str)
     red_mark_detection_result_ready = Signal(object)    # RedMarkDetectionResult
     red_mark_detection_error = Signal(str)
+    background_detection_result_ready = Signal(object)  # BackgroundDetectionResult
+    background_detection_error = Signal(str)
 
     def __init__(self, settings: MachineVisionSettings, save_settings: Callable[[], None], parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -163,6 +167,7 @@ class _VisionWorker(QObject):
         self._calibration_build = CalibrationBuild(settings, save_settings)
         self._inspect_calibration = InspectCalibration(settings)
         self._red_mark_detection = RedMarkDetection(settings)
+        self._background_detection = BackgroundDetection(settings)
 
     @Slot(bytes, int, int)
     def run_focus_analysis(self, frame_bytes: bytes, width: int, height: int) -> None:
@@ -223,6 +228,17 @@ class _VisionWorker(QObject):
     def reset_red_mark_state(self) -> None:
         self._red_mark_detection.reset()
 
+    @Slot(bytes, int, int)
+    def run_background_detection(self, frame_bytes: bytes, width: int, height: int) -> None:
+        try:
+            self.background_detection_result_ready.emit(
+                self._background_detection.process(frame_bytes, width, height)
+            )
+        except Exception:
+            msg = traceback.format_exc()
+            error(f"_VisionWorker: background detection failed:\n{msg}")
+            self.background_detection_error.emit(msg)
+
 
 # ---------------------------------------------------------------------------
 # Manager
@@ -263,6 +279,7 @@ class MachineVisionManager(QObject):
     )
     _request_inspect_calibration = Signal(bytes, int, int, bool)
     _request_red_mark_detection = Signal(bytes, int, int)
+    _request_background_detection = Signal(bytes, int, int)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -299,6 +316,12 @@ class MachineVisionManager(QObject):
             worker_slot=self._worker.run_red_mark_detection,
             result_signal=self._worker.red_mark_detection_result_ready,
             error_signal=self._worker.red_mark_detection_error,
+        )
+        self._background_queue = self._register_queue(
+            request_signal=self._request_background_detection,
+            worker_slot=self._worker.run_background_detection,
+            result_signal=self._worker.background_detection_result_ready,
+            error_signal=self._worker.background_detection_error,
         )
 
         self._thread.start()
@@ -345,6 +368,7 @@ class MachineVisionManager(QObject):
         self._settings.inspect_calibration = settings.inspect_calibration
         self._settings.inspection_calibration_position = settings.inspection_calibration_position
         self._settings.red_mark = settings.red_mark
+        self._settings.background = settings.background
         self.settings_changed.emit()
 
     def save_settings(self) -> None:
@@ -616,6 +640,21 @@ class MachineVisionManager(QObject):
         """
         self._worker.reset_red_mark_state()
 
+    def request_background_detection(
+        self,
+        frame: np.ndarray,
+        width: int,
+        height: int,
+    ) -> Future[BackgroundDetectionResult]:
+        """
+        Submit a background detection request and return a
+        ``Future[BackgroundDetectionResult]``.
+
+        The frame is copied immediately so the camera buffer may be reused
+        before the future resolves.
+        """
+        return self._background_queue.submit((bytes(frame), width, height))
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -629,6 +668,7 @@ class MachineVisionManager(QObject):
         self._calibration_queue.cancel_pending()
         self._inspect_queue.cancel_pending()
         self._red_mark_queue.cancel_pending()
+        self._background_queue.cancel_pending()
 
         self._thread.quit()
         if not self._thread.wait(3000):
@@ -657,6 +697,7 @@ class MachineVisionManager(QObject):
         fr = f.focus_region
         cc = self._settings.camera_calibration
         rm = self._settings.red_mark
+        bg = self._settings.background
         return MachineVisionSettings(
             dpi=self._settings.dpi,
             focus=FocusDetectionSettings(
@@ -725,5 +766,10 @@ class MachineVisionManager(QObject):
                 jump_threshold_px=rm.jump_threshold_px,
                 side_cluster_fraction=rm.side_cluster_fraction,
                 side_cluster_margin=rm.side_cluster_margin,
+            ),
+            background=BackgroundDetectionSettings(
+                val_median_max=bg.val_median_max,
+                val_std_max=bg.val_std_max,
+                scale=bg.scale,
             ),
         )

@@ -312,6 +312,51 @@ class RedMarkDetectionSettings:
 
 
 # ---------------------------------------------------------------------------
+# Background detection settings
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BackgroundDetectionSettings:
+    """
+    Parameters for the black-plastic background detection algorithm.
+
+    Detection is based on the median and standard deviation of the HSV value
+    (brightness) channel.  The plastic surface is dark-to-mid grey and highly
+    uniform; other materials are rejected by one or both constraints.
+    """
+
+    val_median_max: int = 128
+    """
+    Maximum median HSV value (brightness) to classify the frame as background
+    [0-255].  Corresponds to 0.5 on GIMP's normalised [0-1] scale.  The
+    plastic surface is dark-to-mid grey; bright surfaces such as paper are
+    rejected by this constraint.
+    """
+
+    val_std_max: float = 25.0
+    """
+    Maximum standard deviation of HSV value to classify the frame as
+    background [0-255].  Corresponds to 0.1 on GIMP's normalised [0-1]
+    scale.  The plastic surface is highly uniform; textured materials such
+    as wood grain or printed paper are rejected by this constraint.
+    """
+
+    scale: int = 4
+    """
+    Downsample factor applied before computing statistics.  Must be >= 1.
+    Higher values reduce computation with negligible effect on accuracy.
+    """
+
+    def validate(self) -> None:
+        if not (0 <= self.val_median_max <= 255):
+            raise ValueError("background.val_median_max must be in [0, 255]")
+        if self.val_std_max < 0:
+            raise ValueError("background.val_std_max must be >= 0")
+        if self.scale < 1:
+            raise ValueError("background.scale must be >= 1")
+
+
+# ---------------------------------------------------------------------------
 # Inspect-calibration settings
 # ---------------------------------------------------------------------------
 
@@ -488,11 +533,15 @@ class MachineVisionSettings:
     red_mark: RedMarkDetectionSettings = field(default_factory=RedMarkDetectionSettings)
     """Parameters for the red registration-mark detection algorithm."""
 
+    background: BackgroundDetectionSettings = field(default_factory=BackgroundDetectionSettings)
+    """Parameters for the black-plastic background detection algorithm."""
+
     def validate(self) -> None:
         self.focus.validate()
         self.camera_calibration.validate()
         self.inspect_calibration.validate()
         self.red_mark.validate()
+        self.background.validate()
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +603,16 @@ def _load_red_mark(d: dict[str, Any]) -> RedMarkDetectionSettings:
         jump_threshold_px=d.get("jump_threshold_px", D.jump_threshold_px),
         side_cluster_fraction=d.get("side_cluster_fraction", D.side_cluster_fraction),
         side_cluster_margin=d.get("side_cluster_margin", D.side_cluster_margin),
+    )
+
+
+
+def _load_background(d: dict[str, Any]) -> BackgroundDetectionSettings:
+    D = BackgroundDetectionSettings
+    return BackgroundDetectionSettings(
+        val_median_max=d.get("val_median_max", D.val_median_max),
+        val_std_max=d.get("val_std_max", D.val_std_max),
+        scale=d.get("scale", D.scale),
     )
 
 
@@ -647,6 +706,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             inspect_calibration=inspect_calibration,
             inspection_calibration_position=inspection_calibration_position,
             red_mark=_load_red_mark(data.get("red_mark", {})),
+            background=_load_background(data.get("background", {})),
         )
 
     def to_dict(self, settings: MachineVisionSettings) -> dict[str, Any]:
@@ -658,6 +718,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         ic = settings.inspect_calibration
         icp = settings.inspection_calibration_position
         rm = settings.red_mark
+        bg = settings.background
         return {
             "dpi": settings.dpi,
             "focus": {
@@ -726,5 +787,10 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 "jump_threshold_px": rm.jump_threshold_px,
                 "side_cluster_fraction": rm.side_cluster_fraction,
                 "side_cluster_margin": rm.side_cluster_margin,
+            },
+            "background": {
+                "val_median_max": bg.val_median_max,
+                "val_std_max": bg.val_std_max,
+                "scale": bg.scale,
             },
         }

@@ -18,6 +18,7 @@ from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOve
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
+from UI.widgets.preview_overlay.background_detection import BackgroundDetectionOverlay
 
 
 class EyeToggleButton(QPushButton):
@@ -246,6 +247,15 @@ class OverlayController:
         self._preview._video_label.update()
 
     @property
+    def background(self) -> bool:
+        return self._preview._background_overlay.enabled
+
+    @background.setter
+    def background(self, enabled: bool) -> None:
+        self._preview._background_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    @property
     def click_to_move(self) -> bool:
         return self._preview._click_to_move_overlay.enabled
 
@@ -337,6 +347,7 @@ class CameraPreview(QFrame):
         self._focus_overlay = FocusOverlay()
         self._inspect_calibration_overlay = InspectCalibrationOverlay()
         self._red_mark_overlay = RedMarkDetectionOverlay()
+        self._background_overlay = BackgroundDetectionOverlay()
         self._channel_overlay = ChannelOverlay()
         self._click_to_move_overlay = ClickToMoveOverlay()
 
@@ -345,6 +356,7 @@ class CameraPreview(QFrame):
         self._video_label.add_overlay(self._focus_overlay)
         self._video_label.add_overlay(self._inspect_calibration_overlay)
         self._video_label.add_overlay(self._red_mark_overlay)
+        self._video_label.add_overlay(self._background_overlay)
         self._video_label.add_overlay(self._click_to_move_overlay)
 
         self._crosshair_button = CrosshairButton(self)
@@ -383,6 +395,7 @@ class CameraPreview(QFrame):
         self._focus_overlay._relay.result_ready.connect(self._video_label.update)
         self._inspect_calibration_overlay._relay.result_ready.connect(self._video_label.update)
         self._red_mark_overlay._relay.result_ready.connect(self._video_label.update)
+        self._background_overlay._relay.result_ready.connect(self._video_label.update)
 
         self._connect_to_camera_manager()
 
@@ -432,16 +445,18 @@ class CameraPreview(QFrame):
         self._channel_overlay.show_blue = show_blue
         self._channel_overlay.show_grayscale = show_grayscale
 
-    @Slot(bool, bool, bool)
+    @Slot(bool, bool, bool, bool)
     def _on_vision_mode_changed(
         self,
         focus: bool,
         red_mark: bool,
         scale: bool,
+        background: bool,
     ) -> None:
         self._focus_overlay.set_enabled(focus)
         self._red_mark_overlay.set_enabled(red_mark)
         self._inspect_calibration_overlay.set_enabled(scale)
+        self._background_overlay.set_enabled(background)
         self._video_label.update()
 
     def _toggle_preview_visibility(self) -> None:

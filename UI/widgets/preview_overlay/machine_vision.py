@@ -29,9 +29,11 @@ class MachineVisionButton(QPushButton):
     vision_mode_changed(focus, red_mark, scale)
         Emitted whenever the active mode changes. Exactly one value will be
         True, or all will be False when no mode is selected.
+
+        Order: focus, red_mark, scale, background.
     """
 
-    vision_mode_changed = Signal(bool, bool, bool)
+    vision_mode_changed = Signal(bool, bool, bool, bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -98,12 +100,17 @@ class MachineVisionButton(QPushButton):
         self._cb_scale.setObjectName("VisionCheckScale")
         self._cb_scale.setChecked(False)
 
+        self._cb_background = QCheckBox("Background Detection", menu)
+        self._cb_background.setObjectName("VisionCheckBackground")
+        self._cb_background.setChecked(False)
+
         self._button_group = QButtonGroup(menu)
         self._button_group.setExclusive(True)
         self._button_group.addButton(self._cb_none)
         self._button_group.addButton(self._cb_focus)
         self._button_group.addButton(self._cb_red_mark)
         self._button_group.addButton(self._cb_scale)
+        self._button_group.addButton(self._cb_background)
 
         self._button_group.buttonToggled.connect(self._on_mode_changed)
 
@@ -111,6 +118,7 @@ class MachineVisionButton(QPushButton):
         layout.addWidget(self._cb_focus)
         layout.addWidget(self._cb_red_mark)
         layout.addWidget(self._cb_scale)
+        layout.addWidget(self._cb_background)
         menu.adjustSize()
         return menu
 
@@ -138,6 +146,7 @@ class MachineVisionButton(QPushButton):
         focus = self._cb_focus.isChecked()
         red_mark = self._cb_red_mark.isChecked()
         scale = self._cb_scale.isChecked()
+        background = self._cb_background.isChecked()
         if not self.menu.isVisible():
             self._update_highlight()
-        self.vision_mode_changed.emit(focus, red_mark, scale)
+        self.vision_mode_changed.emit(focus, red_mark, scale, background)
