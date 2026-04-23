@@ -443,10 +443,11 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
                 f" size={self.stitch_result.image_width}x{self.stitch_result.image_height}"
                 f" output={self.stitch_result.output_path}"
             )
-            mv_settings = ctx.machine_vision.settings
-            mv_settings.inspect_calibration.last_calibrated = (
+            s = ctx.machine_vision._copy_settings()
+            s.inspect_calibration.last_calibrated = (
                 datetime.now(timezone.utc).isoformat()
             )
+            ctx.machine_vision.apply_settings(s)
             ctx.machine_vision.save_settings()
 
         yield

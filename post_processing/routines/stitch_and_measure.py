@@ -498,7 +498,9 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         if dpi is not None:
             ctx = get_app_context()
             if ctx is not None and ctx.machine_vision is not None:
-                ctx.machine_vision.settings.dpi = dpi
+                s = ctx.machine_vision._copy_settings()
+                s.dpi = dpi
+                ctx.machine_vision.apply_settings(s)
                 debug(f"StitchAndMeasureRoutine: DPI {dpi:.2f} written to machine vision settings")
 
         debug_path: str | None = None

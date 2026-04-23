@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info, error
 from machine_vision.machine_vision_config import (
+    BackgroundDetectionSettings,
     FocusRegionSettings,
     InspectCalibrationModeSettings,
     InspectCalibrationSettings,
@@ -609,6 +610,56 @@ class _RedMarkPanel(QWidget):
         return self._w
 
 
+# ---------------------------------------------------------------------------
+# Background Detection panel
+# ---------------------------------------------------------------------------
+
+class _BackgroundPanel(QWidget):
+    """Parameter controls for the background detection algorithm."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._w: dict[str, QWidget] = {}
+        self._build()
+
+    def _build(self) -> None:
+        form = QFormLayout(self)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        val_median_spin = QSpinBox()
+        val_median_spin.setMinimum(0)
+        val_median_spin.setMaximum(255)
+        val_median_spin.setSingleStep(5)
+        val_median_spin.setFixedWidth(90)
+        val_median_spin.setToolTip(
+            "Maximum median HSV brightness to classify a frame as background [0–255].\n"
+            "The plastic surface is dark-to-mid grey; bright surfaces like paper are rejected."
+        )
+        form.addRow("Median max:", val_median_spin)
+        self._w["val_median_max"] = val_median_spin
+
+        container, _spin, _slider = _make_float_row(
+            "val_std_max", self._w, 0.0, 128.0, 1, 1.0,
+            "Maximum standard deviation of HSV brightness to classify a frame as background [0–255].\n"
+            "The plastic surface is highly uniform; textured materials are rejected.",
+        )
+        form.addRow("Std max:", container)
+
+        scale_spin = QSpinBox()
+        scale_spin.setMinimum(1)
+        scale_spin.setMaximum(16)
+        scale_spin.setSingleStep(1)
+        scale_spin.setFixedWidth(90)
+        scale_spin.setToolTip(
+            "Downsample factor applied before computing statistics.\n"
+            "Higher values reduce computation with negligible effect on accuracy."
+        )
+        form.addRow("Scale:", scale_spin)
+        self._w["scale"] = scale_spin
+
+    @property
+    def widgets(self) -> dict[str, QWidget]:
+        return self._w
 
 
 class MachineVisionSettingsWidget(QWidget):
@@ -619,7 +670,7 @@ class MachineVisionSettingsWidget(QWidget):
     """
 
     # Group names exposed for SettingsDialog sidebar sub-items.
-    _GROUP_NAMES = ["Focus Detection", "Camera Calibration", "Inspection Calibration", "Red Mark Detection"]
+    _GROUP_NAMES = ["Focus Detection", "Camera Calibration", "Inspection Calibration", "Red Mark Detection", "Background Detection"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -640,6 +691,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._inspect_preview_panel = _InspectCalibrationModePanel("preview")
         self._inspect_snap_panel = _InspectCalibrationModePanel("snap")
         self._red_mark_panel = _RedMarkPanel()
+        self._background_panel = _BackgroundPanel()
 
         self._build_ui()
         self._populate_from_settings(self._mv.settings)
@@ -687,12 +739,17 @@ class MachineVisionSettingsWidget(QWidget):
         cl.addWidget(red_mark_group)
         self._group_boxes["Red Mark Detection"] = red_mark_group
 
+        background_group = self._build_background_group()
+        cl.addWidget(background_group)
+        self._group_boxes["Background Detection"] = background_group
+
         # Register group boxes with parent dialog for scroll-to support.
         if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
             self.parent_dialog.register_group_box("Machine Vision", "Focus Detection", focus_group)
             self.parent_dialog.register_group_box("Machine Vision", "Camera Calibration", camera_cal_group)
             self.parent_dialog.register_group_box("Machine Vision", "Inspection Calibration", inspect_group)
             self.parent_dialog.register_group_box("Machine Vision", "Red Mark Detection", red_mark_group)
+            self.parent_dialog.register_group_box("Machine Vision", "Background Detection", background_group)
 
         cl.addStretch()
 
@@ -826,7 +883,9 @@ class MachineVisionSettingsWidget(QWidget):
         dpi = self._dpi_spin.value()
         s = self._mv._copy_settings()
         s.dpi = dpi
+        self._applying_settings = True
         self._mv.apply_settings(s)
+        self._applying_settings = False
         self._mv.save_settings()
         info(f"[MachineVisionSettings] DPI set to {dpi:.2f}")
         self._refresh_camera_calibration_display()
@@ -835,7 +894,9 @@ class MachineVisionSettingsWidget(QWidget):
     def _on_dpi_clear_clicked(self) -> None:
         s = self._mv._copy_settings()
         s.dpi = None
+        self._applying_settings = True
         self._mv.apply_settings(s)
+        self._applying_settings = False
         self._mv.save_settings()
         info("[MachineVisionSettings] DPI cleared")
         self._refresh_camera_calibration_display()
@@ -844,7 +905,9 @@ class MachineVisionSettingsWidget(QWidget):
     def _on_cam_space_clear_clicked(self) -> None:
         s = self._mv._copy_settings()
         s.camera_calibration.calibration = None
+        self._applying_settings = True
         self._mv.apply_settings(s)
+        self._applying_settings = False
         self._mv.save_settings()
         info("[MachineVisionSettings] Camera space calibration cleared")
         self._refresh_camera_calibration_display()
@@ -926,6 +989,17 @@ class MachineVisionSettingsWidget(QWidget):
         vbox.addWidget(self._red_mark_panel)
         return group
 
+    def _build_background_group(self) -> QGroupBox:
+        group = QGroupBox("Background Detection")
+        group.setToolTip(
+            "Parameters for classifying frames as black-plastic background.\n"
+            "Detection uses the median and standard deviation of the HSV brightness channel."
+        )
+        vbox = QVBoxLayout(group)
+        vbox.setContentsMargins(6, 6, 6, 6)
+        vbox.addWidget(self._background_panel)
+        return group
+
     def _build_focus_group(self) -> QGroupBox:
         group = QGroupBox("Focus Detection")
         vbox = QVBoxLayout(group)
@@ -977,6 +1051,23 @@ class MachineVisionSettingsWidget(QWidget):
         self._connect_focus_region_signals()
         self._connect_inspect_calibration_signals()
         self._connect_red_mark_signals()
+        self._connect_background_signals()
+
+    def _connect_background_signals(self) -> None:
+        w = self._background_panel.widgets
+        w["val_median_max"].valueChanged.connect(
+            lambda v: self._on_background_changed("val_median_max", v)
+        )
+        w["val_std_max"].valueChanged.connect(
+            lambda v: self._on_background_changed("val_std_max", v)
+        )
+        if "val_std_max_slider" in w:
+            w["val_std_max_slider"].valueChanged.connect(
+                lambda _: self._on_background_changed("val_std_max", w["val_std_max"].value())
+            )
+        w["scale"].valueChanged.connect(
+            lambda v: self._on_background_changed("scale", v)
+        )
 
     def _connect_red_mark_signals(self) -> None:
         w = self._red_mark_panel.widgets
@@ -1091,9 +1182,11 @@ class MachineVisionSettingsWidget(QWidget):
             self._populate_focus_region(f.focus_region)
             self._populate_inspect_calibration(settings.inspect_calibration)
             self._populate_red_mark(settings.red_mark)
+            self._populate_background(settings.background)
         finally:
             self._block_all_signals(False)
 
+        self._refresh_camera_calibration_display()
         self._snapshot_saved_values(settings)
         self._set_unsaved(False)
 
@@ -1164,6 +1257,12 @@ class MachineVisionSettingsWidget(QWidget):
         self._set_float_row(w, "side_cluster_fraction", rm.side_cluster_fraction, 0.0, 1.0)
         self._set_float_row(w, "side_cluster_margin", rm.side_cluster_margin, 0.0, 0.45)
 
+    def _populate_background(self, bg: BackgroundDetectionSettings) -> None:
+        w = self._background_panel.widgets
+        w["val_median_max"].setValue(bg.val_median_max)
+        self._set_float_row(w, "val_std_max", bg.val_std_max, 0.0, 128.0)
+        w["scale"].setValue(bg.scale)
+
     def _set_float_row(
         self,
         w: dict[str, QWidget],
@@ -1228,6 +1327,9 @@ class MachineVisionSettingsWidget(QWidget):
             "red_mark.jump_threshold_px": settings.red_mark.jump_threshold_px,
             "red_mark.side_cluster_fraction": settings.red_mark.side_cluster_fraction,
             "red_mark.side_cluster_margin": settings.red_mark.side_cluster_margin,
+            "background.val_median_max": settings.background.val_median_max,
+            "background.val_std_max": settings.background.val_std_max,
+            "background.scale": settings.background.scale,
         }
 
     def _check_modified(self, key: str, current_value: object) -> bool:
@@ -1316,6 +1418,16 @@ class MachineVisionSettingsWidget(QWidget):
         self._mv.apply_settings(s)
         self._applying_settings = False
         self._mark_field(f"red_mark.{field}", field, self._red_mark_panel.widgets, value)
+        self._set_unsaved(True)
+
+    def _on_background_changed(self, field: str, value: object) -> None:
+        """Apply a changed background field to the manager and update orange state."""
+        s = self._mv._copy_settings()
+        setattr(s.background, field, value)
+        self._applying_settings = True
+        self._mv.apply_settings(s)
+        self._applying_settings = False
+        self._mark_field(f"background.{field}", field, self._background_panel.widgets, value)
         self._set_unsaved(True)
 
     def _on_focus_region_changed(self, field: str, value: object) -> None:
@@ -1487,6 +1599,7 @@ class MachineVisionSettingsWidget(QWidget):
             self._inspect_preview_panel,
             self._inspect_snap_panel,
             self._red_mark_panel,
+            self._background_panel,
         ):
             for w in panel.widgets.values():
                 self._apply_orange(w, False)
@@ -1529,6 +1642,7 @@ class MachineVisionSettingsWidget(QWidget):
             self._inspect_preview_panel,
             self._inspect_snap_panel,
             self._red_mark_panel,
+            self._background_panel,
         ):
             for w in panel.widgets.values():
                 w.blockSignals(block)
