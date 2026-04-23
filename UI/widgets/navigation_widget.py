@@ -412,21 +412,35 @@ class NavigationWidget(QWidget):
             self._overlay_label.setText(message)
 
     def _check_motion_ready(self) -> None:
-        """Poll every 500 ms until the controller is ready or has reached a terminal state."""
+        """Poll every 500 ms and update overlay/position timer to reflect current state."""
         ctx = get_app_context()
         if ctx.motion is None:
             return
         state = ctx.motion.get_state()
-        if state == MotionState.READY:
-            self._ready_timer.stop()
-            self._set_motion_available(True)
-            self._position_timer.start()
-            # Settings are now guaranteed to be loaded — apply them.
-            self.refresh_from_settings()
+        routine_running = ctx.motion.routine_running
+
+        if state == MotionState.READY and not routine_running:
+            if not self._motion_available:
+                # Transition into ready — apply settings once on first entry.
+                self._set_motion_available(True)
+                self.refresh_from_settings()
+            if not self._position_timer.isActive():
+                self._position_timer.start()
         elif state in (MotionState.FAILED, MotionState.FAULTED):
-            self._ready_timer.stop()  # Terminal failure — stay overlaid
+            self._set_motion_available(False)
+            self._position_timer.stop()
             self._set_overlay_message("Motion System Not Connected")
+        elif state == MotionState.HOMING:
+            self._set_motion_available(False)
+            self._position_timer.stop()
+            self._set_overlay_message("Homing Motion System...")
+        elif routine_running:
+            self._set_motion_available(False)
+            self._position_timer.stop()
+            self._set_overlay_message("Automation Running...")
         else:
+            self._set_motion_available(False)
+            self._position_timer.stop()
             self._set_overlay_message("Connecting to Motion System...")
 
     def _set_motion_available(self, available: bool) -> None:

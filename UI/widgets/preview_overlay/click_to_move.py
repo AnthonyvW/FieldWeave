@@ -8,6 +8,7 @@ from common.app_context import get_app_context
 
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from motion.models import Position
+from motion.motion_controller import MotionState
 
 
 class ClickToMoveOverlay(Overlay):
@@ -66,6 +67,15 @@ class ClickToMoveOverlay(Overlay):
 
         if ctx.motion is None or not ctx.motion.is_ready():
             warning("ClickToMoveOverlay: click ignored — motion controller not ready")
+            return
+
+        if ctx.motion.routine_running:
+            warning("ClickToMoveOverlay: click ignored — automation routine is running")
+            return
+
+        state = ctx.motion.get_state()
+        if state in (MotionState.HOMING, MotionState.CONNECTING):
+            warning(f"ClickToMoveOverlay: click ignored — motion state is {state}")
             return
 
         cal = mv.calibration  # CameraCalibration

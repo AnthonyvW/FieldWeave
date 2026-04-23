@@ -8,6 +8,7 @@ class MachineState(str, Enum):
     DISCONNECTED: str = "Disconnected"
     CONNECTED: str = "Connected"
     CONNECTING: str = "Connecting"
+    HOMING: str = "Homing"
 
     def __str__(self) -> str:
         return self.value

@@ -90,7 +90,8 @@ def _probe_port(
 
 class MotionState:
     """Current lifecycle state of the motion controller."""
-    CONNECTING = "connecting"    # Worker thread is still starting up
+    CONNECTING = "connecting"    # Worker thread is still starting up / probing serial
+    HOMING     = "homing"        # Connected to printer, running initial homing sequence
     READY      = "ready"         # Connected, homed, and accepting commands
     FAULTED    = "faulted"       # Runtime fault (bad G-code response, timeout, etc.)
     FAILED     = "failed"        # Could not connect at all during initialisation
@@ -134,6 +135,7 @@ class MotionController:
         self.faulted = False
 
         self._ready = threading.Event()
+        self._homing = False
         self._init_error: Exception | None = None
 
         self._stop_event = threading.Event()
@@ -150,12 +152,12 @@ class MotionController:
 
     def get_state(self) -> str:
         """Return the current :class:`MotionState` of the controller."""
-        if not self._ready.is_set():
-            return MotionState.CONNECTING
         if self._init_error is not None:
             return MotionState.FAILED
         if self.faulted:
             return MotionState.FAULTED
+        if not self._ready.is_set():
+            return MotionState.HOMING if self._homing else MotionState.CONNECTING
         return MotionState.READY
 
     def is_ready(self) -> bool:
@@ -186,7 +188,9 @@ class MotionController:
             self._ready.set()
             return
 
+        self._homing = True
         self._home()
+        self._homing = False
         self._ready.set()
         self._run_loop()
 

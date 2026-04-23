@@ -12,21 +12,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .tabs.navigate_tab import NavigateTab
-from .tabs.project_tab import ProjectTab
-from .tabs.calibration_tab import CalibrationTab
-from .tabs.logs_tab import LogsTab
-
-from common.state import State, MachineState, AutomationState
-from .settings.settings_main import SettingsButton, SettingsDialog
+from UI.tabs.logs_tab import LogsTab
+from UI.tabs.project_tab import ProjectTab
+from UI.tabs.navigate_tab import NavigateTab
+from UI.tabs.calibration_tab import CalibrationTab
+from UI.widgets.camera_preview import CameraPreview
+from UI.settings.settings_main import SettingsButton, SettingsDialog
 
 from common.app_context import get_app_context
+from common.state import State, MachineState, AutomationState
+
 from motion.motion_controller import MotionState
-from UI.widgets.camera_preview import CameraPreview
 
 
 _MOTION_TO_MACHINE_STATE: dict[str, str] = {
     MotionState.CONNECTING: MachineState.CONNECTING,
+    MotionState.HOMING:     MachineState.HOMING,
     MotionState.READY:      MachineState.CONNECTED,
     MotionState.FAULTED:    MachineState.CONNECTED,
     MotionState.FAILED:     MachineState.DISCONNECTED,
