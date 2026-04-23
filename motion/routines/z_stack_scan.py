@@ -5,31 +5,38 @@ Moves the stage between two Z positions, capturing an image at each step.
 Images are saved with X / Y / Z position metadata embedded, and the file
 name is the Z position in nanometres.
 
+If a :class:`FocusStackConfig` is supplied the routine will automatically
+launch a :class:`FocusStackRoutine` via the application's
+:class:`PostProcessingManager` once all images have been captured.  The
+stacked output is written to ``<output_folder>/stacked.<ext>`` where the
+extension comes from ``focus_stack_config.output_extension`` (default
+``jpeg``).
+
 Usage::
 
     from common.app_context import get_app_context
     from motion.automations.z_stack_scan import ZStackScan
+    from post_processing.routines.focus_stack_routine import FocusStackConfig
 
     ctx = get_app_context()
+    cfg = FocusStackConfig()  # defaults match recommended preset
+
     routine = ZStackScan(
         motion=ctx.motion,
         z_start_nm=0,
-        z_end_nm=5_000_000,    # 5 mm
-        step_nm=500_000,        # 0.5 mm steps
+        z_end_nm=5_000_000,
+        step_nm=500_000,
         output_folder="/data/scans/run1",
+        focus_stack_config=cfg,
     )
     routine.start()
-    # …later…
-    routine.pause()
-    routine.resume()
-    routine.stop()
 """
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Generator
+from typing import Generator, TYPE_CHECKING
 
 from common.app_context import get_app_context
 from common.logger import info, warning, error
@@ -37,6 +44,9 @@ from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 
 from motion.routines.automation_routine import AutomationRoutine
+
+if TYPE_CHECKING:
+    from post_processing.routines.focus_stack_routine import FocusStackConfig
 
 _NM_PER_MM = 1_000_000
 
@@ -48,6 +58,11 @@ class ZStackScan(AutomationRoutine):
     The stage travels to whichever of *z_start_nm* / *z_end_nm* is closest
     to the current Z position first, then steps toward the other end,
     capturing one image per step.
+
+    If *focus_stack_config* is provided, a :class:`FocusStackRoutine` is
+    launched via :class:`PostProcessingManager` immediately after the scan
+    completes.  The stacked output is placed at
+    ``<output_folder>/stacked.<focus_stack_config.output_extension>``.
 
     Parameters
     ----------
@@ -64,6 +79,10 @@ class ZStackScan(AutomationRoutine):
         if it does not exist.
     capture_timeout_ms:
         How long (ms) to wait for each image capture to complete.
+    focus_stack_config:
+        When supplied, a focus-stack post-processing job is started
+        automatically after all frames have been captured.  Pass ``None``
+        (the default) to skip post-processing.
     """
 
     job_name = "Z-Stack Scan"
@@ -76,6 +95,7 @@ class ZStackScan(AutomationRoutine):
         step_nm: int,
         output_folder: str | Path,
         capture_timeout_ms: int = 5000,
+        focus_stack_config: FocusStackConfig | None = None,
     ) -> None:
         super().__init__(motion)
 
@@ -86,6 +106,7 @@ class ZStackScan(AutomationRoutine):
         self._step_nm = step_nm
         self._output_folder = Path(output_folder)
         self._capture_timeout_ms = capture_timeout_ms
+        self._focus_stack_config = focus_stack_config
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -234,3 +255,43 @@ class ZStackScan(AutomationRoutine):
                 f"max={max(capture_times):.3f}  "
                 f"avg={sum(capture_times) / len(capture_times):.3f}"
             )
+
+        # ------------------------------------------------------------------
+        # Optional focus stacking
+        # ------------------------------------------------------------------
+        if self._focus_stack_config is not None and n_captured > 0:
+            self._run_focus_stack(ctx)
+
+    def _run_focus_stack(self, ctx) -> None:
+        post_processing = ctx.post_processing
+        if post_processing is None:
+            error("[ZStackScan] No post_processing manager available — skipping focus stack")
+            return
+
+        from post_processing.routines.focus_stack_routine import FocusStackRoutine
+
+        cfg = self._focus_stack_config
+        ext = cfg.output_extension
+        output_path = str(self._output_folder / f"stacked.{ext}")
+
+        if not cfg.depth_map_path:
+            cfg.depth_map_path = str(self._output_folder / f"depth.{ext}")
+
+        info(f"[ZStackScan] Starting focus stack — output: {output_path}")
+
+        focus_routine = FocusStackRoutine(
+            settings=post_processing.settings,
+            input_folder=str(self._output_folder),
+            output_path=output_path,
+            config=cfg,
+        )
+        post_processing.start_routine(focus_routine)
+
+        while focus_routine.is_running:
+            if self._check_stop():
+                post_processing.stop_routine()
+                return
+            self._set_activity(f"Focus stacking — {focus_routine.activity}")
+            time.sleep(0.25)
+
+        focus_routine.wait()

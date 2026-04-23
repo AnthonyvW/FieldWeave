@@ -12,17 +12,21 @@ from PySide6.QtWidgets import (
     QLabel,
     QGroupBox,
     QDoubleSpinBox,
+    QSpinBox,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
     QLineEdit,
     QFileDialog,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 
 from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_scan import ZStackScan
+from post_processing.routines.focus_stack_routine import FocusStackConfig
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +43,7 @@ class _ConfirmAutomationDialog(QDialog):
         step_mm: float,
         step_decimals: int,
         output_folder: str,
+        will_focus_stack: bool,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -72,13 +77,14 @@ class _ConfirmAutomationDialog(QDialog):
         info_layout.setSpacing(6)
 
         rows: list[tuple[str, str]] = [
-            ("Start Z", f"{z_start:{fmt}} mm"),
-            ("End Z", f"{z_end:{fmt}} mm"),
-            ("Range", f"{distance:{fmt}} mm"),
-            ("Step size", f"{step_mm:{fmt}} mm"),
+            ("Start Z",          f"{z_start:{fmt}} mm"),
+            ("End Z",            f"{z_end:{fmt}} mm"),
+            ("Range",            f"{distance:{fmt}} mm"),
+            ("Step size",        f"{step_mm:{fmt}} mm"),
             ("Estimated frames", str(n_frames)),
-            ("Estimated time", time_str),
-            ("Output folder", output_folder),
+            ("Estimated time",   time_str),
+            ("Output folder",    output_folder),
+            ("Focus stack",      "Yes (after capture)" if will_focus_stack else "No"),
         ]
         for label_text, value_text in rows:
             row = QWidget()
@@ -124,7 +130,11 @@ class FocusStackWidget(QWidget):
         super().__init__(parent)
         self._z_start: float | None = None
         self._z_end: float | None = None
+        self._routine: ZStackScan | None = None
+        self._last_output_folder: str | None = None
+        self._last_stacked_path: str | None = None
         self._setup_ui()
+
 
     # ------------------------------------------------------------------
     # UI construction
@@ -135,7 +145,7 @@ class FocusStackWidget(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(12)
 
-        # Z positions group
+        # ---- Z positions group -------------------------------------------
         z_group = QGroupBox("Z Positions")
         z_layout = QVBoxLayout(z_group)
         z_layout.setContentsMargins(10, 8, 10, 8)
@@ -179,7 +189,7 @@ class FocusStackWidget(QWidget):
 
         main_layout.addWidget(z_group)
 
-        # Step size group
+        # ---- Step size group ---------------------------------------------
         step_group = QGroupBox("Step Size")
         step_layout = QHBoxLayout(step_group)
         step_layout.setContentsMargins(10, 8, 10, 8)
@@ -210,7 +220,135 @@ class FocusStackWidget(QWidget):
 
         main_layout.addWidget(step_group)
 
-        # Output folder group
+        # ---- Focus stack settings group ----------------------------------
+        fs_group = QGroupBox("Focus Stack Settings")
+        fs_layout = QVBoxLayout(fs_group)
+        fs_layout.setContentsMargins(10, 8, 10, 8)
+        fs_layout.setSpacing(6)
+
+        self._fs_enable_check = QCheckBox("Run focus stack after capture")
+        self._fs_enable_check.setChecked(True)
+        self._fs_enable_check.stateChanged.connect(self._on_fs_enabled_changed)
+        fs_layout.addWidget(self._fs_enable_check)
+
+        self._fs_settings_widget = QWidget()
+        fs_settings_layout = QVBoxLayout(self._fs_settings_widget)
+        fs_settings_layout.setContentsMargins(0, 4, 0, 0)
+        fs_settings_layout.setSpacing(6)
+
+        # Depth radius
+        depth_row = QWidget()
+        depth_layout = QHBoxLayout(depth_row)
+        depth_layout.setContentsMargins(0, 0, 0, 0)
+        depth_layout.setSpacing(8)
+        depth_layout.addWidget(QLabel("Depth radius:"))
+
+        self._depth_radius_spin = QSpinBox()
+        self._depth_radius_spin.setFixedHeight(28)
+        self._depth_radius_spin.setMinimum(0)
+        self._depth_radius_spin.setMaximum(20)
+        self._depth_radius_spin.setValue(1)
+        self._depth_radius_spin.setToolTip(
+            "Restrict pixel selection to a window of [peak-R, peak+R] frames "
+            "around each pixel's best-focus frame. 0 = disabled."
+        )
+        depth_layout.addWidget(self._depth_radius_spin)
+        depth_layout.addStretch(1)
+        fs_settings_layout.addWidget(depth_row)
+
+        # Smooth source
+        smooth_row = QWidget()
+        smooth_layout = QHBoxLayout(smooth_row)
+        smooth_layout.setContentsMargins(0, 0, 0, 0)
+        smooth_layout.setSpacing(8)
+        smooth_layout.addWidget(QLabel("Smooth source radius:"))
+
+        self._smooth_source_spin = QSpinBox()
+        self._smooth_source_spin.setFixedHeight(28)
+        self._smooth_source_spin.setMinimum(0)
+        self._smooth_source_spin.setMaximum(99)
+        self._smooth_source_spin.setValue(15)
+        self._smooth_source_spin.setToolTip(
+            "Apply two passes of median filtering to the source-frame map after "
+            "selection. Removes isolated outlier frame assignments. 0 = disabled."
+        )
+        smooth_layout.addWidget(self._smooth_source_spin)
+        smooth_layout.addStretch(1)
+        fs_settings_layout.addWidget(smooth_row)
+
+        # Sigma
+        sigma_row = QWidget()
+        sigma_layout = QHBoxLayout(sigma_row)
+        sigma_layout.setContentsMargins(0, 0, 0, 0)
+        sigma_layout.setSpacing(8)
+        sigma_layout.addWidget(QLabel("Focus map sigma:"))
+
+        self._sigma_spin = QDoubleSpinBox()
+        self._sigma_spin.setFixedHeight(28)
+        self._sigma_spin.setDecimals(1)
+        self._sigma_spin.setMinimum(0.5)
+        self._sigma_spin.setMaximum(20.0)
+        self._sigma_spin.setSingleStep(0.5)
+        self._sigma_spin.setValue(5.0)
+        self._sigma_spin.setToolTip(
+            "Gaussian smoothing radius for focus maps. Larger values produce "
+            "smoother region boundaries."
+        )
+        sigma_layout.addWidget(self._sigma_spin)
+        sigma_layout.addStretch(1)
+        fs_settings_layout.addWidget(sigma_row)
+
+        # Warp model
+        warp_row = QWidget()
+        warp_layout = QHBoxLayout(warp_row)
+        warp_layout.setContentsMargins(0, 0, 0, 0)
+        warp_layout.setSpacing(8)
+        warp_layout.addWidget(QLabel("Alignment:"))
+
+        self._no_align_check = QCheckBox("Skip alignment")
+        self._no_align_check.setChecked(True)
+        self._no_align_check.setToolTip(
+            "Skip ECC alignment. Enable when images are already registered."
+        )
+        self._no_align_check.stateChanged.connect(self._on_no_align_changed)
+        warp_layout.addWidget(self._no_align_check)
+        warp_layout.addStretch(1)
+        fs_settings_layout.addWidget(warp_row)
+
+        # Score power
+        power_row = QWidget()
+        power_layout = QHBoxLayout(power_row)
+        power_layout.setContentsMargins(0, 0, 0, 0)
+        power_layout.setSpacing(8)
+        power_layout.addWidget(QLabel("Score power:"))
+
+        self._score_power_spin = QDoubleSpinBox()
+        self._score_power_spin.setFixedHeight(28)
+        self._score_power_spin.setDecimals(1)
+        self._score_power_spin.setMinimum(1.0)
+        self._score_power_spin.setMaximum(5.0)
+        self._score_power_spin.setSingleStep(0.5)
+        self._score_power_spin.setValue(2.0)
+        self._score_power_spin.setToolTip(
+            "Exponent applied to the raw Tenengrad score before smoothing. "
+            "Increase to 3-4 if halo contamination persists."
+        )
+        power_layout.addWidget(self._score_power_spin)
+        power_layout.addStretch(1)
+        fs_settings_layout.addWidget(power_row)
+
+        # Save depth map
+        self._save_depth_map_check = QCheckBox("Save depth map")
+        self._save_depth_map_check.setChecked(True)
+        self._save_depth_map_check.setToolTip(
+            "Save a greyscale source-frame depth map alongside the stacked output."
+        )
+        fs_settings_layout.addWidget(self._save_depth_map_check)
+
+        fs_layout.addWidget(self._fs_settings_widget)
+        main_layout.addWidget(fs_group)
+
+        # ---- Output folder group -----------------------------------------
         output_group = QGroupBox("Output Folder")
         output_layout = QHBoxLayout(output_group)
         output_layout.setContentsMargins(10, 8, 10, 8)
@@ -228,14 +366,14 @@ class FocusStackWidget(QWidget):
 
         main_layout.addWidget(output_group)
 
-        # Summary label
+        # ---- Summary label -----------------------------------------------
         self._summary_label = QLabel("")
         self._summary_label.setObjectName("AreaScanSummary")
         self._summary_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._summary_label.setWordWrap(True)
         main_layout.addWidget(self._summary_label)
 
-        # Start automation button
+        # ---- Start button ------------------------------------------------
         self._start_btn = QPushButton("Start Automation")
         self._start_btn.setObjectName("AreaScanStart")
         self._start_btn.setFixedHeight(34)
@@ -243,7 +381,58 @@ class FocusStackWidget(QWidget):
         self._start_btn.clicked.connect(self._on_start_clicked)
         main_layout.addWidget(self._start_btn)
 
-        # Timer for polling routine state on the UI thread
+        # ---- Pause / Resume / Stop row (hidden until running) ------------
+        self._controls_widget = QWidget()
+        controls_layout = QHBoxLayout(self._controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+
+        self._pause_resume_btn = QPushButton("Pause")
+        self._pause_resume_btn.setFixedHeight(32)
+        self._pause_resume_btn.setObjectName("AreaScanSecondaryButton")
+        self._pause_resume_btn.clicked.connect(self._on_pause_resume_clicked)
+        controls_layout.addWidget(self._pause_resume_btn)
+
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setFixedHeight(32)
+        self._stop_btn.setObjectName("AreaScanStop")
+        self._stop_btn.clicked.connect(self._on_stop_clicked)
+        controls_layout.addWidget(self._stop_btn)
+
+        self._controls_widget.setVisible(False)
+        main_layout.addWidget(self._controls_widget)
+
+        # ---- Status label ------------------------------------------------
+        self._status_label = QLabel("")
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._status_label.setObjectName("AreaScanSummary")
+        main_layout.addWidget(self._status_label)
+
+        # ---- Post-run results row (hidden until a run completes) ---------
+        self._results_widget = QWidget()
+        results_layout = QHBoxLayout(self._results_widget)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(8)
+
+        self._open_folder_btn = QPushButton("Open Folder")
+        self._open_folder_btn.setFixedHeight(30)
+        self._open_folder_btn.setObjectName("AreaScanSecondaryButton")
+        self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
+        results_layout.addWidget(self._open_folder_btn)
+
+        self._view_image_btn = QPushButton("View Stacked Image")
+        self._view_image_btn.setFixedHeight(30)
+        self._view_image_btn.setObjectName("AreaScanSecondaryButton")
+        self._view_image_btn.clicked.connect(self._on_view_image_clicked)
+        results_layout.addWidget(self._view_image_btn)
+
+        results_layout.addStretch(1)
+        self._results_widget.setVisible(False)
+        main_layout.addWidget(self._results_widget)
+
+        main_layout.addStretch(1)
+
+        # ---- Poll timer --------------------------------------------------
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(250)
         self._poll_timer.timeout.connect(self._poll_routine_state)
@@ -267,7 +456,6 @@ class FocusStackWidget(QWidget):
         if step_mm <= 0:
             return 2
         decimals = max(2, -int(math.floor(math.log10(step_mm))))
-        # Trim any unnecessary extra places
         rounded = round(step_mm, decimals)
         while decimals > 2 and round(step_mm, decimals - 1) == rounded:
             decimals -= 1
@@ -283,7 +471,7 @@ class FocusStackWidget(QWidget):
                 return step_nm / 1_000_000.0
         except Exception:
             pass
-        return 0.04  # fallback: 40 000 nm = 0.04 mm
+        return 0.04
 
     def _get_current_z_mm(self) -> float | None:
         """Return current Z position in mm, or None if unavailable."""
@@ -308,6 +496,23 @@ class FocusStackWidget(QWidget):
         if p.is_absolute():
             return text
         return str(Path("output") / p)
+
+    def _build_focus_stack_config(self) -> FocusStackConfig | None:
+        """Build a FocusStackConfig from the current widget state, or None if disabled."""
+        if not self._fs_enable_check.isChecked():
+            return None
+
+        cfg = FocusStackConfig()
+        cfg.depth_radius = self._depth_radius_spin.value() or None
+        cfg.smooth_source = self._smooth_source_spin.value() or None
+        cfg.sigma = self._sigma_spin.value()
+        cfg.score_power = self._score_power_spin.value()
+        cfg.no_align = self._no_align_check.isChecked()
+        # depth_map_path is left as None here; ZStackScan fills it in relative
+        # to the output folder when focus_stack_config.depth_map_path is None.
+        if not self._save_depth_map_check.isChecked():
+            cfg.depth_map_path = ""  # empty string signals "don't save"
+        return cfg
 
     def _update_summary(self) -> None:
         """Refresh the summary label and enable/disable the start button."""
@@ -340,6 +545,12 @@ class FocusStackWidget(QWidget):
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    def _on_fs_enabled_changed(self) -> None:
+        self._fs_settings_widget.setEnabled(self._fs_enable_check.isChecked())
+
+    def _on_no_align_changed(self) -> None:
+        pass  # Reserved for warp model selector if added later
 
     def _browse_output_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -374,6 +585,7 @@ class FocusStackWidget(QWidget):
 
         output_folder = self._resolve_output_folder()
         step_mm = self._step_spin.value()
+        focus_stack_config = self._build_focus_stack_config()
 
         dlg = _ConfirmAutomationDialog(
             z_start=self._z_start,
@@ -381,6 +593,7 @@ class FocusStackWidget(QWidget):
             step_mm=step_mm,
             step_decimals=self._step_spin.decimals(),
             output_folder=output_folder,
+            will_focus_stack=focus_stack_config is not None,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -394,40 +607,97 @@ class FocusStackWidget(QWidget):
 
         _NM_PER_MM = 1_000_000
         try:
-            routine = ZStackScan(
+            self._routine = ZStackScan(
                 motion=motion,
                 z_start_nm=round(self._z_start * _NM_PER_MM),
                 z_end_nm=round(self._z_end * _NM_PER_MM),
                 step_nm=round(step_mm * _NM_PER_MM),
                 output_folder=output_folder,
+                focus_stack_config=focus_stack_config,
             )
-            motion.start_routine(routine)
+            motion.start_routine(self._routine)
         except Exception as exc:
             error(f"FocusStackWidget: failed to start routine — {exc}")
             return
 
+        self._last_output_folder = output_folder
+        if focus_stack_config is not None:
+            ext = focus_stack_config.output_extension
+            self._last_stacked_path = str(Path(output_folder) / f"stacked.{ext}")
+        else:
+            self._last_stacked_path = None
+        self._results_widget.setVisible(False)
         self._enter_running_state()
+
+    def _on_open_folder_clicked(self) -> None:
+        if self._last_output_folder is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_output_folder))
+
+    def _on_view_image_clicked(self) -> None:
+        if self._last_stacked_path is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_stacked_path))
+
+    def _on_pause_resume_clicked(self) -> None:
+        if self._routine is None:
+            return
+        if self._routine.is_paused:
+            self._routine.resume()
+            self._pause_resume_btn.setText("Pause")
+            self._status_label.setText("Running...")
+        else:
+            self._routine.pause()
+            self._pause_resume_btn.setText("Resume")
+            self._status_label.setText("Paused.")
+
+    def _on_stop_clicked(self) -> None:
+        if self._routine is not None:
+            self._routine.stop()
+        self._status_label.setText("Stopping...")
 
     # ------------------------------------------------------------------
     # Routine state helpers
     # ------------------------------------------------------------------
 
     def _enter_running_state(self) -> None:
-        """Disable the start button while a routine is active."""
         self._start_btn.setEnabled(False)
+        self._set_start_btn.setEnabled(False)
+        self._set_end_btn.setEnabled(False)
+        self._output_edit.setEnabled(False)
+        self._fs_enable_check.setEnabled(False)
+        self._fs_settings_widget.setEnabled(False)
+        self._pause_resume_btn.setText("Pause")
+        self._controls_widget.setVisible(True)
+        self._status_label.setText("Running...")
         self._poll_timer.start()
 
     def _exit_running_state(self) -> None:
-        """Re-enable the start button when the routine finishes."""
         self._poll_timer.stop()
+        self._start_btn.setEnabled(True)
+        self._set_start_btn.setEnabled(True)
+        self._set_end_btn.setEnabled(True)
+        self._output_edit.setEnabled(True)
+        self._fs_enable_check.setEnabled(True)
+        self._fs_settings_widget.setEnabled(self._fs_enable_check.isChecked())
+        self._controls_widget.setVisible(False)
+        self._status_label.setText("Finished.")
+        self._routine = None
         self._update_summary()
 
+        if self._last_output_folder is not None:
+            self._view_image_btn.setVisible(
+                self._last_stacked_path is not None
+                and Path(self._last_stacked_path).exists()
+            )
+            self._results_widget.setVisible(True)
+
     def _poll_routine_state(self) -> None:
-        """Called every 250 ms to detect when the routine has finished."""
-        ctx = get_app_context()
-        motion = ctx.motion
-        if motion is None or not motion.routine_running:
+        if self._routine is None or not self._routine.is_running:
             self._exit_running_state()
+            return
+        self._pause_resume_btn.setText(
+            "Resume" if self._routine.is_paused else "Pause"
+        )
+        self._status_label.setText(self._routine.activity)
 
     # ------------------------------------------------------------------
     # Public accessors (for the parent automation widget)
