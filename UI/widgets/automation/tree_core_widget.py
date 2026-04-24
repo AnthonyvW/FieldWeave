@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QMimeData, QTimer
 from PySide6.QtGui import QKeySequence
@@ -49,6 +50,7 @@ class _ConfirmDialog(QDialog):
         self,
         output_path: str,
         slot_count: int,
+        image_calibration_scale: bool,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -73,10 +75,12 @@ class _ConfirmDialog(QDialog):
         form.setSpacing(6)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
-        for label_text, value_text in [
+        rows: list[tuple[str, str]] = [
             ("Slots to image", str(slot_count)),
+            ("Image calibration scale", "Yes" if image_calibration_scale else "No"),
             ("Output path", output_path),
-        ]:
+        ]
+        for label_text, value_text in rows:
             lbl = QLabel(label_text + ":")
             lbl.setObjectName("CalScaleRowLabel")
             val = QLabel(value_text)
@@ -249,6 +253,11 @@ class _SampleRowWidget(QWidget):
         """Programmatically set the sample name (used for multi-line paste)."""
         self._name_edit.setText(text)
 
+    def set_interactive(self, enabled: bool) -> None:
+        """Enable or disable all interactive elements in this row."""
+        self._toggle.setEnabled(enabled)
+        self._name_edit.setEnabled(enabled)
+
     @property
     def sample_number(self) -> int:
         return self._sample_number
@@ -289,6 +298,8 @@ class TreeCoreWidget(QWidget):
 
         self._output_folder = OutputFolderWidget()
         main_layout.addWidget(self._output_folder)
+
+        main_layout.addWidget(self._build_calibration_scale_group())
 
         main_layout.addWidget(self._build_sample_list_group(), 1)
 
@@ -352,6 +363,53 @@ class TreeCoreWidget(QWidget):
         self._start_btn.setFixedHeight(30)
         self._start_btn.clicked.connect(self._on_start_clicked)
         layout.addWidget(self._start_btn)
+
+        return group
+
+    def _build_calibration_scale_group(self) -> QGroupBox:
+        group = QGroupBox("Calibration Scale")
+
+        outer_layout = QVBoxLayout(group)
+        outer_layout.setContentsMargins(10, 8, 10, 8)
+        outer_layout.setSpacing(6)
+
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(8)
+
+        self._cal_scale_toggle = QCheckBox("Image calibration scale during run")
+        self._cal_scale_toggle.setChecked(False)
+        self._cal_scale_toggle.toggled.connect(self._on_cal_scale_toggled)
+        toggle_row.addWidget(self._cal_scale_toggle)
+        toggle_row.addStretch(1)
+
+        outer_layout.addLayout(toggle_row)
+
+        self._cal_scale_details = QWidget()
+        details_layout = QVBoxLayout(self._cal_scale_details)
+        details_layout.setContentsMargins(0, 4, 0, 0)
+        details_layout.setSpacing(4)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setObjectName("SampleDivider")
+        details_layout.addWidget(divider)
+
+        self._cal_dpi_label = QLabel("DPI: —")
+        self._cal_dpi_label.setObjectName("CalScalePosLabel")
+        details_layout.addWidget(self._cal_dpi_label)
+
+        self._cal_last_label = QLabel("Last calibrated: —")
+        self._cal_last_label.setObjectName("CalScalePosLabel")
+        details_layout.addWidget(self._cal_last_label)
+
+        self._cal_goto_btn = QPushButton("Go to Scale Bar Position")
+        self._cal_goto_btn.setFixedHeight(28)
+        self._cal_goto_btn.setObjectName("CalSecondaryButton")
+        self._cal_goto_btn.clicked.connect(self._on_goto_scale_position_clicked)
+        details_layout.addWidget(self._cal_goto_btn, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self._cal_scale_details.setVisible(False)
+        outer_layout.addWidget(self._cal_scale_details)
 
         return group
 
@@ -440,8 +498,65 @@ class TreeCoreWidget(QWidget):
             self._rebuild_sample_rows(num_slots)
 
     # ------------------------------------------------------------------
+    # Calibration scale helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_calibration_scale_info(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.machine_vision is None:
+            self._cal_dpi_label.setText("DPI: —")
+            self._cal_last_label.setText("Last calibrated: —")
+            self._cal_goto_btn.setEnabled(False)
+            return
+
+        s = ctx.machine_vision.settings
+        if s.dpi is not None:
+            self._cal_dpi_label.setText(f"DPI: {s.dpi:.1f}")
+        else:
+            self._cal_dpi_label.setText("DPI: —")
+
+        last_cal = s.inspect_calibration.last_calibrated
+        if last_cal:
+            try:
+                dt = datetime.fromisoformat(last_cal)
+                self._cal_last_label.setText(
+                    f"Last calibrated: {dt.strftime('%Y-%m-%d %H:%M')}"
+                )
+            except ValueError:
+                self._cal_last_label.setText(f"Last calibrated: {last_cal}")
+        else:
+            self._cal_last_label.setText("Last calibrated: —")
+
+        icp = s.inspection_calibration_position
+        self._cal_goto_btn.setEnabled(getattr(icp, "is_set", False))
+
+    # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    def _on_cal_scale_toggled(self, checked: bool) -> None:
+        self._cal_scale_details.setVisible(checked)
+        if checked:
+            self._refresh_calibration_scale_info()
+
+    def _on_goto_scale_position_clicked(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.motion is None or not ctx.motion.is_ready():
+            warning("TreeCoreWidget: motion controller not ready for scale bar move")
+            return
+        if ctx.machine_vision is None:
+            return
+        icp = ctx.machine_vision.settings.inspection_calibration_position
+        if not getattr(icp, "is_set", False):
+            warning("TreeCoreWidget: no scale bar position saved")
+            return
+        try:
+            ctx.motion.move_to_position(
+                Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm),
+                wait=False,
+            )
+        except Exception as exc:
+            error(f"TreeCoreWidget: failed to go to scale bar position — {exc}")
 
     def _on_go_to_slot_clicked(self) -> None:
         slot_number = self._slot_spin.value()
@@ -506,10 +621,12 @@ class TreeCoreWidget(QWidget):
             return
 
         slots = [(r.sample_number - 1, r.name or f"slot_{r.sample_number:02d}") for r in active_samples]
+        image_calibration_scale = self._cal_scale_toggle.isChecked()
 
         dlg = _ConfirmDialog(
             output_path=output_path,
             slot_count=len(slots),
+            image_calibration_scale=image_calibration_scale,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -520,6 +637,7 @@ class TreeCoreWidget(QWidget):
                 motion=ctx.motion,
                 output_folder=output_path,
                 slots=slots,
+                image_calibration_scale=image_calibration_scale,
             )
             ctx.motion.start_routine(self._routine)
         except Exception as exc:
@@ -561,18 +679,27 @@ class TreeCoreWidget(QWidget):
     def _enter_running_state(self) -> None:
         self._start_btn.setEnabled(False)
         self._output_folder.setEnabled(False)
+        self._cal_scale_toggle.setEnabled(False)
+        self._cal_goto_btn.setEnabled(False)
         self._pause_resume_btn.setText("Pause")
         self._controls_widget.setVisible(True)
         self._status_label.setText("Running...")
         self._poll_timer.start()
+        for row in self._sample_rows:
+            row.set_interactive(False)
 
     def _exit_running_state(self) -> None:
         self._poll_timer.stop()
         self._start_btn.setEnabled(True)
         self._output_folder.setEnabled(True)
+        self._cal_scale_toggle.setEnabled(True)
         self._controls_widget.setVisible(False)
         self._status_label.setText("Finished.")
         self._routine = None
+        for row in self._sample_rows:
+            row.set_interactive(True)
+        if self._cal_scale_toggle.isChecked():
+            self._refresh_calibration_scale_info()
 
     def _poll_routine_state(self) -> None:
         if self._routine is None or not self._routine.is_running:

@@ -28,6 +28,12 @@ Procedure (per slot)
     detected the sweep stops without running autofocus or capturing.
     Otherwise fine autofocus runs and the image is captured.
 
+If ``image_calibration_scale`` is True, the calibration scale bar is imaged
+after all slots are complete.  The routine moves to the saved scale bar
+start position (from ``machine_vision.settings.inspection_calibration_position``)
+and runs :class:`~motion.routines.inspection_calibration_scale_routine.InspectionCalibrationScaleRoutine`,
+saving its output into ``<output_folder>/calibration_slide/``.
+
 The step size is derived from the live sensor dimensions (one frame captured
 per slot after arriving at the start position) combined with the camera
 calibration, so that consecutive frames share ``image_overlap`` fractional
@@ -68,6 +74,7 @@ from motion.routines.red_mark_centering_routine import RedMarkCenteringRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
 from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
+from motion.routines.inspection_calibration_scale_routine import InspectionCalibrationScaleRoutine
 from machine_vision.algorithms.background_detection import is_background_frame
 
 _NM_PER_MM = 1_000_000
@@ -117,6 +124,10 @@ class TreeCoreImagingRoutine(AutomationRoutine):
     image_overlap:
         Fractional overlap between consecutive frames in the sweep direction,
         in the range [0, 1).  Defaults to 0.4 (40 % overlap).
+    image_calibration_scale:
+        When True the calibration scale bar is imaged after all slots are
+        processed.  Output is saved to ``<output_folder>/calibration_slide/``.
+        Requires a saved scale bar position in the machine vision settings.
     """
 
     job_name = "Tree Core Imaging"
@@ -129,12 +140,14 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         slots: list[tuple[int, str]],
         capture_timeout_s: float = 10.0,
         image_overlap: float = 0.4,
+        image_calibration_scale: bool = False,
     ) -> None:
         super().__init__(motion)
         self._output_folder = Path(output_folder)
         self._slots = list(slots)
         self._capture_timeout_s = capture_timeout_s
         self._image_overlap = image_overlap
+        self._image_calibration_scale = image_calibration_scale
 
     def steps(self) -> Generator[None, None, None]:
         ctx = get_app_context()
@@ -208,6 +221,57 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             axis_max_nm = motion_settings.max_y * _NM_PER_MM
         else:
             axis_max_nm = motion_settings.max_x * _NM_PER_MM
+
+        # ------------------------------------------------------------------
+        # Optional calibration scale imaging — run first so it is captured
+        # even if the slot run is interrupted partway through.
+        # ------------------------------------------------------------------
+
+        if self._image_calibration_scale:
+            self._set_status("Imaging calibration scale", 0, 100)
+            info("[TreeCoreImaging] Starting calibration scale imaging")
+
+            icp = ctx.machine_vision.settings.inspection_calibration_position
+            start_position: Position | None = None
+            if getattr(icp, "is_set", False):
+                start_position = Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm)
+                info(
+                    f"[TreeCoreImaging] Moving to scale bar position"
+                    f" X={icp.x_nm / _NM_PER_MM:.3f} mm"
+                    f" Y={icp.y_nm / _NM_PER_MM:.3f} mm"
+                    f" Z={icp.z_nm / _NM_PER_MM:.3f} mm"
+                )
+            else:
+                warning("[TreeCoreImaging] No saved scale bar position — starting calibration scale routine from current position")
+
+            cal_slide_folder = self._output_folder / "calibration_slide"
+            cal_slide_folder.mkdir(parents=True, exist_ok=True)
+
+            cal_routine = InspectionCalibrationScaleRoutine(
+                motion=self.motion,
+                output_path=str(cal_slide_folder),
+                start_position=start_position,
+                capture_timeout_s=self._capture_timeout_s,
+            )
+            cal_routine.start()
+
+            while cal_routine.is_running:
+                if self._check_stop():
+                    cal_routine.stop()
+                    return
+                self._set_status(
+                    f"Calibration scale — {cal_routine.activity}",
+                    0,
+                    100,
+                )
+                time.sleep(0.25)
+
+            cal_routine.wait()
+            info("[TreeCoreImaging] Calibration scale imaging complete")
+
+            yield
+            if self._check_stop():
+                return
 
         for slot_iter, (slot_index, slot_name) in enumerate(self._slots):
             if self._check_stop():
