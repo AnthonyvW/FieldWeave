@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from common.app_context import get_app_context
 
 class MachineVisionButton(QPushButton):
     """
@@ -26,14 +27,18 @@ class MachineVisionButton(QPushButton):
 
     Signals
     -------
-    vision_mode_changed(focus, red_mark, scale)
+    vision_mode_changed(focus, focus_region, red_mark, scale, background)
         Emitted whenever the active mode changes. Exactly one value will be
         True, or all will be False when no mode is selected.
 
-        Order: focus, red_mark, scale, background.
+        ``focus`` — full-frame focus detection heatmap.
+        ``focus_region`` — focus detection heatmap restricted to the
+            configured focus region (enables ``FocusRegionSettings.enabled``).
+
+        Order: focus, focus_region, red_mark, scale, background.
     """
 
-    vision_mode_changed = Signal(bool, bool, bool, bool)
+    vision_mode_changed = Signal(bool, bool, bool, bool, bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -74,7 +79,7 @@ class MachineVisionButton(QPushButton):
     def _build_menu(self, parent: QWidget | None) -> QFrame:
         menu = QFrame(parent)
         menu.setObjectName("MachineVisionMenu")
-        menu.setFixedWidth(160)
+        menu.setFixedWidth(180)
         menu.setAutoFillBackground(True)
         menu.setFrameShape(QFrame.Shape.StyledPanel)
         menu.setFrameShadow(QFrame.Shadow.Raised)
@@ -87,27 +92,41 @@ class MachineVisionButton(QPushButton):
         self._cb_none = QCheckBox("None", menu)
         self._cb_none.setObjectName("VisionCheckNone")
         self._cb_none.setChecked(True)
+        self._cb_none.setToolTip("Disable machine vision overlays.")
 
         self._cb_focus = QCheckBox("Focus Detection", menu)
         self._cb_focus.setObjectName("VisionCheckFocus")
         self._cb_focus.setChecked(False)
+        self._cb_focus.setToolTip("Overlay a heatmap showing focus sharpness across the full frame.")
+
+        self._cb_focus_region = QCheckBox("Focus Detection (Region)", menu)
+        self._cb_focus_region.setObjectName("VisionCheckFocusRegion")
+        self._cb_focus_region.setChecked(False)
+        self._cb_focus_region.setToolTip(
+            "Overlay a focus heatmap restricted to the configured focus region.\n"
+            "Enable and configure the region in the machine vision settings."
+        )
 
         self._cb_red_mark = QCheckBox("Red Mark Detection", menu)
         self._cb_red_mark.setObjectName("VisionCheckRedMark")
         self._cb_red_mark.setChecked(False)
+        self._cb_red_mark.setToolTip("Detect the red center marks on sample slots.")
 
         self._cb_scale = QCheckBox("Scale Detection", menu)
         self._cb_scale.setObjectName("VisionCheckScale")
         self._cb_scale.setChecked(False)
+        self._cb_scale.setToolTip("Detect tick marks on a calibration slide to measure scale.")
 
         self._cb_background = QCheckBox("Background Detection", menu)
         self._cb_background.setObjectName("VisionCheckBackground")
         self._cb_background.setChecked(False)
+        self._cb_background.setToolTip("Detect whether the current frame shows a plain background.")
 
         self._button_group = QButtonGroup(menu)
         self._button_group.setExclusive(True)
         self._button_group.addButton(self._cb_none)
         self._button_group.addButton(self._cb_focus)
+        self._button_group.addButton(self._cb_focus_region)
         self._button_group.addButton(self._cb_red_mark)
         self._button_group.addButton(self._cb_scale)
         self._button_group.addButton(self._cb_background)
@@ -116,6 +135,7 @@ class MachineVisionButton(QPushButton):
 
         layout.addWidget(self._cb_none)
         layout.addWidget(self._cb_focus)
+        layout.addWidget(self._cb_focus_region)
         layout.addWidget(self._cb_red_mark)
         layout.addWidget(self._cb_scale)
         layout.addWidget(self._cb_background)
@@ -135,18 +155,26 @@ class MachineVisionButton(QPushButton):
     def _on_clicked(self, checked: bool) -> None:
         if checked:
             self.place_menu()
+            self._update_focus_region_availability()
             self.menu.show()
             self.menu.raise_()
         else:
             self.menu.hide()
             self._update_highlight()
 
+    def _update_focus_region_availability(self) -> None:
+        fr_enabled = get_app_context().machine_vision.settings.focus.focus_region.enabled
+        self._cb_focus_region.setEnabled(fr_enabled)
+        if not fr_enabled and self._cb_focus_region.isChecked():
+            self._cb_none.setChecked(True)
+
     @Slot()
     def _on_mode_changed(self) -> None:
         focus = self._cb_focus.isChecked()
+        focus_region = self._cb_focus_region.isChecked()
         red_mark = self._cb_red_mark.isChecked()
         scale = self._cb_scale.isChecked()
         background = self._cb_background.isChecked()
         if not self.menu.isVisible():
             self._update_highlight()
-        self.vision_mode_changed.emit(focus, red_mark, scale, background)
+        self.vision_mode_changed.emit(focus, focus_region, red_mark, scale, background)

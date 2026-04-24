@@ -287,6 +287,20 @@ def apply_style(app: QApplication) -> None:
             font-weight: normal;
         }}
 
+        /* Machine vision flyout menu checkboxes */
+        QFrame#MachineVisionMenu QCheckBox {{
+            font-size: 13px;
+            color: #2c2c2c;
+            spacing: 6px;
+        }}
+        QFrame#MachineVisionMenu QCheckBox:disabled {{
+            color: #a0a3a6;
+        }}
+        QFrame#MachineVisionMenu QCheckBox::indicator:disabled {{
+            border: 1px solid #c8cacc;
+            background-color: #e8eaec;
+        }}
+
         /* Automation mode combo box */
         QComboBox {{
             background-color: #ffffff;

@@ -445,15 +445,17 @@ class CameraPreview(QFrame):
         self._channel_overlay.show_blue = show_blue
         self._channel_overlay.show_grayscale = show_grayscale
 
-    @Slot(bool, bool, bool, bool)
+    @Slot(bool, bool, bool, bool, bool)
     def _on_vision_mode_changed(
         self,
         focus: bool,
+        focus_region: bool,
         red_mark: bool,
         scale: bool,
         background: bool,
     ) -> None:
-        self._focus_overlay.set_enabled(focus)
+        self._focus_overlay.set_region_mode(focus_region)
+        self._focus_overlay.set_enabled(focus or focus_region)
         self._red_mark_overlay.set_enabled(red_mark)
         self._inspect_calibration_overlay.set_enabled(scale)
         self._background_overlay.set_enabled(background)
