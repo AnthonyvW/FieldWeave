@@ -15,6 +15,7 @@ import torch
 import segmentation_models_pytorch as smp
 from pycocotools import mask as coco_mask_utils
 from tqdm import tqdm
+from safetensors.torch import load_file
 
 # -----------------------------
 # Config
@@ -71,7 +72,7 @@ model = smp.Unet(
     in_channels=3,
     classes=num_classes,
 )
-model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+model.load_state_dict(load_file(MODEL_PATH, device=device))
 model.to(device)
 model.eval()
 
