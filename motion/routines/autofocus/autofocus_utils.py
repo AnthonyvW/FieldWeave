@@ -8,6 +8,7 @@ own logic without duplicating the move-and-wait and scoring patterns.
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
 
@@ -16,6 +17,11 @@ from motion.models import Position
 from common.logger import error
 
 _NM_PER_MM = 1_000_000
+
+
+def quantize(z_nm: int, step_nm: int) -> int:
+    """Snap *z_nm* down to the nearest multiple of *step_nm*."""
+    return (z_nm // step_nm) * step_nm
 
 
 def move_z_and_wait(
@@ -66,9 +72,7 @@ def capture_still_frame(
             )
         done.set()
 
-    success = camera_manager.capture_still(
-        on_complete=_on_complete
-    )
+    success = camera_manager.capture_still(on_complete=_on_complete)
     if not success:
         error("capture_still_frame: capture_still() returned False — camera not ready")
         return None
@@ -78,3 +82,71 @@ def capture_still_frame(
         return None
 
     return result[0]
+
+
+def score_still_frame(
+    camera_manager,
+    mv,
+    settle_s: float = 0.4,
+    log_prefix: str = "",
+) -> float:
+    """
+    Capture a still frame and return its peak focus score.
+
+    Parameters
+    ----------
+    camera_manager:
+        The :class:`CameraManager` instance from the app context.
+    mv:
+        The machine-vision manager from the app context.
+    settle_s:
+        Seconds to wait before capturing.
+    log_prefix:
+        Prepended to error messages, e.g. ``"[Autofocus]"``.
+    """
+    if settle_s > 0:
+        time.sleep(settle_s)
+    frame = capture_still_frame(camera_manager)
+    if frame is None:
+        error(f"{log_prefix} score_still_frame: no frame from capture_still_frame")
+        return float("-inf")
+    try:
+        future = mv.request_focus_analysis_guaranteed(frame)
+        return float(future.result(timeout=10.0).scores.peak)
+    except Exception as exc:
+        error(f"{log_prefix} score_still_frame: focus analysis failed: {exc!r}")
+        return float("-inf")
+
+
+def score_preview_frame(
+    camera_manager,
+    mv,
+    settle_s: float = 0.4,
+    log_prefix: str = "",
+) -> float:
+    """
+    Score the current preview frame for focus.
+
+    Parameters
+    ----------
+    camera_manager:
+        The :class:`CameraManager` instance from the app context.
+    mv:
+        The machine-vision manager from the app context.
+    settle_s:
+        Seconds to wait before grabbing the frame.
+    log_prefix:
+        Prepended to error messages, e.g. ``"[Autofocus]"``.
+    """
+    if settle_s > 0:
+        time.sleep(settle_s)
+    frame = camera_manager.copy_current_frame_to_numpy()
+    if frame is None:
+        error(f"{log_prefix} score_preview_frame: no current frame available")
+        return float("-inf")
+    try:
+        future = mv.request_focus_analysis_guaranteed(frame)
+        return float(future.result(timeout=10.0).scores.peak)
+    except Exception as exc:
+        error(f"{log_prefix} score_preview_frame: focus analysis failed: {exc!r}")
+        return float("-inf")

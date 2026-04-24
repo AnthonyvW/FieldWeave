@@ -18,22 +18,21 @@ Usage::
 
 from __future__ import annotations
 
-import time
 from typing import Generator
 
 from common.app_context import get_app_context
 from common.logger import info, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.routines.automation_routine import AutomationRoutine
-from motion.routines.autofocus.autofocus_utils import move_z_and_wait, capture_still_frame
+from motion.routines.autofocus.autofocus_utils import (
+    move_z_and_wait,
+    quantize,
+    score_still_frame,
+    score_preview_frame,
+)
 
 _NM_PER_MM = 1_000_000
 _AF_ZFLOOR_NM = 0
-
-
-def _quantize(z_nm: int, step_nm: int) -> int:
-    """Snap *z_nm* down to the nearest multiple of *step_nm*."""
-    return (z_nm // step_nm) * step_nm
 
 
 class AutofocusFine(AutomationRoutine):
@@ -87,8 +86,6 @@ class AutofocusFine(AutomationRoutine):
     ) -> None:
         super().__init__(motion)
 
-        # None means "derive from step size at runtime" (4 × step).
-        # A caller-supplied value is converted immediately and used as-is.
         self._window_mm_override: float | None = window_mm
         self._window_nm: int = (
             int(round(window_mm * _NM_PER_MM)) if window_mm is not None else 0
@@ -114,14 +111,10 @@ class AutofocusFine(AutomationRoutine):
             error("[AutofocusFine] No camera available — aborting")
             return
 
-        # Read the minimum step size from the motion config at runtime so any
-        # settings reload is reflected without reconstructing the routine.
         settings = self.motion.settings
         fine_step_nm: int = settings.step_size if settings is not None else 40_000
         info(f"[AutofocusFine] settings.step_size={settings.step_size}  step_presets={settings.step_presets}")
-        # Derive the search window from the step size when the caller did not
-        # supply an explicit value.  4 steps in each direction gives enough
-        # range for a fine touch-up while keeping the search fast.
+
         if self._window_mm_override is None:
             self._window_nm = fine_step_nm * 4
 
@@ -130,32 +123,10 @@ class AutofocusFine(AutomationRoutine):
         # ----------------------------------------------------------------
 
         def score_still() -> float:
-            if self._settle_still_s > 0:
-                time.sleep(self._settle_still_s)
-            frame = capture_still_frame(camera_manager)
-            if frame is None:
-                error("Autofocus Fine : No frame from capture still frame")
-                return float("-inf")
-            try:
-                future = mv.request_focus_analysis_guaranteed(frame)
-                return float(future.result(timeout=10.0).scores.peak)
-            except Exception as exc:
-                error(f"[AutofocusFine] score_still Focus analysis failed: {exc!r}")
-                return float("-inf")
+            return score_still_frame(camera_manager, mv, self._settle_still_s, "[AutofocusFine]")
 
         def score_preview() -> float:
-            if self._settle_preview_s > 0:
-                time.sleep(self._settle_preview_s)
-            frame = camera_manager.copy_current_frame_to_numpy()
-            if frame is None:
-                error("Autofocus Fine : No frame in score preview")
-                return float("-inf")
-            try:
-                future = mv.request_focus_analysis_guaranteed(frame)
-                return float(future.result(timeout=10.0).scores.peak)
-            except Exception as exc:
-                error(f"[AutofocusFine] score_preview Focus analysis failed: {exc!r}")
-                return float("-inf")
+            return score_preview_frame(camera_manager, mv, self._settle_preview_s, "[AutofocusFine]")
 
         # ----------------------------------------------------------------
         # Motion / cache helpers
@@ -171,7 +142,7 @@ class AutofocusFine(AutomationRoutine):
             )
 
         def score_at(z_nm: int, cache: dict[int, float], scorer) -> float:
-            z_nm = _quantize(z_nm, fine_step_nm)
+            z_nm = quantize(z_nm, fine_step_nm)
             if not within_window(z_nm):
                 info("not within window")
                 return float("-inf")
@@ -186,7 +157,7 @@ class AutofocusFine(AutomationRoutine):
         # Establish center position
         # ----------------------------------------------------------------
 
-        center_nm = _quantize(self.motion.get_position().z, fine_step_nm)
+        center_nm = quantize(self.motion.get_position().z, fine_step_nm)
         window_mm = self._window_nm / _NM_PER_MM
         step_mm = fine_step_nm / _NM_PER_MM
 
@@ -209,7 +180,6 @@ class AutofocusFine(AutomationRoutine):
             error("[AutofocusFine] Baseline capture failed (score=-inf) — aborting")
             return
 
-        # Choose scorer for the search pass
         if self._use_preview_if_below and baseline < self._focus_preview_threshold:
             search_scorer = score_preview
             scorer_name = "PREVIEW"
@@ -241,7 +211,7 @@ class AutofocusFine(AutomationRoutine):
             no_imp = 0
             step_count = 0
             while True:
-                nxt = _quantize(zt + step, fine_step_nm)
+                nxt = quantize(zt + step, fine_step_nm)
                 if not within_window(nxt):
                     break
                 s = score_at(nxt, scores, search_scorer)

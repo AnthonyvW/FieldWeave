@@ -18,21 +18,20 @@ Usage::
 
 from __future__ import annotations
 
-import time
 from typing import Generator
 
 from common.app_context import get_app_context
 from common.logger import info, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.routines.automation_routine import AutomationRoutine
-from motion.routines.autofocus.autofocus_utils import move_z_and_wait, capture_still_frame
+from motion.routines.autofocus.autofocus_utils import (
+    move_z_and_wait,
+    quantize,
+    score_still_frame,
+    score_preview_frame,
+)
 
 _NM_PER_MM = 1_000_000
-
-
-def _quantize(z_nm: int, step_nm: int) -> int:
-    """Snap *z_nm* down to the nearest multiple of *step_nm*."""
-    return (z_nm // step_nm) * step_nm
 
 
 class Autofocus(AutomationRoutine):
@@ -136,8 +135,6 @@ class Autofocus(AutomationRoutine):
             error("[Autofocus] No camera available — aborting")
             return
 
-        # Read the minimum step size from the motion config at runtime so any
-        # settings reload is reflected without reconstructing the routine.
         settings = self.motion.settings
         fine_step_nm: int = settings.step_size if settings is not None else 40_000
 
@@ -148,28 +145,10 @@ class Autofocus(AutomationRoutine):
         # ----------------------------------------------------------------
 
         def score_still() -> float:
-            if self._settle_still_s > 0:
-                time.sleep(self._settle_still_s)
-            frame = capture_still_frame(camera_manager)
-            if frame is None:
-                return float("-inf")
-            try:
-                future = mv.request_focus_analysis_guaranteed(frame)
-                return float(future.result(timeout=10.0).scores.peak)
-            except Exception:
-                return float("-inf")
+            return score_still_frame(camera_manager, mv, self._settle_still_s, "[Autofocus]")
 
         def score_preview() -> float:
-            if self._settle_preview_s > 0:
-                time.sleep(self._settle_preview_s)
-            frame = camera_manager.copy_current_frame_to_numpy()
-            if frame is None:
-                return float("-inf")
-            try:
-                future = mv.request_focus_analysis_guaranteed(frame)
-                return float(future.result(timeout=10.0).scores.peak)
-            except Exception:
-                return float("-inf")
+            return score_preview_frame(camera_manager, mv, self._settle_preview_s, "[Autofocus]")
 
         # ----------------------------------------------------------------
         # Motion / cache helpers
@@ -185,7 +164,7 @@ class Autofocus(AutomationRoutine):
             )
 
         def score_at(z_nm: int, cache: dict[int, float], scorer) -> float:
-            z_nm = _quantize(z_nm, fine_step_nm)
+            z_nm = quantize(z_nm, fine_step_nm)
             if z_nm < z_floor or not within_env(z_nm):
                 return float("-inf")
             if z_nm in cache:
@@ -199,7 +178,7 @@ class Autofocus(AutomationRoutine):
         # Establish start position & baseline
         # ----------------------------------------------------------------
 
-        start_nm = _quantize(self.motion.get_position().z, fine_step_nm)
+        start_nm = quantize(self.motion.get_position().z, fine_step_nm)
         self._set_activity(f"Baseline  Z={start_nm / _NM_PER_MM:.3f} mm")
 
         scores: dict[int, float] = {}
@@ -210,6 +189,10 @@ class Autofocus(AutomationRoutine):
         best_z = start_nm
         best_s = baseline
         info(f"[Autofocus] Baseline Z={start_nm / _NM_PER_MM:.3f} mm  score={baseline:.3f}")
+
+        if baseline == float("-inf"):
+            error("[Autofocus] Baseline capture failed — aborting")
+            return
 
         coarse_scorer = (
             score_preview if baseline < self._focus_preview_threshold else score_still
@@ -223,7 +206,7 @@ class Autofocus(AutomationRoutine):
         yield  # pause/stop point: after baseline
 
         # ----------------------------------------------------------------
-        # Coarse alternating sweep with bias
+        # Alternating coarse sweep
         # ----------------------------------------------------------------
 
         max_k = self._max_offset_nm // self._coarse_step_nm
@@ -248,7 +231,6 @@ class Autofocus(AutomationRoutine):
             if not right_has and not left_has:
                 break
 
-            # Choose side
             if bias_side:
                 if bias_side == "right" and right_has:
                     side = "right"
@@ -268,7 +250,7 @@ class Autofocus(AutomationRoutine):
 
             k = k_right if side == "right" else k_left
             offset = k * self._coarse_step_nm if side == "right" else -k * self._coarse_step_nm
-            target = _quantize(start_nm + offset, fine_step_nm)
+            target = quantize(start_nm + offset, fine_step_nm)
 
             if side == "left" and target < z_floor:
                 info("[Autofocus] Coarse: reached Z floor, stopping left")
@@ -335,8 +317,8 @@ class Autofocus(AutomationRoutine):
 
         self._set_activity(f"Refine march  Z≈{best_z / _NM_PER_MM:.3f} mm")
 
-        up_nm = _quantize(best_z + self._refine_step_nm, fine_step_nm)
-        down_nm = _quantize(best_z - self._refine_step_nm, fine_step_nm)
+        up_nm = quantize(best_z + self._refine_step_nm, fine_step_nm)
+        down_nm = quantize(best_z - self._refine_step_nm, fine_step_nm)
         up_s = score_at(up_nm, scores, coarse_scorer)
         down_s = score_at(down_nm, scores, coarse_scorer)
 
@@ -357,7 +339,7 @@ class Autofocus(AutomationRoutine):
             if self._check_stop():
                 return
             step = self._refine_step_nm if refine_dir == "up" else -self._refine_step_nm
-            nxt = _quantize(current_z + step, fine_step_nm)
+            nxt = quantize(current_z + step, fine_step_nm)
             if nxt < z_floor or not within_env(nxt):
                 break
             s = score_at(nxt, scores, coarse_scorer)
@@ -389,7 +371,7 @@ class Autofocus(AutomationRoutine):
             best_ls = scores.get(start_z, score_at(start_z, scores, score_still))
             no_imp = 0
             while True:
-                nxt = _quantize(zt + step, fine_step_nm)
+                nxt = quantize(zt + step, fine_step_nm)
                 if nxt < z_floor or not within_env(nxt):
                     break
                 s = score_at(nxt, scores, score_still)
