@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -17,8 +16,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
-    QLineEdit,
-    QFileDialog,
 )
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -27,6 +24,7 @@ from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_scan import ZStackScan
 from post_processing.routines.focus_stack_routine import FocusStackConfig
+from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +122,6 @@ class FocusStackWidget(QWidget):
 
     mode_name: str = "Focus Stacking"
     _SECS_PER_FRAME: float = 3.15
-    _DEFAULT_OUTPUT_PLACEHOLDER: str = "Default: ./output/<timestamp>"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -349,22 +346,8 @@ class FocusStackWidget(QWidget):
         main_layout.addWidget(fs_group)
 
         # ---- Output folder group -----------------------------------------
-        output_group = QGroupBox("Output Folder")
-        output_layout = QHBoxLayout(output_group)
-        output_layout.setContentsMargins(10, 8, 10, 8)
-        output_layout.setSpacing(8)
-
-        self._output_edit = QLineEdit()
-        self._output_edit.setFixedHeight(30)
-        self._output_edit.setPlaceholderText(self._DEFAULT_OUTPUT_PLACEHOLDER)
-        output_layout.addWidget(self._output_edit, 1)
-
-        browse_btn = QPushButton("Browse...")
-        browse_btn.setFixedHeight(30)
-        browse_btn.clicked.connect(self._browse_output_folder)
-        output_layout.addWidget(browse_btn)
-
-        main_layout.addWidget(output_group)
+        self._output_folder = OutputFolderWidget()
+        main_layout.addWidget(self._output_folder)
 
         # ---- Summary label -----------------------------------------------
         self._summary_label = QLabel("")
@@ -487,15 +470,7 @@ class FocusStackWidget(QWidget):
         return f"{z:.{decimals}f} mm"
 
     def _resolve_output_folder(self) -> str:
-        """Return the user-specified folder, or generate the default timestamped path."""
-        text = self._output_edit.text().strip()
-        if not text:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            return str(Path("output") / timestamp)
-        p = Path(text)
-        if p.is_absolute():
-            return text
-        return str(Path("output") / p)
+        return self._output_folder.resolved_path
 
     def _build_focus_stack_config(self) -> FocusStackConfig | None:
         """Build a FocusStackConfig from the current widget state, or None if disabled."""
@@ -552,15 +527,6 @@ class FocusStackWidget(QWidget):
     def _on_no_align_changed(self) -> None:
         pass  # Reserved for warp model selector if added later
 
-    def _browse_output_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Output Folder",
-            self._output_edit.text().strip() or "./output/",
-        )
-        if folder:
-            self._output_edit.setText(folder)
-
     def _set_start_position(self) -> None:
         z = self._get_current_z_mm()
         if z is None:
@@ -584,6 +550,8 @@ class FocusStackWidget(QWidget):
             return
 
         output_folder = self._resolve_output_folder()
+        if not OutputFolderWidget.confirm_if_exists(output_folder, self):
+            return
         step_mm = self._step_spin.value()
         focus_stack_config = self._build_focus_stack_config()
 
@@ -662,7 +630,7 @@ class FocusStackWidget(QWidget):
         self._start_btn.setEnabled(False)
         self._set_start_btn.setEnabled(False)
         self._set_end_btn.setEnabled(False)
-        self._output_edit.setEnabled(False)
+        self._output_folder.setEnabled(False)
         self._fs_enable_check.setEnabled(False)
         self._fs_settings_widget.setEnabled(False)
         self._pause_resume_btn.setText("Pause")
@@ -675,7 +643,7 @@ class FocusStackWidget(QWidget):
         self._start_btn.setEnabled(True)
         self._set_start_btn.setEnabled(True)
         self._set_end_btn.setEnabled(True)
-        self._output_edit.setEnabled(True)
+        self._output_folder.setEnabled(True)
         self._fs_enable_check.setEnabled(True)
         self._fs_settings_widget.setEnabled(self._fs_enable_check.isChecked())
         self._controls_widget.setVisible(False)

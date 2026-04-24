@@ -148,7 +148,7 @@ def _transform_corners(
     Map the four corners of a w x h canvas through a forward (src->dst) warp
     matrix and return them as a (4, 2) float32 array.
     """
-    corners = np.array(
+    corners = np.array( # pylint: disable=too-many-function-args
         [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32,
     ).reshape(1, -1, 2)
     if is_homography:

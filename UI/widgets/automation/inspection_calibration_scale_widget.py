@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -23,6 +20,7 @@ from common.app_context import get_app_context
 from common.logger import error, info
 from motion.models import Position
 from motion.routines.inspection_calibration_scale_routine import InspectionCalibrationScaleRoutine
+from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 _NM_PER_MM = 1_000_000
 
@@ -107,7 +105,6 @@ class InspectionCalibrationScaleWidget(QWidget):
     """Widget for configuring and running the inspection calibration scale routine."""
 
     mode_name: str = "Calibration Scale"
-    _DEFAULT_OUTPUT_PLACEHOLDER: str = "Default: ./output/<timestamp>"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -186,22 +183,8 @@ class InspectionCalibrationScaleWidget(QWidget):
         main_layout.addWidget(cal_info_group)
 
         # ---- Output folder (matches area scan pattern) -------------------
-        output_group = QGroupBox("Output Folder")
-        output_layout = QHBoxLayout(output_group)
-        output_layout.setContentsMargins(10, 8, 10, 8)
-        output_layout.setSpacing(8)
-
-        self._path_edit = QLineEdit()
-        self._path_edit.setFixedHeight(30)
-        self._path_edit.setPlaceholderText(self._DEFAULT_OUTPUT_PLACEHOLDER)
-        output_layout.addWidget(self._path_edit, 1)
-
-        self._browse_btn = QPushButton("Browse...")
-        self._browse_btn.setFixedHeight(30)
-        self._browse_btn.clicked.connect(self._on_browse_clicked)
-        output_layout.addWidget(self._browse_btn)
-
-        main_layout.addWidget(output_group)
+        self._output_folder = OutputFolderWidget()
+        main_layout.addWidget(self._output_folder)
 
         # ---- Start button ------------------------------------------------
         self._start_btn = QPushButton("Start Automation")
@@ -389,24 +372,8 @@ class InspectionCalibrationScaleWidget(QWidget):
     # Output path slot
     # ------------------------------------------------------------------
 
-    def _on_browse_clicked(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Output Folder",
-            self._path_edit.text().strip() or "./output/",
-        )
-        if folder:
-            self._path_edit.setText(folder)
-
     def _resolve_output_path(self) -> str:
-        text = self._path_edit.text().strip()
-        if not text:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            return str(Path("output") / timestamp)
-        p = Path(text)
-        if p.is_absolute():
-            return text
-        return str(Path("output") / p)
+        return self._output_folder.resolved_path
 
     # ------------------------------------------------------------------
     # Routine slots
@@ -421,6 +388,8 @@ class InspectionCalibrationScaleWidget(QWidget):
             return
 
         output_path = self._resolve_output_path()
+        if not OutputFolderWidget.confirm_if_exists(output_path, self):
+            return
 
         pos = self._get_saved_position()
         if pos is not None:
@@ -488,8 +457,7 @@ class InspectionCalibrationScaleWidget(QWidget):
 
     def _enter_running_state(self) -> None:
         self._start_btn.setEnabled(False)
-        self._path_edit.setEnabled(False)
-        self._browse_btn.setEnabled(False)
+        self._output_folder.setEnabled(False)
         self._set_pos_btn.setEnabled(False)
         self._goto_pos_btn.setEnabled(False)
         self._clear_pos_btn.setEnabled(False)
@@ -501,8 +469,7 @@ class InspectionCalibrationScaleWidget(QWidget):
     def _exit_running_state(self) -> None:
         self._poll_timer.stop()
         self._start_btn.setEnabled(True)
-        self._path_edit.setEnabled(True)
-        self._browse_btn.setEnabled(True)
+        self._output_folder.setEnabled(True)
         self._set_pos_btn.setEnabled(True)
         self._controls_widget.setVisible(False)
         self._status_label.setText("Finished.")

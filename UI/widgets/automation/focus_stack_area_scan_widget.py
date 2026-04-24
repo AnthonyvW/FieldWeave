@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
-from pathlib import Path
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -15,14 +13,13 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
-    QLineEdit,
-    QFileDialog,
 )
 from PySide6.QtCore import Qt, QTimer
 
 from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_area_scan import ZStackAreaScan
+from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +286,6 @@ class _AxisRangeWidget(QWidget):
 class ZStackAreaScanWidget(QWidget):
     """Widget for configuring and running a area scan across an XY grid."""
 
-    _DEFAULT_OUTPUT_PLACEHOLDER: str = "Default: ./output/<timestamp>"
     mode_name: str = "Area Scan"
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -328,22 +324,8 @@ class ZStackAreaScanWidget(QWidget):
         main_layout.addWidget(self._z_axis)
 
         # ---- Output folder ----
-        output_group = QGroupBox("Output Folder")
-        output_layout = QHBoxLayout(output_group)
-        output_layout.setContentsMargins(10, 8, 10, 8)
-        output_layout.setSpacing(8)
-
-        self._output_edit = QLineEdit()
-        self._output_edit.setFixedHeight(30)
-        self._output_edit.setPlaceholderText(self._DEFAULT_OUTPUT_PLACEHOLDER)
-        output_layout.addWidget(self._output_edit, 1)
-
-        browse_btn = QPushButton("Browse...")
-        browse_btn.setFixedHeight(30)
-        browse_btn.clicked.connect(self._browse_output_folder)
-        output_layout.addWidget(browse_btn)
-
-        main_layout.addWidget(output_group)
+        self._output_folder = OutputFolderWidget()
+        main_layout.addWidget(self._output_folder)
 
         # ---- Summary label ----
         self._summary_label = QLabel("")
@@ -395,16 +377,6 @@ class ZStackAreaScanWidget(QWidget):
             warning("ZStackAreaScanWidget: motion controller not ready")
             return None
         return ctx.motion.get_position().to_mm()
-
-    def _resolve_output_folder(self) -> str:
-        text = self._output_edit.text().strip()
-        if not text:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            return str(Path("output") / timestamp)
-        p = Path(text)
-        if p.is_absolute():
-            return text
-        return str(Path("output") / p)
 
     def _update_summary(self) -> None:
         x, y, z = self._x_axis, self._y_axis, self._z_axis
@@ -494,15 +466,6 @@ class ZStackAreaScanWidget(QWidget):
         self._z_axis.set_end(pos[2])
         self._update_summary()
 
-    def _browse_output_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select Output Folder",
-            self._output_edit.text().strip() or "./output/",
-        )
-        if folder:
-            self._output_edit.setText(folder)
-
     # ------------------------------------------------------------------
     # Start slot
     # ------------------------------------------------------------------
@@ -513,7 +476,9 @@ class ZStackAreaScanWidget(QWidget):
         if not (x.is_configured and y.is_configured and z.is_configured):
             return
 
-        output_folder = self._resolve_output_folder()
+        output_folder = self._output_folder.resolved_path
+        if not OutputFolderWidget.confirm_if_exists(output_folder, self):
+            return
 
         # Guaranteed non-None by is_configured
         x_start: float = x.start_mm  # type: ignore[assignment]
@@ -590,4 +555,4 @@ class ZStackAreaScanWidget(QWidget):
 
     @property
     def output_folder(self) -> str:
-        return self._resolve_output_folder()
+        return self._output_folder.resolved_path
