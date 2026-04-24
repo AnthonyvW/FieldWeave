@@ -429,18 +429,21 @@ class NavigationWidget(QWidget):
         elif state in (MotionState.FAILED, MotionState.FAULTED):
             self._set_motion_available(False)
             self._position_timer.stop()
+            self.position_label.setText("X: --  Y: --  Z: -- mm")
             self._set_overlay_message("Motion System Not Connected")
         elif state == MotionState.HOMING:
             self._set_motion_available(False)
             self._position_timer.stop()
+            self.position_label.setText("X: --  Y: --  Z: -- mm")
             self._set_overlay_message("Homing Motion System...")
         elif routine_running:
             self._set_motion_available(False)
-            self._position_timer.stop()
-            self._set_overlay_message("Automation Running...")
+            if not self._position_timer.isActive():
+                self._position_timer.start()
         else:
             self._set_motion_available(False)
             self._position_timer.stop()
+            self.position_label.setText("X: --  Y: --  Z: -- mm")
             self._set_overlay_message("Connecting to Motion System...")
 
     def _set_motion_available(self, available: bool) -> None:
@@ -466,7 +469,6 @@ class NavigationWidget(QWidget):
             self._overlay.setStyleSheet("background: rgba(0, 0, 0, 100);")
             self._overlay_label.show()
             self._overlay.raise_()
-            self.position_label.setText("X: --  Y: --  Z: -- mm")
 
     # ------------------------------------------------------------------
     # Step size controls
@@ -816,9 +818,10 @@ class NavigationWidget(QWidget):
         if ctx.motion is None or not ctx.motion.is_ready():
             return
         x_mm, y_mm, z_mm = ctx.motion.get_position().to_mm()
-        self.position_label.setText(
-            f"X: {x_mm:.2f}  Y: {y_mm:.2f}  Z: {z_mm:.2f} mm"
-        )
+        position_text = f"X: {x_mm:.2f}  Y: {y_mm:.2f}  Z: {z_mm:.2f} mm"
+        self.position_label.setText(position_text)
+        if self._overlay_label is not None and self._overlay_label.isVisible():
+            self._set_overlay_message(f"Automation Running...\n{position_text}")
 
     # ------------------------------------------------------------------
     # Movement helpers

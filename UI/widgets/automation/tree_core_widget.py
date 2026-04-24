@@ -7,6 +7,9 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -20,9 +23,76 @@ from PySide6.QtWidgets import (
 
 from common.app_context import get_app_context
 from common.logger import error, warning
+from motion.models import Position
+from motion.routines.tree_core_imaging_routine import TreeCoreImagingRoutine
+from UI.widgets.automation.output_folder_widget import OutputFolderWidget
+
+_NM_PER_MM = 1_000_000
 
 
-NUM_SLOTS = 20
+def _get_tca():
+    """Return the TreeCoreAutomationSettings from the motion context, or None."""
+    ctx = get_app_context()
+    if ctx is None or ctx.motion is None:
+        return None
+    return getattr(ctx.motion.settings, "tree_core_automation", None)
+
+
+# ---------------------------------------------------------------------------
+# Confirmation dialog
+# ---------------------------------------------------------------------------
+
+class _ConfirmDialog(QDialog):
+    """Modal dialog summarising the planned tree core imaging run."""
+
+    def __init__(
+        self,
+        output_path: str,
+        slot_count: int,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Confirm Tree Core Imaging")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("Ready to start tree core imaging?")
+        title.setObjectName("CalScaleDialogTitle")
+        layout.addWidget(title)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setObjectName("SampleDivider")
+        layout.addWidget(line)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        for label_text, value_text in [
+            ("Slots to image", str(slot_count)),
+            ("Output path", output_path),
+        ]:
+            lbl = QLabel(label_text + ":")
+            lbl.setObjectName("CalScaleRowLabel")
+            val = QLabel(value_text)
+            val.setObjectName("CalScaleRowValue")
+            val.setWordWrap(True)
+            form.addRow(lbl, val)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Start")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +124,6 @@ class _MultilinePasteEdit(QLineEdit):
                 super().keyPressEvent(event)
                 return
 
-            # Split, strip each line, drop empties produced by trailing newlines
             lines = [ln.strip() for ln in raw.splitlines()]
             lines = [ln for ln in lines if ln]
 
@@ -79,7 +148,6 @@ class _MultilinePasteEdit(QLineEdit):
             super().insertFromMimeData(source)
             return
 
-        # Split, strip each line, drop empties produced by trailing newlines
         lines = [ln.strip() for ln in raw.splitlines()]
         lines = [ln for ln in lines if ln]
 
@@ -114,7 +182,6 @@ class _SampleRowWidget(QWidget):
         self._sample_number = sample_number
         self._ever_typed = False
 
-        # Required so that setStyleSheet background-color actually paints
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         layout = QHBoxLayout(self)
@@ -145,10 +212,6 @@ class _SampleRowWidget(QWidget):
 
         self._apply_style()
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _apply_style(self) -> None:
         active = self._toggle.isChecked()
         self.setProperty("active", active)
@@ -178,13 +241,9 @@ class _SampleRowWidget(QWidget):
         if not self._ever_typed and text.strip():
             self._ever_typed = True
             if not self._toggle.isChecked():
-                self._toggle.setChecked(True)  # triggers _apply_style via signal
-                return  # _apply_style already called via signal
+                self._toggle.setChecked(True)
+                return
         self._apply_style()
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
 
     def set_text(self, text: str) -> None:
         """Programmatically set the sample name (used for multi-line paste)."""
@@ -213,6 +272,7 @@ class TreeCoreWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._routine: TreeCoreImagingRoutine | None = None
         self._sample_rows: list[_SampleRowWidget] = []
         self._setup_ui()
 
@@ -226,9 +286,37 @@ class TreeCoreWidget(QWidget):
         main_layout.setSpacing(10)
 
         main_layout.addWidget(self._build_controls_group())
+
+        self._output_folder = OutputFolderWidget()
+        main_layout.addWidget(self._output_folder)
+
         main_layout.addWidget(self._build_sample_list_group(), 1)
 
-        # Timer for polling routine state on the UI thread
+        self._controls_widget = QWidget()
+        controls_layout = QHBoxLayout(self._controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+
+        self._pause_resume_btn = QPushButton("Pause")
+        self._pause_resume_btn.setFixedHeight(32)
+        self._pause_resume_btn.setObjectName("CalSecondaryButton")
+        self._pause_resume_btn.clicked.connect(self._on_pause_resume_clicked)
+        controls_layout.addWidget(self._pause_resume_btn)
+
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setFixedHeight(32)
+        self._stop_btn.setObjectName("CalScaleStop")
+        self._stop_btn.clicked.connect(self._on_stop_clicked)
+        controls_layout.addWidget(self._stop_btn)
+
+        self._controls_widget.setVisible(False)
+        main_layout.addWidget(self._controls_widget)
+
+        self._status_label = QLabel("")
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._status_label.setObjectName("CalScaleStatusLabel")
+        main_layout.addWidget(self._status_label)
+
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(250)
         self._poll_timer.timeout.connect(self._poll_routine_state)
@@ -246,7 +334,7 @@ class TreeCoreWidget(QWidget):
         self._slot_spin = QSpinBox()
         self._slot_spin.setFixedHeight(30)
         self._slot_spin.setMinimum(1)
-        self._slot_spin.setMaximum(NUM_SLOTS)
+        self._slot_spin.setMaximum(1)
         self._slot_spin.setValue(1)
         self._slot_spin.setFixedWidth(60)
         layout.addWidget(self._slot_spin)
@@ -302,63 +390,164 @@ class TreeCoreWidget(QWidget):
         divider.setObjectName("SampleDivider")
         group_layout.addWidget(divider)
 
-        for i in range(1, NUM_SLOTS + 1):
-            row = _SampleRowWidget(i, i - 1, self._on_paste_overflow)
-            self._sample_rows.append(row)
-            group_layout.addWidget(row)
-
-            if i < NUM_SLOTS:
-                sep = QFrame()
-                sep.setFrameShape(QFrame.Shape.HLine)
-                sep.setObjectName("SampleSeparator")
-                group_layout.addWidget(sep)
+        self._sample_list_layout = group_layout
 
         return group
 
+    def _rebuild_sample_rows(self, num_slots: int) -> None:
+        """Rebuild the sample row widgets to match the current slot count."""
+        for row in self._sample_rows:
+            row.deleteLater()
+        self._sample_rows.clear()
+
+        # Header is index 0, divider is index 1; clear everything after.
+        while self._sample_list_layout.count() > 2:
+            item = self._sample_list_layout.takeAt(2)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for i in range(1, num_slots + 1):
+            row = _SampleRowWidget(i, i - 1, self._on_paste_overflow)
+            self._sample_rows.append(row)
+            self._sample_list_layout.addWidget(row)
+
+            if i < num_slots:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setObjectName("SampleSeparator")
+                self._sample_list_layout.addWidget(sep)
+
+        self._slot_spin.setMaximum(num_slots)
+
     # ------------------------------------------------------------------
-    # Size hint — tall enough to show all 20 rows without a scrollbar
+    # Size hint
     # ------------------------------------------------------------------
 
     def sizeHint(self):  # type: ignore[override]
         hint = super().sizeHint()
-        # Each row is ~32 px tall; 20 rows + header + separators + group chrome
         hint.setHeight(max(hint.height(), 900))
         return hint
+
+    # ------------------------------------------------------------------
+    # showEvent — refresh slot count from calibration
+    # ------------------------------------------------------------------
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        tca = _get_tca()
+        num_slots = tca.num_slots if tca is not None else 20
+        if len(self._sample_rows) != num_slots:
+            self._rebuild_sample_rows(num_slots)
 
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
 
     def _on_go_to_slot_clicked(self) -> None:
-        slot = self._slot_spin.value()
+        slot_number = self._slot_spin.value()
+        slot_index = slot_number - 1
+
         ctx = get_app_context()
         if ctx.motion is None or not ctx.motion.is_ready():
             warning("TreeCoreWidget: motion controller not ready")
             return
+
+        tca = _get_tca()
+        if tca is None:
+            warning("TreeCoreWidget: no calibration settings available")
+            return
+
+        if slot_index >= tca.num_slots:
+            warning(f"TreeCoreWidget: slot {slot_number} out of range ({tca.num_slots} slots)")
+            return
+
+        slot = tca.slots[slot_index]
+        pos_nm = slot.position_nm if slot.position_nm > 0 else None
+        if pos_nm is None:
+            warning(f"TreeCoreWidget: no position saved for slot {slot_number}")
+            return
+
+        axis = tca.axis
+        mark_set = tca.mark_reference_nm > 0 or tca.mark_z_nm > 0
+
         try:
-            ctx.motion.go_to_slot(slot)
+            current = ctx.motion.get_position()
+            main_nm = tca.mark_reference_nm if mark_set else (current.y if axis == "y" else current.x)
+            z_nm = tca.mark_z_nm if mark_set else current.z
+            if axis == "y":
+                target = Position(x=pos_nm, y=main_nm, z=z_nm)
+            else:
+                target = Position(x=main_nm, y=pos_nm, z=z_nm)
+            ctx.motion.move_to_position(target, wait=False)
         except Exception as exc:
-            error(f"TreeCoreWidget: failed to go to slot {slot} — {exc}")
+            error(f"TreeCoreWidget: failed to go to slot {slot_number} — {exc}")
 
     def _on_start_clicked(self) -> None:
+        ctx = get_app_context()
+        if ctx.motion is None or not ctx.motion.is_ready():
+            error("TreeCoreWidget: motion controller not ready")
+            self._status_label.setText("Motion controller not ready.")
+            return
+
         active_samples = [r for r in self._sample_rows if r.enabled]
         if not active_samples:
             warning("TreeCoreWidget: no samples enabled")
+            self._status_label.setText("No samples enabled.")
             return
 
-        ctx = get_app_context()
-        if ctx.motion is None or not ctx.motion.is_ready():
-            error("TreeCoreWidget: motion controller not ready — cannot start automation")
+        tca = _get_tca()
+        if tca is None or not tca.has_been_calibrated:
+            error("TreeCoreWidget: slot calibration has not been completed")
+            self._status_label.setText("Slot calibration has not been completed.")
+            return
+
+        output_path = self._output_folder.resolved_path
+        if not OutputFolderWidget.confirm_if_exists(output_path, self):
+            return
+
+        slots = [(r.sample_number - 1, r.name or f"slot_{r.sample_number:02d}") for r in active_samples]
+
+        dlg = _ConfirmDialog(
+            output_path=output_path,
+            slot_count=len(slots),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        try:
+            self._routine = TreeCoreImagingRoutine(
+                motion=ctx.motion,
+                output_folder=output_path,
+                slots=slots,
+            )
+            ctx.motion.start_routine(self._routine)
+        except Exception as exc:
+            error(f"TreeCoreWidget: failed to start routine — {exc}")
+            self._status_label.setText(f"Failed to start: {exc}")
             return
 
         self._enter_running_state()
 
-    def _on_paste_overflow(self, source_index: int, lines: list[str]) -> None:
-        """Distribute overflow lines from a multi-line paste into subsequent slots.
+    def _on_pause_resume_clicked(self) -> None:
+        if self._routine is None:
+            return
+        if self._routine.is_paused:
+            self._routine.resume()
+            self._pause_resume_btn.setText("Pause")
+            self._status_label.setText("Running...")
+        else:
+            self._routine.pause()
+            self._pause_resume_btn.setText("Resume")
+            self._status_label.setText("Paused.")
 
-        ``source_index`` is the zero-based index of the row that received the
-        paste; ``lines`` contains everything after the first line.
-        """
+    def _on_stop_clicked(self) -> None:
+        if self._routine is not None:
+            self._routine.stop()
+        self._status_label.setText("Stopping...")
+
+    def _on_paste_overflow(self, source_index: int, lines: list[str]) -> None:
+        """Distribute overflow lines from a multi-line paste into subsequent slots."""
         for offset, line in enumerate(lines, start=1):
             target_index = source_index + offset
             if target_index >= len(self._sample_rows):
@@ -371,16 +560,27 @@ class TreeCoreWidget(QWidget):
 
     def _enter_running_state(self) -> None:
         self._start_btn.setEnabled(False)
+        self._output_folder.setEnabled(False)
+        self._pause_resume_btn.setText("Pause")
+        self._controls_widget.setVisible(True)
+        self._status_label.setText("Running...")
         self._poll_timer.start()
 
     def _exit_running_state(self) -> None:
         self._poll_timer.stop()
         self._start_btn.setEnabled(True)
+        self._output_folder.setEnabled(True)
+        self._controls_widget.setVisible(False)
+        self._status_label.setText("Finished.")
+        self._routine = None
 
     def _poll_routine_state(self) -> None:
-        ctx = get_app_context()
-        if ctx.motion is None or not ctx.motion.routine_running:
+        if self._routine is None or not self._routine.is_running:
             self._exit_running_state()
+            return
+        self._pause_resume_btn.setText(
+            "Resume" if self._routine.is_paused else "Pause"
+        )
 
     # ------------------------------------------------------------------
     # Public accessors
