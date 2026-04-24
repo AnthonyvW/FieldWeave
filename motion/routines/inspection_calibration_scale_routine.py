@@ -53,7 +53,7 @@ from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
-from motion.routines.autofocus.autofocus_utils import capture_still_frame, move_z_and_wait
+from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.autofocus.autofocus_routine import Autofocus
 from machine_vision.algorithms.calibration_bar_detection import AxisState, process_frame
 from post_processing.routines.stitch_and_measure import StitchAndMeasureRoutine
@@ -233,6 +233,12 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
 
         autofocus = Autofocus(motion=self.motion)
         autofocus.start()
+        while autofocus.is_running:
+            if self._check_stop():
+                autofocus.stop()
+                autofocus.wait()
+                return
+            time.sleep(0.1)
         autofocus.wait()
 
         if self._check_stop():

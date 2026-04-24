@@ -83,25 +83,34 @@ _SETTLE_S = 0.2
 _DWELL_S = 1.0
 
 
-def _run_centering(motion: MotionControllerManager, capture_timeout_s: float) -> None:
+def _run_subroutine(subroutine: AutomationRoutine, parent: AutomationRoutine) -> None:
+    """Start *subroutine* and wait for it, stopping it immediately if *parent* is stopped."""
+    subroutine.start()
+    while subroutine.is_running:
+        if parent._check_stop():
+            subroutine.stop()
+            subroutine.wait()
+            return
+        time.sleep(0.1)
+    subroutine.wait()
+
+
+def _run_centering(motion: MotionControllerManager, capture_timeout_s: float, parent: AutomationRoutine) -> None:
     centering = RedMarkCenteringRoutine(motion=motion, capture_timeout_s=capture_timeout_s)
-    centering.start()
-    centering.wait()
+    _run_subroutine(centering, parent)
 
 
-def _run_autofocus_descent(motion: MotionControllerManager) -> int:
+def _run_autofocus_descent(motion: MotionControllerManager, parent: AutomationRoutine) -> int:
     """Run an autofocus descent and return the best Z position in nm."""
     routine = AutofocusDescent(motion=motion)
-    routine.start()
-    routine.wait()
+    _run_subroutine(routine, parent)
     return motion.get_position().z
 
 
-def _run_autofocus_fine(motion: MotionControllerManager) -> int:
+def _run_autofocus_fine(motion: MotionControllerManager, parent: AutomationRoutine) -> int:
     """Run a fine autofocus pass and return the best Z position in nm."""
     routine = AutofocusFine(motion=motion)
-    routine.start()
-    routine.wait()
+    _run_subroutine(routine, parent)
     return motion.get_position().z
 
 
@@ -326,7 +335,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
             _advance(f"Centering on mark — {slot_label}", slot_iter, 1, 6)
             info(f"[TreeCoreImaging] Running red mark centering for {slot_label}")
-            _run_centering(self.motion, self._capture_timeout_s)
+            _run_centering(self.motion, self._capture_timeout_s, self)
 
             yield
             if self._check_stop():
@@ -366,7 +375,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
             _advance(f"Autofocus descent — {slot_label}", slot_iter, 3, 6)
             info(f"[TreeCoreImaging] Running autofocus descent for {slot_label}")
-            focused_z_nm = _run_autofocus_descent(self.motion)
+            focused_z_nm = _run_autofocus_descent(self.motion, self)
             info(f"[TreeCoreImaging] Autofocus settled at Z={focused_z_nm / _NM_PER_MM:.3f} mm for {slot_label}")
 
             if self._check_stop():
@@ -481,13 +490,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     _slot_pct(slot_iter, slot_frac),
                     100,
                 )
-                focused_z_nm = _run_autofocus_fine(self.motion)
-
-                if self._check_stop():
-                    return
-
-                actual_pos = self.motion.get_position()
-                info(f"[TreeCoreImaging] Forward sweep position: {current_main_nm} nm  Z={focused_z_nm / _NM_PER_MM:.3f} mm")
+                focused_z_nm = _run_autofocus_fine(self.motion, self)
                 _capture_and_save(slot_folder, actual_pos)
 
                 yield
@@ -579,7 +582,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     _slot_pct(slot_iter, slot_frac),
                     100,
                 )
-                focused_z_nm = _run_autofocus_fine(self.motion)
+                focused_z_nm = _run_autofocus_fine(self.motion, self)
 
                 if self._check_stop():
                     return
