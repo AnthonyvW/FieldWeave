@@ -32,6 +32,7 @@ class EyeToggleButton(QPushButton):
         self._slashed: bool = False
         self.setObjectName("HidePreviewButton")
         self.setFixedSize(30, 30)
+        self.setToolTip("Hide Preview")
 
     @property
     def slashed(self) -> bool:
@@ -41,6 +42,7 @@ class EyeToggleButton(QPushButton):
     def slashed(self, value: bool) -> None:
         if self._slashed != value:
             self._slashed = value
+            self.setToolTip("Show Preview" if value else "Hide Preview")
             self.update()
 
     def paintEvent(self, event) -> None:
