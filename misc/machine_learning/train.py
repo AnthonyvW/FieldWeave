@@ -9,25 +9,21 @@ import numpy as np
 import torch
 import torch.nn as nn
 from albumentations.pytorch import ToTensorV2
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 import albumentations as A
 import segmentation_models_pytorch as smp
+from safetensors.torch import save_file
 
 
 DATASET_ROOT = "dataset_patches"
+MODEL_OUTPUT = "model.safetensors"
 
 
-def load_num_classes(dataset_root: str) -> int:
-    """
-    Derive the number of output classes from the categories.json written by
-    extract_patches.py.  The +1 accounts for the background class (label 0).
-    """
-    categories_path = os.path.join(dataset_root, "categories.json")
-    with open(categories_path) as f:
-        categories = json.load(f)
-    return len(categories) + 1  # background + N foreground classes
+def load_categories(dataset_root: str) -> list[dict]:
+    with open(os.path.join(dataset_root, "categories.json")) as f:
+        return json.load(f)
 
 
 class SegmentationDataset(Dataset):
@@ -43,43 +39,35 @@ class SegmentationDataset(Dataset):
         image = cv2.imread(self.image_paths[idx])
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # Mask is a uint8 label map: pixel value == category_id (0 = background)
         mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
 
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
-            image = augmented["image"]       # (C, H, W) float32 tensor
-            mask = augmented["mask"]         # (H, W) uint8 tensor
+            image = augmented["image"]
+            mask = augmented["mask"]
 
-        # CrossEntropyLoss expects (H, W) long, not float
         return image, mask.long()
 
 
 def get_train_transform() -> A.Compose:
     return A.Compose([
-        # Geometric
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Rotate(limit=20, p=0.5),
         A.ElasticTransform(p=0.3),
 
-        # Simulate focus/blur variation
         A.OneOf([
             A.GaussianBlur(blur_limit=(3, 9), p=1.0),
             A.Defocus(radius=(3, 7), p=1.0),
             A.MotionBlur(blur_limit=9, p=1.0),
         ], p=0.4),
 
-        # Simulate sample quality and lighting variation
         A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.6),
         A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=30, val_shift_limit=20, p=0.4),
         A.CLAHE(clip_limit=4.0, p=0.3),
         A.ImageCompression(quality_range=(60, 100), p=0.2),
 
-        # Noise
         A.GaussNoise(p=0.3),
-
-        # Occlusion
         A.CoarseDropout(max_holes=8, max_height=64, max_width=64, p=0.3),
 
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
@@ -102,7 +90,6 @@ def split_paths(
     mask_paths: list[str],
     val_fraction: float = 0.15,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Split parallel path lists into train/val without a Subset wrapper."""
     val_size = int(val_fraction * len(image_paths))
     indices = torch.randperm(len(image_paths)).tolist()
     val_idx, train_idx = indices[:val_size], indices[val_size:]
@@ -115,17 +102,25 @@ def split_paths(
     return train_images, train_masks, val_images, val_masks
 
 
+def save_model(model: nn.Module, categories: list[dict], path: str) -> None:
+    tensors = {k: v.contiguous().cpu() for k, v in model.state_dict().items()}
+    metadata = {"categories": json.dumps(categories)}
+    save_file(tensors, path, metadata=metadata)
+
+
 def train() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_classes = load_num_classes(DATASET_ROOT)
+
+    categories = load_categories(DATASET_ROOT)
+    num_classes = len(categories) + 1
     print(f"Number of classes (including background): {num_classes}")
+    print(f"Foreground categories: {[c['name'] for c in categories]}")
 
     all_image_paths = sorted(glob(os.path.join(DATASET_ROOT, "images", "*")))
     all_mask_paths  = sorted(glob(os.path.join(DATASET_ROOT, "masks",  "*")))
 
     train_images, train_masks, val_images, val_masks = split_paths(all_image_paths, all_mask_paths)
 
-    # Each split gets its own Dataset instance so transforms never bleed across
     train_dataset = SegmentationDataset(train_images, train_masks, transform=get_train_transform())
     val_dataset   = SegmentationDataset(val_images,   val_masks,   transform=get_val_transform())
 
@@ -143,7 +138,6 @@ def train() -> None:
     print("Device:", device)
     print("Model device:", next(model.parameters()).device)
 
-    # CrossEntropyLoss handles the multi-class case; Dice in multiclass mode
     ce_loss   = nn.CrossEntropyLoss()
     dice_loss = smp.losses.DiceLoss(mode="multiclass", classes=num_classes)
 
@@ -157,9 +151,9 @@ def train() -> None:
 
         for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1} train"):
             images = images.to(device)
-            masks  = masks.to(device)   # (B, H, W) long
+            masks  = masks.to(device)
 
-            preds = model(images)       # (B, num_classes, H, W) logits
+            preds = model(images)
             loss  = ce_loss(preds, masks) + dice_loss(preds, masks)
 
             optimizer.zero_grad()
@@ -186,7 +180,7 @@ def train() -> None:
 
         if val_loss < best_val:
             best_val = val_loss
-            torch.save(model.state_dict(), "best_model.pth")
+            save_model(model, categories, MODEL_OUTPUT)
             print("  Saved best model")
 
     print("Training complete")

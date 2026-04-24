@@ -20,7 +20,7 @@ from safetensors.torch import load_file
 # -----------------------------
 # Config
 # -----------------------------
-MODEL_PATH = "best_model.pth"
+MODEL_PATH = "model.safetensors"
 INPUT_DIR = r"D:\Projects\tree-core\misc\machine_learning\not_annotated\batch_03"
 DATASET_ROOT = "dataset_patches"
 
