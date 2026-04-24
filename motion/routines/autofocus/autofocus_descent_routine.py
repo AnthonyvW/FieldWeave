@@ -78,6 +78,11 @@ class AutofocusDescent(AutomationRoutine):
     fine_no_improve_limit:
         Number of consecutive non-improving fine steps before stopping each
         climb direction.
+    qualified_score_threshold:
+        Minimum score a coarse position must reach to be considered a real
+        focus candidate. Positions below this threshold are recorded as a
+        fallback only. If the sweep ends without any position meeting the
+        threshold, the best sub-threshold position is used instead.
     """
 
     job_name = "Autofocus (Descent)"
@@ -96,6 +101,7 @@ class AutofocusDescent(AutomationRoutine):
         settle_preview_s: float = 0.4,
         fine_allow_preview: bool = False,
         fine_no_improve_limit: int = 2,
+        qualified_score_threshold: float = 0.6,
     ) -> None:
         super().__init__(motion)
 
@@ -109,6 +115,7 @@ class AutofocusDescent(AutomationRoutine):
         self._settle_preview_s = settle_preview_s
         self._fine_allow_preview = fine_allow_preview
         self._fine_no_improve_limit = fine_no_improve_limit
+        self._qualified_score_threshold = qualified_score_threshold
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -200,6 +207,14 @@ class AutofocusDescent(AutomationRoutine):
         total_coarse = steps_max
         self._set_progress(0, total_coarse + 1)  # +1 accounts for the fine pass
 
+        # Qualified: meets the score threshold and is the true focus target.
+        # Fallback: best sub-threshold position used only if no qualified
+        # position is ever found.
+        qualified_z: int | None = None
+        qualified_s: float = float("-inf")
+        fallback_z = start_nm
+        fallback_s = baseline
+
         for k in range(1, steps_max + 1):
             if self._check_stop():
                 return
@@ -218,21 +233,44 @@ class AutofocusDescent(AutomationRoutine):
                 f"Z={target / _NM_PER_MM:.3f}  score={s:.3f}  Δbase={(s - baseline):+.3f}"
             )
 
-            if s > best_s:
-                best_s, best_z = s, target
+            if s >= self._qualified_score_threshold:
+                if s > qualified_s:
+                    qualified_s, qualified_z = s, target
+            else:
+                if s > fallback_s:
+                    fallback_s, fallback_z = s, target
+
             if s > peak_s:
                 peak_s = s
 
-            if best_z == start_nm and (baseline - s) >= self._drop_stop_base:
-                info("[AutofocusDescent] Early stop (baseline-drop)")
-                break
-            if (peak_s - s) >= self._drop_stop_peak:
-                info("[AutofocusDescent] Early stop (peak-drop)")
-                break
+            # Drop-stop checks only apply once a qualified position has been
+            # found; below the threshold there is no reliable peak to drop from.
+            if qualified_z is not None:
+                if (peak_s - s) >= self._drop_stop_peak:
+                    info("[AutofocusDescent] Early stop (peak-drop)")
+                    break
+            else:
+                if (baseline - s) >= self._drop_stop_base:
+                    info("[AutofocusDescent] Early stop (baseline-drop)")
+                    break
+
             if target == z_floor:
                 break
 
             yield  # pause/stop point: between coarse steps
+
+        if qualified_z is not None:
+            best_z, best_s = qualified_z, qualified_s
+            info(
+                f"[AutofocusDescent] Coarse best (qualified) "
+                f"Z={best_z / _NM_PER_MM:.3f} mm  score={best_s:.3f}"
+            )
+        else:
+            best_z, best_s = fallback_z, fallback_s
+            info(
+                f"[AutofocusDescent] No qualified position found — "
+                f"using fallback Z={best_z / _NM_PER_MM:.3f} mm  score={best_s:.3f}"
+            )
 
         # ----------------------------------------------------------------
         # Fine polish

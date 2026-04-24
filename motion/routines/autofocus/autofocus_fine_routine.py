@@ -204,7 +204,7 @@ class AutofocusFine(AutomationRoutine):
         total_steps = (self._window_nm // fine_step_nm) * 2 + 1
         self._set_progress(0, total_steps)
 
-        def _climb(start_z: int, step: int) -> tuple[int, float]:
+        def _climb(start_z: int, step: int) -> Generator[tuple[int, float], None, None]:
             zt = start_z
             best_lz = start_z
             best_ls = scores.get(start_z, score_at(start_z, scores, search_scorer))
@@ -231,14 +231,22 @@ class AutofocusFine(AutomationRoutine):
                     zt = nxt
                     if no_imp >= self._no_improve_limit:
                         break
-            return best_lz, best_ls
+                yield best_lz, best_ls  # pause/stop point: between fine steps
 
-        up_z, up_s = _climb(center_nm, fine_step_nm)
+        up_z, up_s = center_nm, scores[center_nm]
+        for up_z, up_s in _climb(center_nm, fine_step_nm):
+            if self._check_stop():
+                return
+            yield
 
         if self._check_stop():
             return
 
-        down_z, down_s = _climb(center_nm, -fine_step_nm)
+        down_z, down_s = center_nm, scores[center_nm]
+        for down_z, down_s in _climb(center_nm, -fine_step_nm):
+            if self._check_stop():
+                return
+            yield
 
         best_z = up_z if up_s >= down_s else down_z
         best_s = up_s if up_s >= down_s else down_s

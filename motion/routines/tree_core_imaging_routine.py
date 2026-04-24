@@ -14,17 +14,29 @@ Procedure (per slot)
     (main axis = tca.starting_offset_nm, Z = tca.starting_height_nm),
     mirroring _on_goto_start_pos_clicked in slot_calibration.py.
 4.  Wait 1 second.
-5.  Forward sweep: step towards tca.mark_reference_nm in overlap-derived
+5.  Run autofocus descent to find the best Z at the starting position.
+6.  Capture an image at the starting position (no fine autofocus — descent
+    already leaves the stage at best focus).
+7.  Forward sweep: step towards tca.mark_reference_nm in overlap-derived
     increments, stopping before any step that would overshoot the mark.
-6.  Return to the slot's starting position.
-7.  Reverse sweep: step away from tca.mark_reference_nm in the same
-    increments until background detection reports bare background.
+    Fine autofocus is run at each position before capturing.
+8.  Return to the slot's starting position at the focused Z.
+9.  Reverse sweep: step away from tca.mark_reference_nm in the same
+    increments until background detection reports bare background.  The
+    starting position is skipped (already imaged in step 6).  At each
+    new position a background check is performed first; if background is
+    detected the sweep stops without running autofocus or capturing.
+    Otherwise fine autofocus runs and the image is captured.
 
 The step size is derived from the live sensor dimensions (one frame captured
 per slot after arriving at the start position) combined with the camera
 calibration, so that consecutive frames share ``image_overlap`` fractional
 overlap (default 0.4).  For a Y-axis stage the FOV height drives the step;
 for X the FOV width does.
+
+Images are saved to ``<output_folder>/<sample_name>/Y<y>_X<x>_Z<z>.<ext>``
+where the extension is taken from the camera's current file-format setting and
+each coordinate is rounded to the nearest machine step size in nanometres.
 
 Usage::
 
@@ -54,6 +66,8 @@ from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
 from motion.routines.red_mark_centering_routine import RedMarkCenteringRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
+from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
+from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
 from machine_vision.algorithms.background_detection import is_background_frame
 
 _NM_PER_MM = 1_000_000
@@ -67,6 +81,21 @@ def _run_centering(motion: MotionControllerManager, capture_timeout_s: float) ->
     centering.start()
     centering.wait()
 
+
+def _run_autofocus_descent(motion: MotionControllerManager) -> int:
+    """Run an autofocus descent and return the best Z position in nm."""
+    routine = AutofocusDescent(motion=motion)
+    routine.start()
+    routine.wait()
+    return motion.get_position().z
+
+
+def _run_autofocus_fine(motion: MotionControllerManager) -> int:
+    """Run a fine autofocus pass and return the best Z position in nm."""
+    routine = AutofocusFine(motion=motion)
+    routine.start()
+    routine.wait()
+    return motion.get_position().z
 
 
 class TreeCoreImagingRoutine(AutomationRoutine):
@@ -124,26 +153,63 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             error("[TreeCoreImaging] No camera calibration — cannot derive step size, aborting")
             return
 
-        total_steps = len(self._slots) * 3
-        step = 0
+        camera = ctx.camera
+        if camera is None:
+            error("[TreeCoreImaging] No camera available — aborting")
+            return
 
-        def _advance(activity: str) -> None:
-            nonlocal step
-            step += 1
-            self._set_status(activity, step, total_steps)
+        fformat = camera.settings.fformat.value
+        motion_settings = ctx.motion.settings
+        step_size_nm: int = motion_settings.step_size
+
+        def _round_to_step(value_nm: int) -> int:
+            return round(value_nm / step_size_nm) * step_size_nm
+
+        n_slots = len(self._slots)
+
+        def _slot_pct(slot_iter: int, fraction: float) -> int:
+            slot_share = 1.0 / n_slots
+            return int(round((slot_iter + fraction) * slot_share * 100))
+
+        def _advance(activity: str, slot_iter: int, phase: int, n_phases: int) -> None:
+            pct = _slot_pct(slot_iter, phase / n_phases)
+            self._set_status(activity, pct, 100)
+
+        def _capture_and_save(slot_folder: Path, pos: Position) -> None:
+            y_nm = _round_to_step(pos.y)
+            x_nm = _round_to_step(pos.x)
+            z_nm = _round_to_step(pos.z)
+            filename = f"Y{y_nm}_X{x_nm}_Z{z_nm}.{fformat}"
+            filepath = slot_folder / filename
+            info(f"[TreeCoreImaging] Capturing image: {filepath}")
+            camera.capture_and_save_still(
+                filepath=filepath,
+                resolution_index=0,
+                additional_metadata={
+                    "x_position_nm": pos.x,
+                    "y_position_nm": pos.y,
+                    "z_position_nm": pos.z,
+                    "x_position_mm": pos.x / _NM_PER_MM,
+                    "y_position_mm": pos.y / _NM_PER_MM,
+                    "z_position_mm": pos.z / _NM_PER_MM,
+                    "source": "tree_core_imaging",
+                },
+                timeout_ms=int(self._capture_timeout_s * 1000),
+                wait=True,
+            )
+            info(f"[TreeCoreImaging] Saved {filepath}")
 
         axis = tca.axis.lower()
         if axis not in ("x", "y"):
             error(f"[TreeCoreImaging] Unsupported axis '{axis}' — aborting")
             return
 
-        motion_settings = ctx.motion.settings
         if axis == "y":
             axis_max_nm = motion_settings.max_y * _NM_PER_MM
         else:
             axis_max_nm = motion_settings.max_x * _NM_PER_MM
 
-        for slot_index, slot_name in self._slots:
+        for slot_iter, (slot_index, slot_name) in enumerate(self._slots):
             if self._check_stop():
                 return
 
@@ -152,11 +218,10 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     f"[TreeCoreImaging] Slot index {slot_index} out of range"
                     f" ({tca.num_slots} slots) — skipping '{slot_name}'"
                 )
-                step += 3
                 continue
 
             slot = tca.slots[slot_index]
-            slot_label = f"slot {slot_index} ({slot_name!r})"
+            slot_label = f"Slot {slot_index + 1}: {slot_name}"
 
             # ------------------------------------------------------------------
             # Create output sub-folder
@@ -170,7 +235,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             # Move to the slot's mark position and centre
             # ------------------------------------------------------------------
 
-            _advance(f"Moving to mark — {slot_label}")
+            _advance(f"Moving to mark — {slot_label}", slot_iter, 0, 6)
             info(f"[TreeCoreImaging] Navigating to mark for {slot_label}")
 
             perp_nm = slot.position_nm + slot.offset_nm
@@ -195,7 +260,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             if self._check_stop():
                 return
 
-            _advance(f"Centering on mark — {slot_label}")
+            _advance(f"Centering on mark — {slot_label}", slot_iter, 1, 6)
             info(f"[TreeCoreImaging] Running red mark centering for {slot_label}")
             _run_centering(self.motion, self._capture_timeout_s)
 
@@ -207,7 +272,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             # Move to starting position (mirrors _on_goto_start_pos_clicked)
             # ------------------------------------------------------------------
 
-            _advance(f"Moving to start position — {slot_label}")
+            _advance(f"Moving to start position — {slot_label}", slot_iter, 2, 6)
             info(f"[TreeCoreImaging] Moving to starting position for {slot_label}")
 
             centered = self.motion.get_position()
@@ -231,12 +296,23 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             info(f"[TreeCoreImaging] Dwelling {_DWELL_S}s at starting position for {slot_label}")
             time.sleep(_DWELL_S)
 
+            # ------------------------------------------------------------------
+            # Autofocus descent to find best Z at the starting position
+            # ------------------------------------------------------------------
+
+            _advance(f"Autofocus descent — {slot_label}", slot_iter, 3, 6)
+            info(f"[TreeCoreImaging] Running autofocus descent for {slot_label}")
+            focused_z_nm = _run_autofocus_descent(self.motion)
+            info(f"[TreeCoreImaging] Autofocus settled at Z={focused_z_nm / _NM_PER_MM:.3f} mm for {slot_label}")
+
+            if self._check_stop():
+                return
+
             # Capture one frame to get live sensor dimensions for FOV derivation.
             # The sensor size won't change during the run so this is done once per slot.
             size_frame = capture_still_frame(ctx.camera_manager, timeout_s=self._capture_timeout_s)
             if size_frame is None:
                 error(f"[TreeCoreImaging] Frame capture for step-size derivation failed — skipping {slot_label}")
-                step += 3
                 continue
 
             sensor_h, sensor_w = size_frame.shape[:2]
@@ -263,10 +339,10 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
             if fov_nm <= 0:
                 error(f"[TreeCoreImaging] Derived FOV is zero — skipping {slot_label}")
-                step += 3
                 continue
 
             step_nm = int(round(fov_nm * (1.0 - self._image_overlap)))
+            step_nm = _round_to_step(step_nm)
             info(
                 f"[TreeCoreImaging] sensor={sensor_w}x{sensor_h}"
                 f"  FOV={fov_nm:.0f} nm"
@@ -275,7 +351,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             )
 
             # Record the starting position and fixed perpendicular coordinate for
-            # both sweeps.
+            # both sweeps. Z uses the autofocus-determined height.
             start_pos = self.motion.get_position()
             perp_pos = start_pos.x if axis == "y" else start_pos.y
             main_start_nm = start_pos.y if axis == "y" else start_pos.x
@@ -284,13 +360,26 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 return 0 <= main_nm <= axis_max_nm
 
             # ------------------------------------------------------------------
+            # Capture at starting position (descent already focused here)
+            # ------------------------------------------------------------------
+
+            info(f"[TreeCoreImaging] Capturing starting position image for {slot_label}")
+            _capture_and_save(slot_folder, start_pos)
+
+            yield
+            if self._check_stop():
+                return
+
+            # ------------------------------------------------------------------
             # Forward sweep: starting position → mark_reference_nm
+            # Phases 4-5 of 6 within the slot share.
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Beginning forward sweep for {slot_label}")
 
             direction = 1 if tca.mark_reference_nm > main_start_nm else -1
             current_main_nm = main_start_nm
+            forward_span_nm = max(1, abs(tca.mark_reference_nm - main_start_nm))
 
             while True:
                 if self._check_stop():
@@ -312,14 +401,30 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     return
 
                 if axis == "y":
-                    target = Position(x=perp_pos, y=next_main_nm, z=tca.starting_height_nm)
+                    target = Position(x=perp_pos, y=next_main_nm, z=focused_z_nm)
                 else:
-                    target = Position(x=next_main_nm, y=perp_pos, z=tca.starting_height_nm)
+                    target = Position(x=next_main_nm, y=perp_pos, z=focused_z_nm)
 
                 self.motion.move_to_position(target, wait=True)
                 current_main_nm = next_main_nm
 
-                info(f"[TreeCoreImaging] Forward sweep position: {current_main_nm} nm")
+                info(f"[TreeCoreImaging] Forward sweep — fine autofocus at {current_main_nm} nm")
+                sweep_frac = abs(current_main_nm - main_start_nm) / forward_span_nm
+                # Forward sweep occupies phases 4–5 (2 of 6 sub-phases = 1/3 of slot share)
+                slot_frac = 4 / 6 + sweep_frac * (1 / 6)
+                self._set_status(
+                    f"Forward sweep — {slot_label}  pos={current_main_nm / _NM_PER_MM:.3f} mm",
+                    _slot_pct(slot_iter, slot_frac),
+                    100,
+                )
+                focused_z_nm = _run_autofocus_fine(self.motion)
+
+                if self._check_stop():
+                    return
+
+                actual_pos = self.motion.get_position()
+                info(f"[TreeCoreImaging] Forward sweep position: {current_main_nm} nm  Z={focused_z_nm / _NM_PER_MM:.3f} mm")
+                _capture_and_save(slot_folder, actual_pos)
 
                 yield
                 if self._check_stop():
@@ -328,11 +433,15 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             info(f"[TreeCoreImaging] Forward sweep complete for {slot_label}")
 
             # ------------------------------------------------------------------
-            # Return to starting position
+            # Return to starting position at focused Z
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Returning to start position for {slot_label}")
-            self.motion.move_to_position(start_pos, wait=True)
+            if axis == "y":
+                focused_start_pos = Position(x=start_pos.x, y=main_start_nm, z=focused_z_nm)
+            else:
+                focused_start_pos = Position(x=main_start_nm, y=start_pos.y, z=focused_z_nm)
+            self.motion.move_to_position(focused_start_pos, wait=True)
             time.sleep(_SETTLE_S)
 
             yield
@@ -341,12 +450,16 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
             # ------------------------------------------------------------------
             # Reverse sweep: starting position → background detected
+            # The starting position itself is skipped — it was already imaged
+            # at the top of the forward sweep.
+            # Phase 5-6 (last 1/6 of slot share).
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Beginning reverse sweep for {slot_label}")
 
             reverse_direction = -direction
             current_main_nm = main_start_nm
+            reverse_span_nm = max(1, axis_max_nm)
 
             while True:
                 if self._check_stop():
@@ -362,21 +475,18 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     break
 
                 if axis == "y":
-                    target = Position(x=perp_pos, y=next_main_nm, z=tca.starting_height_nm)
+                    target = Position(x=perp_pos, y=next_main_nm, z=focused_z_nm)
                 else:
-                    target = Position(x=next_main_nm, y=perp_pos, z=tca.starting_height_nm)
+                    target = Position(x=next_main_nm, y=perp_pos, z=focused_z_nm)
 
                 self.motion.move_to_position(target, wait=True)
                 current_main_nm = next_main_nm
-
-                info(f"[TreeCoreImaging] Reverse sweep position: {current_main_nm} nm")
 
                 frame = capture_still_frame(ctx.camera_manager, timeout_s=self._capture_timeout_s)
                 if frame is None:
                     warning("[TreeCoreImaging] Frame capture failed during reverse sweep — stopping sweep")
                     break
 
-                h, w = frame.shape[:2]
                 bg_settings = mv.settings.background
                 is_bg, val_median, val_std = is_background_frame(
                     frame,
@@ -396,11 +506,29 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     info(f"[TreeCoreImaging] Background detected — reverse sweep complete for {slot_label}")
                     break
 
+                info(f"[TreeCoreImaging] Reverse sweep — fine autofocus at {current_main_nm} nm")
+                sweep_frac = abs(current_main_nm - main_start_nm) / reverse_span_nm
+                # Reverse sweep occupies phase 5–6 (last 1/6 of slot share)
+                slot_frac = 5 / 6 + sweep_frac * (1 / 6)
+                self._set_status(
+                    f"Reverse sweep — {slot_label}  pos={current_main_nm / _NM_PER_MM:.3f} mm",
+                    _slot_pct(slot_iter, slot_frac),
+                    100,
+                )
+                focused_z_nm = _run_autofocus_fine(self.motion)
+
+                if self._check_stop():
+                    return
+
+                actual_pos = self.motion.get_position()
+                info(f"[TreeCoreImaging] Reverse sweep position: {current_main_nm} nm  Z={focused_z_nm / _NM_PER_MM:.3f} mm")
+                _capture_and_save(slot_folder, actual_pos)
+
                 yield
 
             yield
 
-        self._set_status("Complete", total_steps, total_steps)
+        self._set_status("Complete", 100, 100)
         info("[TreeCoreImaging] Imaging run complete")
 
         yield
