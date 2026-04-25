@@ -46,6 +46,7 @@ from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
 
 if TYPE_CHECKING:
+    from post_processing.post_processing_manager import PostProcessingManager
     from post_processing.routines.focus_stack_routine import FocusStackConfig
 
 _NM_PER_MM = 1_000_000
@@ -115,6 +116,7 @@ class ZStackScan(AutomationRoutine):
     def steps(self) -> Generator[None, None, None]:
         ctx = get_app_context()
         camera = ctx.camera
+        post_processing = ctx.post_processing
 
         self._set_activity("Initialising")
 
@@ -260,10 +262,9 @@ class ZStackScan(AutomationRoutine):
         # Optional focus stacking
         # ------------------------------------------------------------------
         if self._focus_stack_config is not None and n_captured > 0:
-            self._run_focus_stack(ctx)
+            self._run_focus_stack(post_processing)
 
-    def _run_focus_stack(self, ctx) -> None:
-        post_processing = ctx.post_processing
+    def _run_focus_stack(self, post_processing: PostProcessingManager) -> None:
         if post_processing is None:
             error("[ZStackScan] No post_processing manager available — skipping focus stack")
             return

@@ -925,10 +925,9 @@ class MachineVisionSettingsWidget(QWidget):
 
     def _on_dpi_apply_clicked(self) -> None:
         dpi = self._dpi_spin.value()
-        s = self._mv._copy_settings()
-        s.dpi = dpi
+        self._mv.settings.dpi = dpi
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mv.save_settings()
         info(f"[MachineVisionSettings] DPI set to {dpi:.2f}")
@@ -936,10 +935,9 @@ class MachineVisionSettingsWidget(QWidget):
         self._set_dpi_status(f"DPI set to {dpi:.2f}")
 
     def _on_dpi_clear_clicked(self) -> None:
-        s = self._mv._copy_settings()
-        s.dpi = None
+        self._mv.settings.dpi = None
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mv.save_settings()
         info("[MachineVisionSettings] DPI cleared")
@@ -947,10 +945,9 @@ class MachineVisionSettingsWidget(QWidget):
         self._set_dpi_status("DPI cleared.")
 
     def _on_cam_space_clear_clicked(self) -> None:
-        s = self._mv._copy_settings()
-        s.camera_calibration.calibration = None
+        self._mv.settings.camera_calibration.calibration = None
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mv.save_settings()
         info("[MachineVisionSettings] Camera space calibration cleared")
@@ -971,10 +968,9 @@ class MachineVisionSettingsWidget(QWidget):
         self._scale_cal_status.setVisible(bool(text))
 
     def _on_scale_cal_clear_clicked(self) -> None:
-        s = self._mv._copy_settings()
-        s.inspect_calibration.last_calibrated = None
+        self._mv.settings.inspect_calibration.last_calibrated = None
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mv.save_settings()
         info("[MachineVisionSettings] Scale calibration cleared")
@@ -1479,10 +1475,9 @@ class MachineVisionSettingsWidget(QWidget):
     def _on_method_combo_changed(self, index: int) -> None:
         method = self._method_combo.itemData(index)
         self._method_stack.setCurrentIndex(0 if method == FOCUS_METHOD_LAPLACIAN else 1)
-        s = self._mv._copy_settings()
-        s.focus.method = method
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.settings.focus.method = method
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         orange = self._check_modified("method", method)
         self._apply_orange(self._method_combo, orange)
@@ -1500,11 +1495,10 @@ class MachineVisionSettingsWidget(QWidget):
 
     def _on_field_changed(self, section: str, field: str, value: object) -> None:
         """Apply the changed field to the manager and update orange state."""
-        s = self._mv._copy_settings()
-        target = s.focus.tenengrad if section == "tenengrad" else s.focus.laplacian
+        target = self._mv.settings.focus.tenengrad if section == "tenengrad" else self._mv.settings.focus.laplacian
         setattr(target, field, value)
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
 
         panel = self._tenengrad_panel if section == "tenengrad" else self._laplacian_panel
@@ -1513,38 +1507,34 @@ class MachineVisionSettingsWidget(QWidget):
 
     def _on_red_mark_changed(self, field: str, value: object) -> None:
         """Apply a changed red-mark field to the manager and update orange state."""
-        s = self._mv._copy_settings()
-        setattr(s.red_mark, field, value)
+        setattr(self._mv.settings.red_mark, field, value)
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mark_field(f"red_mark.{field}", field, self._red_mark_panel.widgets, value)
         self._set_unsaved(True)
 
     def _on_background_changed(self, field: str, value: object) -> None:
         """Apply a changed background field to the manager and update orange state."""
-        s = self._mv._copy_settings()
-        setattr(s.background, field, value)
+        setattr(self._mv.settings.background, field, value)
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mark_field(f"background.{field}", field, self._background_panel.widgets, value)
         self._set_unsaved(True)
 
     def _on_focus_region_changed(self, field: str, value: object) -> None:
         """Apply a changed focus-region field to the manager and update orange state."""
-        s = self._mv._copy_settings()
-        setattr(s.focus.focus_region, field, value)
+        setattr(self._mv.settings.focus.focus_region, field, value)
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mark_field(f"focus_region.{field}", field, self._focus_region_panel.widgets, value)
         self._set_unsaved(True)
 
     def _on_inspect_calibration_changed(self, mode: str, field: str, value: object) -> None:
         """Apply a changed inspect-calibration field to the manager and update orange state."""
-        s = self._mv._copy_settings()
-        mode_settings = s.inspect_calibration.preview if mode == "preview" else s.inspect_calibration.snap
+        mode_settings = self._mv.settings.inspect_calibration.preview if mode == "preview" else self._mv.settings.inspect_calibration.snap
         if field == "downsample_none":
             mode_settings.downsample = None if value else (
                 (self._inspect_preview_panel if mode == "preview" else self._inspect_snap_panel)
@@ -1553,7 +1543,7 @@ class MachineVisionSettingsWidget(QWidget):
         else:
             setattr(mode_settings, field, value)
         self._applying_settings = True
-        self._mv.apply_settings(s)
+        self._mv.notify_settings_changed()
         self._applying_settings = False
         saved_key = f"inspect_calibration.{mode}.{field if field != 'downsample_none' else 'downsample'}"
         panel = self._inspect_preview_panel if mode == "preview" else self._inspect_snap_panel
@@ -1594,18 +1584,15 @@ class MachineVisionSettingsWidget(QWidget):
         if motion is None or not motion.is_ready():
             self._set_inspection_status("Motion controller not ready.")
             return
-        try:
-            pos = motion.get_position()
-        except Exception as exc:
-            error(f"MachineVisionSettings: get_position failed — {exc}")
+        pos = motion.get_position()
+        if pos is None:
             self._set_inspection_status("Could not read stage position.")
             return
-        s = self._mv._copy_settings()
-        s.inspection_calibration_position.x_nm = pos.x
-        s.inspection_calibration_position.y_nm = pos.y
-        s.inspection_calibration_position.z_nm = pos.z
-        s.inspection_calibration_position.is_set = True
-        self._mv.apply_settings(s)
+        icp = self._mv.settings.inspection_calibration_position
+        icp.x_nm = pos.x
+        icp.y_nm = pos.y
+        icp.z_nm = pos.z
+        icp.is_set = True
         self._mv.save_settings()
         info(
             f"[MachineVisionSettings] Inspection position saved: "
@@ -1646,12 +1633,11 @@ class MachineVisionSettingsWidget(QWidget):
         motion = ctx.motion
         if motion is None:
             return
-        s = self._mv._copy_settings()
-        s.inspection_calibration_position.x_nm = 0
-        s.inspection_calibration_position.y_nm = 0
-        s.inspection_calibration_position.z_nm = 0
-        s.inspection_calibration_position.is_set = False
-        self._mv.apply_settings(s)
+        icp = self._mv.settings.inspection_calibration_position
+        icp.x_nm = 0
+        icp.y_nm = 0
+        icp.z_nm = 0
+        icp.is_set = False
         self._mv.save_settings()
         info("[MachineVisionSettings] Inspection calibration position cleared")
         self._refresh_inspection_position_display()

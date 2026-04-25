@@ -423,19 +423,14 @@ class DpiCalibrationStepsWidget(QWidget):
         if motion is None or not motion.is_ready():
             self._set_status("Motion controller not ready.")
             return
-        try:
-            pos = motion.get_position()
-        except Exception as exc:
-            error(f"DpiCalibration: get_position failed — {exc}")
-            self._set_status("Could not read stage position.")
-            return
+
+        pos = motion.get_position()
+        
         mv = ctx.machine_vision
-        s = mv._copy_settings()
-        s.inspection_calibration_position.x_nm = pos.x
-        s.inspection_calibration_position.y_nm = pos.y
-        s.inspection_calibration_position.z_nm = pos.z
-        s.inspection_calibration_position.is_set = True
-        mv.apply_settings(s)
+        mv.settings.inspection_calibration_position.x_nm = pos.x
+        mv.settings.inspection_calibration_position.y_nm = pos.y
+        mv.settings.inspection_calibration_position.z_nm = pos.z
+        mv.settings.inspection_calibration_position.is_set = True
         mv.save_settings()
         info(
             f"[DpiCalibration] Position saved:"
@@ -475,16 +470,11 @@ class DpiCalibrationStepsWidget(QWidget):
         )
 
     def _on_clear_position_clicked(self) -> None:
-        ctx = get_app_context()
-        mv = ctx.machine_vision
-        if mv is None:
-            return
-        s = mv._copy_settings()
-        s.inspection_calibration_position.x_nm = 0
-        s.inspection_calibration_position.y_nm = 0
-        s.inspection_calibration_position.z_nm = 0
-        s.inspection_calibration_position.is_set = False
-        mv.apply_settings(s)
+        mv = get_app_context().machine_vision
+        mv.settings.inspection_calibration_position.x_nm = 0
+        mv.settings.inspection_calibration_position.y_nm = 0
+        mv.settings.inspection_calibration_position.z_nm = 0
+        mv.settings.inspection_calibration_position.is_set = False
         mv.save_settings()
         info("[DpiCalibration] Calibration position cleared")
         self._refresh_position_display()
@@ -564,9 +554,7 @@ class DpiCalibrationStepsWidget(QWidget):
             if succeeded:
                 self._capture_complete = True
                 mv = get_app_context().machine_vision
-                s = mv._copy_settings()
-                s.inspect_calibration.last_calibrated = datetime.now(tz=timezone.utc).isoformat()
-                mv.apply_settings(s)
+                mv.settings.inspect_calibration.last_calibrated = datetime.now(tz=timezone.utc).isoformat()
                 mv.save_settings()
                 self._next_step()
             else:

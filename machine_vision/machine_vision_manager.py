@@ -22,18 +22,8 @@ from machine_vision.algorithms.calibration_bar_detection import InspectCalibrati
 from machine_vision.algorithms.red_mark_detection import RedMarkDetection, RedMarkDetectionResult
 from machine_vision.algorithms.background_detection import BackgroundDetection, BackgroundDetectionResult
 from machine_vision.machine_vision_config import (
-    CameraCalibrationSettings,
-    FocusDetectionSettings,
-    FocusRegionSettings,
-    InspectCalibrationModeSettings,
-    InspectCalibrationSettings,
-    InspectionCalibrationPosition,
-    LaplacianSettings,
     MachineVisionSettings,
     MachineVisionSettingsManager,
-    RedMarkDetectionSettings,
-    BackgroundDetectionSettings,
-    TenengradSettings,
 )
 
 _T = TypeVar("_T")
@@ -347,28 +337,16 @@ class MachineVisionManager(QObject):
 
     @property
     def settings(self) -> MachineVisionSettings:
+        """
+        The live settings object shared with all worker algorithms.
+
+        Mutate fields directly, then call ``notify_settings_changed()`` if the
+        UI needs to refresh, and ``save_settings()`` to persist to disk.
+        """
         return self._settings
 
-    def apply_settings(self, settings: MachineVisionSettings) -> None:
-        """
-        Apply new settings values by updating the existing settings object in-place.
-
-        All algorithms hold a reference to the same ``MachineVisionSettings``
-        instance and read from it at ``process()`` time, so in-place mutation
-        is sufficient — no reference update or fan-out is needed.
-        """
-        try:
-            settings.validate()
-        except ValueError as exc:
-            error(f"MachineVisionManager: invalid settings — {exc}")
-            return
-        self._settings.dpi = settings.dpi
-        self._settings.focus = settings.focus
-        self._settings.camera_calibration = settings.camera_calibration
-        self._settings.inspect_calibration = settings.inspect_calibration
-        self._settings.inspection_calibration_position = settings.inspection_calibration_position
-        self._settings.red_mark = settings.red_mark
-        self._settings.background = settings.background
+    def notify_settings_changed(self) -> None:
+        """Emit ``settings_changed`` so UI pages can refresh after a direct mutation."""
         self.settings_changed.emit()
 
     def save_settings(self) -> None:
@@ -689,87 +667,3 @@ class MachineVisionManager(QObject):
         except Exception as exc:
             error(f"MachineVisionManager: failed to load settings — {exc}; using defaults")
             return MachineVisionSettings()
-
-    def _copy_settings(self) -> MachineVisionSettings:
-        """Return a deep copy of the current settings for mutation."""
-        f = self._settings.focus
-        t, lap = f.tenengrad, f.laplacian
-        fr = f.focus_region
-        cc = self._settings.camera_calibration
-        rm = self._settings.red_mark
-        bg = self._settings.background
-        return MachineVisionSettings(
-            dpi=self._settings.dpi,
-            focus=FocusDetectionSettings(
-                method=f.method,
-                tenengrad=TenengradSettings(
-                    kernel_size=t.kernel_size,
-                    radius=t.radius,
-                    threshold=t.threshold,
-                    half_resolution=t.half_resolution,
-                    overlay_alpha=t.overlay_alpha,
-                    score_ceiling=t.score_ceiling,
-                    auto_ceiling=t.auto_ceiling,
-                ),
-                laplacian=LaplacianSettings(
-                    window_size=lap.window_size,
-                    radius=lap.radius,
-                    threshold=lap.threshold,
-                    half_resolution=lap.half_resolution,
-                    overlay_alpha=lap.overlay_alpha,
-                    score_ceiling=lap.score_ceiling,
-                    auto_ceiling=lap.auto_ceiling,
-                ),
-                focus_region=FocusRegionSettings(
-                    enabled=fr.enabled,
-                    left=fr.left,
-                    right=fr.right,
-                    top=fr.top,
-                    bottom=fr.bottom,
-                ),
-            ),
-            camera_calibration=CameraCalibrationSettings(
-                move_x_ticks=cc.move_x_ticks,
-                move_y_ticks=cc.move_y_ticks,
-                calibration=cc.calibration,
-            ),
-            inspect_calibration=InspectCalibrationSettings(
-                preview=InspectCalibrationModeSettings(
-                    downsample=self._settings.inspect_calibration.preview.downsample,
-                    tick_min_length=self._settings.inspect_calibration.preview.tick_min_length,
-                ),
-                snap=InspectCalibrationModeSettings(
-                    downsample=self._settings.inspect_calibration.snap.downsample,
-                    tick_min_length=self._settings.inspect_calibration.snap.tick_min_length,
-                ),
-                last_calibrated=self._settings.inspect_calibration.last_calibrated,
-            ),
-            inspection_calibration_position=InspectionCalibrationPosition(
-                is_set=self._settings.inspection_calibration_position.is_set,
-                x_nm=self._settings.inspection_calibration_position.x_nm,
-                y_nm=self._settings.inspection_calibration_position.y_nm,
-                z_nm=self._settings.inspection_calibration_position.z_nm,
-            ),
-            red_mark=RedMarkDetectionSettings(
-                scale=rm.scale,
-                open_kernel_size=rm.open_kernel_size,
-                min_area=rm.min_area,
-                max_aspect_ratio=rm.max_aspect_ratio,
-                min_area_fraction=rm.min_area_fraction,
-                hue_low=rm.hue_low,
-                hue_high=rm.hue_high,
-                sat_min=rm.sat_min,
-                val_min=rm.val_min,
-                smoothing_alpha=rm.smoothing_alpha,
-                deadband_px=rm.deadband_px,
-                max_step_px=rm.max_step_px,
-                jump_threshold_px=rm.jump_threshold_px,
-                side_cluster_fraction=rm.side_cluster_fraction,
-                side_cluster_margin=rm.side_cluster_margin,
-            ),
-            background=BackgroundDetectionSettings(
-                val_median_max=bg.val_median_max,
-                val_std_max=bg.val_std_max,
-                scale=bg.scale,
-            ),
-        )

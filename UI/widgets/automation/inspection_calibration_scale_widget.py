@@ -110,9 +110,6 @@ class InspectionCalibrationScaleWidget(QWidget):
         super().__init__(parent)
         self._routine: InspectionCalibrationScaleRoutine | None = None
         self._setup_ui()
-        ctx = get_app_context()
-        if ctx is not None and ctx.machine_vision is not None:
-            ctx.machine_vision.settings_changed.connect(self._on_settings_changed)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -242,6 +239,7 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._refresh_position_display()
         self._refresh_calibration_info()
         self._refresh_inspection_calibration_state()
+        get_app_context().machine_vision.settings_changed.connect(self._on_settings_changed)
 
     # ------------------------------------------------------------------
     # showEvent — refresh calibration guard on tab switch
@@ -265,10 +263,7 @@ class InspectionCalibrationScaleWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _is_inspection_calibrated(self) -> bool:
-        ctx = get_app_context()
-        if ctx is None or ctx.machine_vision is None:
-            return False
-        return bool(ctx.machine_vision.settings.inspect_calibration.last_calibrated)
+        return bool(get_app_context().machine_vision.settings.inspect_calibration.last_calibrated)
 
     def _refresh_inspection_calibration_state(self) -> None:
         calibrated = self._is_inspection_calibrated()
@@ -276,26 +271,17 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._start_btn.setEnabled(calibrated)
 
     def _get_motion(self):
-        ctx = get_app_context()
-        return ctx.motion if ctx is not None else None
+        return get_app_context().motion
 
     def _get_saved_position(self) -> tuple[int, int, int] | None:
         """Return the saved (x_nm, y_nm, z_nm) from machine vision settings, or None."""
-        ctx = get_app_context()
-        if ctx is None or ctx.machine_vision is None:
-            return None
-        icp = ctx.machine_vision.settings.inspection_calibration_position
+        icp = get_app_context().machine_vision.settings.inspection_calibration_position
         if not icp.is_set:
             return None
         return icp.x_nm, icp.y_nm, icp.z_nm
 
     def _refresh_calibration_info(self) -> None:
-        ctx = get_app_context()
-        if ctx is None or ctx.machine_vision is None:
-            self._last_calibrated_label.setText("Last calibrated: —")
-            self._dpi_label.setText("DPI: —")
-            return
-        s = ctx.machine_vision.settings
+        s = get_app_context().machine_vision.settings
         last_cal = s.inspect_calibration.last_calibrated
         if last_cal:
             try:
@@ -344,14 +330,11 @@ class InspectionCalibrationScaleWidget(QWidget):
         
         pos = motion.get_position()
 
-        ctx = get_app_context()
-        mv = ctx.machine_vision
-        s = mv._copy_settings()
-        s.inspection_calibration_position.x_nm = pos.x
-        s.inspection_calibration_position.y_nm = pos.y
-        s.inspection_calibration_position.z_nm = pos.z
-        s.inspection_calibration_position.is_set = True
-        mv.apply_settings(s)
+        mv = get_app_context().machine_vision
+        mv.settings.inspection_calibration_position.x_nm = pos.x
+        mv.settings.inspection_calibration_position.y_nm = pos.y
+        mv.settings.inspection_calibration_position.z_nm = pos.z
+        mv.settings.inspection_calibration_position.is_set = True
         mv.save_settings()
         info(
             f"[CalibrationScaleWidget] Start position saved:"
@@ -387,16 +370,11 @@ class InspectionCalibrationScaleWidget(QWidget):
         )
 
     def _on_clear_position_clicked(self) -> None:
-        ctx = get_app_context()
-        mv = ctx.machine_vision
-        if mv is None:
-            return
-        s = mv._copy_settings()
-        s.inspection_calibration_position.x_nm = 0
-        s.inspection_calibration_position.y_nm = 0
-        s.inspection_calibration_position.z_nm = 0
-        s.inspection_calibration_position.is_set = False
-        mv.apply_settings(s)
+        mv = get_app_context().machine_vision
+        mv.settings.inspection_calibration_position.x_nm = 0
+        mv.settings.inspection_calibration_position.y_nm = 0
+        mv.settings.inspection_calibration_position.z_nm = 0
+        mv.settings.inspection_calibration_position.is_set = False
         mv.save_settings()
         info("[CalibrationScaleWidget] Start position cleared")
         self._refresh_position_display()

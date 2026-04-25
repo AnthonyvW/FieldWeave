@@ -469,12 +469,12 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
                 f" size={image_width}x{image_height}"
                 f" output={output_path}"
             )
-            s = ctx.machine_vision._copy_settings()
-            s.inspect_calibration.last_calibrated = (
+
+            mv.settings.inspect_calibration.last_calibrated = (
                 datetime.now(timezone.utc).isoformat()
             )
-            ctx.machine_vision.apply_settings(s)
-            ctx.machine_vision.save_settings()
+            mv.save_settings()
+            mv.notify_settings_changed()
             self._set_result(
                 success=True,
                 dpi=dpi,

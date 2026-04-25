@@ -549,6 +549,12 @@ class FocusStackWidget(QWidget):
         if self._z_start is None or self._z_end is None:
             return
 
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.is_ready():
+            error("FocusStackWidget: motion controller not ready — cannot start scan")
+            return
+
         output_folder = self._resolve_output_folder()
         if not OutputFolderWidget.confirm_if_exists(output_folder, self):
             return
@@ -567,26 +573,21 @@ class FocusStackWidget(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        ctx = get_app_context()
-        motion = ctx.motion
-        if motion is None or not motion.is_ready():
-            error("FocusStackWidget: motion controller not ready — cannot start scan")
+        if ctx.motion.routine_running:
+            error("FocusStackWidget: a routine is already running")
+            ctx.toast.error("A routine is already running.")
             return
 
         _NM_PER_MM = 1_000_000
-        try:
-            self._routine = ZStackScan(
-                motion=motion,
-                z_start_nm=round(self._z_start * _NM_PER_MM),
-                z_end_nm=round(self._z_end * _NM_PER_MM),
-                step_nm=round(step_mm * _NM_PER_MM),
-                output_folder=output_folder,
-                focus_stack_config=focus_stack_config,
-            )
-            motion.start_routine(self._routine)
-        except Exception as exc:
-            error(f"FocusStackWidget: failed to start routine — {exc}")
-            return
+        self._routine = ZStackScan(
+            motion=motion,
+            z_start_nm=round(self._z_start * _NM_PER_MM),
+            z_end_nm=round(self._z_end * _NM_PER_MM),
+            step_nm=round(step_mm * _NM_PER_MM),
+            output_folder=output_folder,
+            focus_stack_config=focus_stack_config,
+        )
+        motion.start_routine(self._routine)
 
         self._last_output_folder = output_folder
         if focus_stack_config is not None:

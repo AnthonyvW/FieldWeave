@@ -207,25 +207,36 @@ def _binarize(gray: np.ndarray) -> np.ndarray:
     return binary
 
 
-def _longest_run(row: np.ndarray) -> int:
-    max_run = cur_run = 0
-    for px in row:
-        if px > 0:
-            cur_run += 1
-            max_run = max(max_run, cur_run)
-        else:
-            cur_run = 0
-    return max_run
+def _longest_runs(matrix: np.ndarray) -> np.ndarray:
+    """Return the longest contiguous non-zero run for each row of *matrix*.
+
+    Uses vectorised diff operations so no Python loop runs over individual
+    pixels, keeping the GIL free for the duration.
+    """
+    h, w = matrix.shape
+    mask = matrix > 0
+    # Pad each row with a False sentinel on each side so diff captures runs
+    # that start at column 0 or end at column w-1.
+    padded = np.concatenate(
+        [np.zeros((h, 1), dtype=bool), mask, np.zeros((h, 1), dtype=bool)],
+        axis=1,
+    )
+    diff = np.diff(padded.astype(np.int8), axis=1)
+    runs = np.zeros(h, dtype=np.int32)
+    for r in range(h):
+        starts = np.where(diff[r] == 1)[0]
+        ends = np.where(diff[r] == -1)[0]
+        if starts.size:
+            runs[r] = int((ends - starts).max())
+    return runs
 
 
 def _find_bar_axis(binary: np.ndarray) -> tuple[str, int]:
-    row_best = max(_longest_run(binary[r]) for r in range(binary.shape[0]))
-    col_best = max(_longest_run(binary[:, c]) for c in range(binary.shape[1]))
-    if row_best >= col_best:
-        best = max(range(binary.shape[0]), key=lambda r: _longest_run(binary[r]))
-        return "horizontal", best
-    best = max(range(binary.shape[1]), key=lambda c: _longest_run(binary[:, c]))
-    return "vertical", best
+    row_runs = _longest_runs(binary)
+    col_runs = _longest_runs(binary.T)
+    if row_runs.max() >= col_runs.max():
+        return "horizontal", int(row_runs.argmax())
+    return "vertical", int(col_runs.argmax())
 
 
 def _text_mass_above_vs_below(
@@ -469,14 +480,13 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         debug(f"StitchAndMeasureRoutine: panorama saved to {output_path}")
 
         dpi = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
-
         if dpi is not None:
             ctx = get_app_context()
-            if ctx is not None and ctx.machine_vision is not None:
-                s = ctx.machine_vision._copy_settings()
-                s.dpi = dpi
-                ctx.machine_vision.apply_settings(s)
-                debug(f"StitchAndMeasureRoutine: DPI {dpi:.2f} written to machine vision settings")
+            mv = ctx.machine_vision
+            mv.settings.dpi = dpi
+            mv.save_settings()
+            mv.notify_settings_changed()
+            debug(f"StitchAndMeasureRoutine: DPI {dpi:.2f} updated and saved")
 
         debug_path: str | None = None
         if sm.save_debug_overlay and dpi is not None:
