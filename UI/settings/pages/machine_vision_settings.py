@@ -19,8 +19,9 @@ Design
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QEvent, Qt, Slot
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -44,9 +45,7 @@ from common.logger import info, error
 from machine_vision.machine_vision_config import (
     BackgroundDetectionSettings,
     FocusRegionSettings,
-    InspectCalibrationModeSettings,
     InspectCalibrationSettings,
-    InspectionCalibrationPosition,
     LaplacianSettings,
     MachineVisionSettings,
     RedMarkDetectionSettings,
@@ -55,9 +54,40 @@ from machine_vision.machine_vision_config import (
     FOCUS_METHOD_LAPLACIAN,
 )
 
+from motion.models import Position
+
 _ORANGE = "#FFA500"
 _GREY = "#aaaaaa"
 _NM_PER_MM = 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# Wheel-scroll guard
+# ---------------------------------------------------------------------------
+
+def _apply_no_scroll_to_panel(panel: QWidget) -> None:
+    """Apply _ignore_scroll_when_unfocused to all input children of *panel*."""
+    for child in panel.findChildren(QAbstractSpinBox):
+        _ignore_scroll_when_unfocused(child)
+    for child in panel.findChildren(QComboBox):
+        _ignore_scroll_when_unfocused(child)
+
+
+def _ignore_scroll_when_unfocused(widget: QWidget) -> None:
+    """
+    Install an event filter on *widget* that swallows wheel events unless the
+    widget already has keyboard focus.  This prevents accidentally changing
+    spinbox / combobox / slider values while scrolling the parent scroll area.
+    """
+    class _Filter(QWidget):
+        def eventFilter(self, obj: QWidget, event: QEvent) -> bool:
+            if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+                return True
+            return False
+
+    filt = _Filter(widget)
+    widget.installEventFilter(filt)
+    widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +140,9 @@ def _make_float_row(
     spin.valueChanged.connect(lambda v: (slider.blockSignals(True), slider.setValue(_to_slider(v)), slider.blockSignals(False)))
     slider.valueChanged.connect(lambda p: (spin.blockSignals(True), spin.setValue(_to_spin(p)), spin.blockSignals(False)))
 
+    _ignore_scroll_when_unfocused(slider)
+    _ignore_scroll_when_unfocused(spin)
+
     row.addWidget(slider)
     row.addWidget(spin)
 
@@ -150,6 +183,8 @@ def _make_ceiling_row(
         lambda s: spin.setEnabled(s != Qt.CheckState.Checked)
     )
 
+    _ignore_scroll_when_unfocused(spin)
+
     row.addWidget(spin)
     row.addWidget(auto_check)
     row.addWidget(reset_btn)
@@ -171,6 +206,7 @@ class _TenengradPanel(QWidget):
         super().__init__()
         self._w: dict[str, QWidget] = {}
         self._build()
+        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
@@ -236,6 +272,7 @@ class _LaplacianPanel(QWidget):
         super().__init__()
         self._w: dict[str, QWidget] = {}
         self._build()
+        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
@@ -312,6 +349,7 @@ class _FocusRegionPanel(QWidget):
         super().__init__()
         self._w: dict[str, QWidget] = {}
         self._build()
+        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
@@ -376,6 +414,7 @@ class _InspectCalibrationModePanel(QWidget):
         self._label = label
         self._w: dict[str, QWidget] = {}
         self._build()
+        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
@@ -421,7 +460,7 @@ class _InspectCalibrationModePanel(QWidget):
         tick_spin.setSingleStep(10)
         tick_spin.setFixedWidth(90)
         tick_spin.setToolTip(
-            f"Minimum perpendicular pixel run (full-resolution px) required to\n"
+            "Minimum perpendicular pixel run (full-resolution px) required to\n"
             "count a candidate as a tick mark. Scaled by downsample internally."
         )
         form.addRow("Min tick length:", tick_spin)
@@ -443,6 +482,7 @@ class _RedMarkPanel(QWidget):
         super().__init__()
         self._w: dict[str, QWidget] = {}
         self._build()
+        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
@@ -621,6 +661,7 @@ class _BackgroundPanel(QWidget):
         super().__init__()
         self._w: dict[str, QWidget] = {}
         self._build()
+        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
@@ -770,6 +811,7 @@ class MachineVisionSettingsWidget(QWidget):
 
         self._refresh_inspection_position_display()
         self._refresh_camera_calibration_display()
+        self._refresh_scale_calibration_display()
 
     def _build_camera_calibration_group(self) -> QGroupBox:
         group = QGroupBox("Camera Calibration")
@@ -797,6 +839,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._dpi_spin.setSingleStep(10.0)
         self._dpi_spin.setFixedWidth(110)
         self._dpi_spin.setToolTip("Enter a DPI value to store as the known optical resolution.")
+        _ignore_scroll_when_unfocused(self._dpi_spin)
 
         self._dpi_apply_btn = QPushButton("Set DPI")
         self._dpi_apply_btn.setMaximumWidth(80)
@@ -862,6 +905,7 @@ class MachineVisionSettingsWidget(QWidget):
             self._dpi_spin.setValue(dpi)
         else:
             self._dpi_label.setText("Current DPI: Not set")
+            self._dpi_spin.setValue(self._dpi_spin.minimum())
 
         cal = settings.camera_calibration.calibration
         if cal is not None:
@@ -912,6 +956,30 @@ class MachineVisionSettingsWidget(QWidget):
         info("[MachineVisionSettings] Camera space calibration cleared")
         self._refresh_camera_calibration_display()
         self._set_cam_space_status("Camera space calibration cleared.")
+
+    def _refresh_scale_calibration_display(self) -> None:
+        last = self._mv.settings.inspect_calibration.last_calibrated
+        if last:
+            self._scale_cal_label.setText(f"Last calibrated: {last}")
+            self._scale_cal_clear_btn.setEnabled(True)
+        else:
+            self._scale_cal_label.setText("Last calibrated: Not set")
+            self._scale_cal_clear_btn.setEnabled(False)
+
+    def _set_scale_cal_status(self, text: str) -> None:
+        self._scale_cal_status.setText(text)
+        self._scale_cal_status.setVisible(bool(text))
+
+    def _on_scale_cal_clear_clicked(self) -> None:
+        s = self._mv._copy_settings()
+        s.inspect_calibration.last_calibrated = None
+        self._applying_settings = True
+        self._mv.apply_settings(s)
+        self._applying_settings = False
+        self._mv.save_settings()
+        info("[MachineVisionSettings] Scale calibration cleared")
+        self._refresh_scale_calibration_display()
+        self._set_scale_cal_status("Scale calibration cleared.")
 
     def _build_inspect_calibration_group(self) -> QGroupBox:
         group = QGroupBox("Inspection Calibration")
@@ -979,6 +1047,39 @@ class MachineVisionSettingsWidget(QWidget):
         position_vbox.addWidget(self._inspection_pos_status)
 
         vbox.addWidget(position_box)
+
+        # --- Scale Calibration sub-box ---
+        scale_cal_box = QGroupBox("Scale Calibration")
+        scale_cal_box.setToolTip(
+            "The accepted inspection calibration result.\n"
+            "Records when the calibration bar was last successfully measured."
+        )
+        scale_cal_vbox = QVBoxLayout(scale_cal_box)
+        scale_cal_vbox.setContentsMargins(6, 6, 6, 6)
+        scale_cal_vbox.setSpacing(6)
+
+        self._scale_cal_label = QLabel("Last calibrated: Not set")
+        self._scale_cal_label.setObjectName("ScaleCalLabel")
+        scale_cal_vbox.addWidget(self._scale_cal_label)
+
+        scale_cal_btn_row = QHBoxLayout()
+        scale_cal_btn_row.setSpacing(6)
+
+        self._scale_cal_clear_btn = QPushButton("Clear Calibration")
+        self._scale_cal_clear_btn.setToolTip("Remove the saved inspection scale calibration result.")
+        self._scale_cal_clear_btn.setEnabled(False)
+        self._scale_cal_clear_btn.clicked.connect(self._on_scale_cal_clear_clicked)
+        scale_cal_btn_row.addWidget(self._scale_cal_clear_btn)
+        scale_cal_btn_row.addStretch()
+        scale_cal_vbox.addLayout(scale_cal_btn_row)
+
+        self._scale_cal_status = QLabel("")
+        self._scale_cal_status.setObjectName("ScaleCalStatusLabel")
+        self._scale_cal_status.setWordWrap(False)
+        self._scale_cal_status.hide()
+        scale_cal_vbox.addWidget(self._scale_cal_status)
+
+        vbox.addWidget(scale_cal_box)
 
         return group
 
@@ -1525,7 +1626,6 @@ class MachineVisionSettingsWidget(QWidget):
         if not icp.is_set:
             self._set_inspection_status("No inspection position saved.")
             return
-        from motion.models import Position
         try:
             motion.move_to_position(
                 Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm),
@@ -1569,6 +1669,7 @@ class MachineVisionSettingsWidget(QWidget):
             return
         self._populate_from_settings(self._mv.settings)
         self._refresh_camera_calibration_display()
+        self._refresh_scale_calibration_display()
         self._set_unsaved(True)
 
     # ------------------------------------------------------------------

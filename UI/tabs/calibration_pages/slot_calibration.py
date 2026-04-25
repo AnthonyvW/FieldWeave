@@ -19,8 +19,9 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.navigation_widget import NavigationWidget
 from common.app_context import get_app_context, open_settings
-from common.logger import error, info
+from common.logger import info
 from motion.models import Position
+from motion.motion_config import TreeCoreSlot
 
 from motion.routines.slot_calibration_routine import SlotCalibrationRoutine  # noqa: PLC0415
 
@@ -90,6 +91,9 @@ class SlotCalibrationWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._description_label: QLabel
+        self._warning_label: QLabel
+        self._start_btn: QPushButton
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -112,7 +116,7 @@ class SlotCalibrationWidget(QWidget):
             "Camera Space Calibration must be completed before running Slot Calibration."
         )
         self._warning_label.setWordWrap(True)
-        self._warning_label.setObjectName("CalWarningLabel")
+        self._warning_label.setObjectName("CalErrorLabel")
         self._warning_label.hide()
         layout.addWidget(self._warning_label)
 
@@ -153,11 +157,40 @@ class SlotCalibrationStepsWidget(QWidget):
         self._routine = None
         self._latest_activity: str = ""
         self._original_red_mark: bool | None = None
-        # Pending in-memory edits for step 7; written to tca on finish.
         self._pending_start_height_nm: int | None = None
         self._pending_start_offset_nm: int | None = None
         self._pending_slot_positions: dict[int, int] = {}
         self._pending_slot_offsets: dict[int, int] = {}
+        # Widgets assigned in _build_ui / helper build methods
+        self._step_title: QLabel
+        self._step_body: QLabel
+        self._mark_widget: QWidget
+        self._num_slots_widget: QWidget
+        self._auto_cal_widget: QWidget
+        self._confirm_widget: QWidget
+        self._prev_btn: QPushButton
+        self._next_btn: QPushButton
+        self._finish_btn: QPushButton
+        self._status_label: QLabel
+        # _build_mark_widget
+        self._mark_pos_label: QLabel
+        self._slot1_pos_label: QLabel
+        self._goto_mark_slot1_btn: QPushButton
+        # _build_num_slots_widget
+        self._num_slots_spin: QSpinBox
+        # _build_automation_widget
+        self._auto_cal_btn: QPushButton
+        self._stop_auto_cal_btn: QPushButton
+        self._poll_timer: QTimer
+        # _build_confirm_widget
+        self._start_height_spin: QDoubleSpinBox
+        self._start_offset_spin: QDoubleSpinBox
+        self._goto_start_pos_btn: QPushButton
+        self._slots_group: QGroupBox
+        self._slots_layout: QVBoxLayout
+        self._slot_position_labels: list[QLabel] = []
+        self._slot_position_spins: list[QDoubleSpinBox] = []
+        self._slot_offset_spins: list[QDoubleSpinBox] = []
         self._build_ui()
         self._update_step_display()
 
@@ -403,10 +436,6 @@ class SlotCalibrationStepsWidget(QWidget):
         self._slots_layout.setSpacing(6)
         layout.addWidget(self._slots_group)
 
-        self._slot_position_labels: list[QLabel] = []
-        self._slot_position_spins: list[QDoubleSpinBox] = []
-        self._slot_offset_spins: list[QDoubleSpinBox] = []
-
         widget.hide()
         return widget
 
@@ -418,7 +447,7 @@ class SlotCalibrationStepsWidget(QWidget):
                 item.widget().deleteLater()
 
         self._slot_position_labels = []
-        self._slot_position_spins: list[QDoubleSpinBox] = []
+        self._slot_position_spins = []
         self._slot_offset_spins = []
 
         # Set=40, Go=36, spacing=4 between them — offset button matches that total.
@@ -665,22 +694,19 @@ class SlotCalibrationStepsWidget(QWidget):
         tca = _get_tca()
         axis = tca.axis if tca is not None else "y"
         slot1_nm = self._get_slot_position_nm(0)
-        try:
-            current = motion.get_position()
-            # Main axis and Z come from the mark if available, else stay current.
-            main_nm = mark[0] if mark is not None else (current.y if axis == "y" else current.x)
-            z_nm = mark[1] if mark is not None else current.z
-            # Cross-axis comes from slot 1 position if available, else stay current.
-            cross_nm = slot1_nm if slot1_nm is not None else (current.x if axis == "y" else current.y)
-            if axis == "y":
-                target = Position(x=cross_nm, y=main_nm, z=z_nm)
-            else:
-                target = Position(x=main_nm, y=cross_nm, z=z_nm)
-            motion.move_to_position(target, wait=False)
-        except Exception as exc:
-            error(f"SlotCalibration: move to mark/slot 1 failed — {exc}")
-            self._set_status("Move failed — see log.")
-            return
+
+        current = motion.get_position()
+        # Main axis and Z come from the mark if available, else stay current.
+        main_nm = mark[0] if mark is not None else (current.y if axis == "y" else current.x)
+        z_nm = mark[1] if mark is not None else current.z
+        # Cross-axis comes from slot 1 position if available, else stay current.
+        cross_nm = slot1_nm if slot1_nm is not None else (current.x if axis == "y" else current.y)
+        if axis == "y":
+            target = Position(x=cross_nm, y=main_nm, z=z_nm)
+        else:
+            target = Position(x=main_nm, y=cross_nm, z=z_nm)
+        motion.move_to_position(target, wait=False)
+
         opp = "x" if axis == "y" else "y"
         self._set_status(
             f"Moving to mark ({axis.upper()}={main_nm / _NM_PER_MM:.3f} mm,"
@@ -773,17 +799,14 @@ class SlotCalibrationStepsWidget(QWidget):
             else tca.starting_offset_nm
         )
         axis = tca.axis
-        try:
-            current = motion.get_position()
-            if axis == "y":
-                target = Position(x=current.x, y=offset_nm, z=height_nm)
-            else:
-                target = Position(x=offset_nm, y=current.y, z=height_nm)
-            motion.move_to_position(target, wait=False)
-        except Exception as exc:
-            error(f"SlotCalibration: move to starting position failed — {exc}")
-            self._set_status("Move failed — see log.")
-            return
+
+        current = motion.get_position()
+        if axis == "y":
+            target = Position(x=current.x, y=offset_nm, z=height_nm)
+        else:
+            target = Position(x=offset_nm, y=current.y, z=height_nm)
+        motion.move_to_position(target, wait=False)
+
         self._set_status(
             f"Moving to starting position ({axis.upper()}={offset_nm / _NM_PER_MM:.3f} mm,"
             f" Z={height_nm / _NM_PER_MM:.3f} mm)…"
@@ -798,12 +821,9 @@ class SlotCalibrationStepsWidget(QWidget):
         tca = _get_tca()
         if tca is None or index >= tca.num_slots:
             return
-        try:
-            pos = motion.get_position()
-        except Exception as exc:
-            error(f"SlotCalibration: get_position failed — {exc}")
-            self._set_status("Could not read stage position.")
-            return
+
+        pos = motion.get_position()
+
         axis_val = pos.y if (tca.axis == "y") else pos.x
         self._pending_slot_positions[index] = axis_val
         self._slot_position_labels[index].setText(f"{axis_val / _NM_PER_MM:.3f} mm")
@@ -819,7 +839,7 @@ class SlotCalibrationStepsWidget(QWidget):
         tca = _get_tca()
         if tca is not None:
             desired = self._num_slots_spin.value()
-            from motion.motion_config import TreeCoreSlot  # noqa: PLC0415
+            
             while len(tca.slots) < desired:
                 tca.slots.append(TreeCoreSlot())
             if len(tca.slots) > desired:
@@ -859,19 +879,16 @@ class SlotCalibrationStepsWidget(QWidget):
         axis = tca.axis if tca is not None else "y"
         opp = "x" if axis == "y" else "y"
         mark = self._get_mark_position()
-        try:
-            current = motion.get_position()
-            main_nm = mark[0] if mark is not None else (current.y if axis == "y" else current.x)
-            z_nm = mark[1] if mark is not None else current.z
-            if axis == "y":
-                target = Position(x=pos_nm, y=main_nm, z=z_nm)
-            else:
-                target = Position(x=main_nm, y=pos_nm, z=z_nm)
-            motion.move_to_position(target, wait=False)
-        except Exception as exc:
-            error(f"SlotCalibration: move to {label} failed — {exc}")
-            self._set_status("Move failed — see log.")
-            return
+
+        current = motion.get_position()
+        main_nm = mark[0] if mark is not None else (current.y if axis == "y" else current.x)
+        z_nm = mark[1] if mark is not None else current.z
+        if axis == "y":
+            target = Position(x=pos_nm, y=main_nm, z=z_nm)
+        else:
+            target = Position(x=main_nm, y=pos_nm, z=z_nm)
+        motion.move_to_position(target, wait=False)
+
         self._set_status(
             f"Moving to {label} ({opp.upper()}={pos_nm / _NM_PER_MM:.3f} mm,"
             f" {axis.upper()}={main_nm / _NM_PER_MM:.3f} mm,"
@@ -883,6 +900,7 @@ class SlotCalibrationPage(CameraWithSidebarPage):
     finished: Signal = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        self._steps_widget: SlotCalibrationStepsWidget
         super().__init__(self._make_sidebar(), parent)
         self._steps_widget.finished.connect(self.finished)
         self._steps_widget.cancelled.connect(self.finished)

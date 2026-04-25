@@ -283,7 +283,35 @@ class TreeCoreWidget(QWidget):
         super().__init__(parent)
         self._routine: TreeCoreImagingRoutine | None = None
         self._sample_rows: list[_SampleRowWidget] = []
+
+        # Widgets assigned during _setup_ui and sub-builders
+        self._slot_cal_warning: QLabel
+        self._output_folder: OutputFolderWidget
+        self._controls_widget: QWidget
+        self._pause_resume_btn: QPushButton
+        self._stop_btn: QPushButton
+        self._status_label: QLabel
+        self._poll_timer: QTimer
+
+        # Controls group
+        self._slot_spin: QSpinBox
+        self._start_btn: QPushButton
+
+        # Calibration scale group
+        self._inspect_cal_warning: QLabel
+        self._cal_scale_toggle: QCheckBox
+        self._cal_scale_details: QWidget
+        self._cal_dpi_label: QLabel
+        self._cal_last_label: QLabel
+        self._cal_goto_btn: QPushButton
+
+        # Sample list group
+        self._sample_list_layout: QVBoxLayout
+
         self._setup_ui()
+        ctx = get_app_context()
+        if ctx is not None and ctx.machine_vision is not None:
+            ctx.machine_vision.settings_changed.connect(self._on_settings_changed)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -293,6 +321,15 @@ class TreeCoreWidget(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
+
+        self._slot_cal_warning = QLabel(
+            "Slot calibration has not been completed. "
+            "Please run Slot Calibration before using Tree Core Imaging."
+        )
+        self._slot_cal_warning.setObjectName("CalErrorLabel")
+        self._slot_cal_warning.setWordWrap(True)
+        self._slot_cal_warning.setVisible(False)
+        main_layout.addWidget(self._slot_cal_warning)
 
         main_layout.addWidget(self._build_controls_group())
 
@@ -372,6 +409,15 @@ class TreeCoreWidget(QWidget):
         outer_layout = QVBoxLayout(group)
         outer_layout.setContentsMargins(10, 8, 10, 8)
         outer_layout.setSpacing(6)
+
+        self._inspect_cal_warning = QLabel(
+            "Inspection calibration has not been completed. "
+            "Please run Inspection Calibration before using the Calibration Scale routine."
+        )
+        self._inspect_cal_warning.setObjectName("CalWarningLabel")
+        self._inspect_cal_warning.setWordWrap(True)
+        self._inspect_cal_warning.setVisible(False)
+        outer_layout.addWidget(self._inspect_cal_warning)
 
         toggle_row = QHBoxLayout()
         toggle_row.setSpacing(8)
@@ -492,10 +538,38 @@ class TreeCoreWidget(QWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._refresh_slot_calibration_state()
+        self._refresh_inspection_calibration_state()
         tca = _get_tca()
         num_slots = tca.num_slots if tca is not None else 20
         if len(self._sample_rows) != num_slots:
             self._rebuild_sample_rows(num_slots)
+
+    def _is_slot_calibrated(self) -> bool:
+        tca = _get_tca()
+        return tca is not None and tca.has_been_calibrated
+
+    def _refresh_slot_calibration_state(self) -> None:
+        calibrated = self._is_slot_calibrated()
+        self._slot_cal_warning.setVisible(not calibrated)
+        self._start_btn.setEnabled(calibrated)
+
+    def _is_inspection_calibrated(self) -> bool:
+        ctx = get_app_context()
+        if ctx is None or ctx.machine_vision is None:
+            return False
+        return bool(ctx.machine_vision.settings.inspect_calibration.last_calibrated)
+
+    def _refresh_inspection_calibration_state(self) -> None:
+        calibrated = self._is_inspection_calibrated()
+        self._inspect_cal_warning.setVisible(not calibrated)
+        self._cal_scale_toggle.setEnabled(calibrated)
+        self._cal_scale_details.setEnabled(calibrated)
+
+    def _on_settings_changed(self) -> None:
+        self._refresh_inspection_calibration_state()
+        if self._cal_scale_toggle.isChecked():
+            self._refresh_calibration_scale_info()
 
     # ------------------------------------------------------------------
     # Calibration scale helpers
@@ -550,13 +624,11 @@ class TreeCoreWidget(QWidget):
         if not getattr(icp, "is_set", False):
             warning("TreeCoreWidget: no scale bar position saved")
             return
-        try:
-            ctx.motion.move_to_position(
-                Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm),
-                wait=False,
-            )
-        except Exception as exc:
-            error(f"TreeCoreWidget: failed to go to scale bar position — {exc}")
+
+        ctx.motion.move_to_position(
+            Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm),
+            wait=False,
+        )
 
     def _on_go_to_slot_clicked(self) -> None:
         slot_number = self._slot_spin.value()
@@ -585,35 +657,33 @@ class TreeCoreWidget(QWidget):
         axis = tca.axis
         mark_set = tca.mark_reference_nm > 0 or tca.mark_z_nm > 0
 
-        try:
-            current = ctx.motion.get_position()
-            main_nm = tca.mark_reference_nm if mark_set else (current.y if axis == "y" else current.x)
-            z_nm = tca.mark_z_nm if mark_set else current.z
-            if axis == "y":
-                target = Position(x=pos_nm, y=main_nm, z=z_nm)
-            else:
-                target = Position(x=main_nm, y=pos_nm, z=z_nm)
-            ctx.motion.move_to_position(target, wait=False)
-        except Exception as exc:
-            error(f"TreeCoreWidget: failed to go to slot {slot_number} — {exc}")
+        current = ctx.motion.get_position()
+        main_nm = tca.mark_reference_nm if mark_set else (current.y if axis == "y" else current.x)
+        z_nm = tca.mark_z_nm if mark_set else current.z
+        if axis == "y":
+            target = Position(x=pos_nm, y=main_nm, z=z_nm)
+        else:
+            target = Position(x=main_nm, y=pos_nm, z=z_nm)
+        ctx.motion.move_to_position(target, wait=False)
+
 
     def _on_start_clicked(self) -> None:
         ctx = get_app_context()
         if ctx.motion is None or not ctx.motion.is_ready():
             error("TreeCoreWidget: motion controller not ready")
-            self._status_label.setText("Motion controller not ready.")
+            ctx.toast.error("Motion controller not ready.")
             return
 
         active_samples = [r for r in self._sample_rows if r.enabled]
         if not active_samples:
             warning("TreeCoreWidget: no samples enabled")
-            self._status_label.setText("No samples enabled.")
+            ctx.toast.warning("No samples enabled.")
             return
 
         tca = _get_tca()
         if tca is None or not tca.has_been_calibrated:
             error("TreeCoreWidget: slot calibration has not been completed")
-            self._status_label.setText("Slot calibration has not been completed.")
+            ctx.toast.error("Slot calibration has not been completed.")
             return
 
         output_path = self._output_folder.resolved_path
@@ -632,19 +702,18 @@ class TreeCoreWidget(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        try:
-            self._routine = TreeCoreImagingRoutine(
-                motion=ctx.motion,
-                output_folder=output_path,
-                slots=slots,
-                image_calibration_scale=image_calibration_scale,
-            )
-            ctx.motion.start_routine(self._routine)
-        except Exception as exc:
-            error(f"TreeCoreWidget: failed to start routine — {exc}")
-            self._status_label.setText(f"Failed to start: {exc}")
+        if ctx.motion.routine_running:
+            error("TreeCoreWidget: a routine is already running")
+            ctx.toast.error("A routine is already running.")
             return
 
+        self._routine = TreeCoreImagingRoutine(
+            motion=ctx.motion,
+            output_folder=output_path,
+            slots=slots,
+            image_calibration_scale=image_calibration_scale,
+        )
+        ctx.motion.start_routine(self._routine)
         self._enter_running_state()
 
     def _on_pause_resume_clicked(self) -> None:
@@ -690,7 +759,7 @@ class TreeCoreWidget(QWidget):
 
     def _exit_running_state(self) -> None:
         self._poll_timer.stop()
-        self._start_btn.setEnabled(True)
+        self._start_btn.setEnabled(self._is_slot_calibrated())
         self._output_folder.setEnabled(True)
         self._cal_scale_toggle.setEnabled(True)
         self._controls_widget.setVisible(False)

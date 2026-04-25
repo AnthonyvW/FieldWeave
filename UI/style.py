@@ -515,13 +515,23 @@ def apply_style(app: QApplication) -> None:
             height: 14px;
         }}
 
-        /* Calibration prerequisite warning box */
-        QLabel#CalWarningLabel {{
+        /* Calibration blocking error box */
+        QLabel#CalErrorLabel {{
             font-size: 13px;
             font-weight: bold;
             color: #7a0000;
             background: #fde8e8;
             border: 1px solid #e57373;
+            padding: 10px 14px;
+        }}
+
+        /* Non-blocking calibration advisory warning box */
+        QLabel#CalWarningLabel {{
+            font-size: 13px;
+            font-weight: bold;
+            color: #5a3e00;
+            background: #fff8d6;
+            border: 1px solid #e0b030;
             padding: 10px 14px;
         }}
 
