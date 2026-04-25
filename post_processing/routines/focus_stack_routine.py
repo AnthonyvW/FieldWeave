@@ -180,8 +180,9 @@ class FocusStackResult:
     """
     Produced by :class:`FocusStackRoutine` on successful completion.
 
-    Attach a done-callback or inspect this attribute after
-    :meth:`~PostProcessingRoutine.wait` returns.
+    Retrieved via ``routine.result.get("focus_stack")`` after
+    :meth:`~PostProcessingRoutine.wait` returns, or from the
+    :class:`RoutineResult` passed to the ``on_complete`` callback.
     """
 
     output_path: str
@@ -238,7 +239,6 @@ class FocusStackRoutine(PostProcessingRoutine):
         self.input_folder = input_folder
         self.output_path = output_path
         self.config = config or FocusStackConfig()
-        self.result: FocusStackResult | None = None
 
     def steps(self) -> Generator[None, None, None]:
         cfg = self.config
@@ -392,13 +392,16 @@ class FocusStackRoutine(PostProcessingRoutine):
         else:
             result_rgb = cv2.cvtColor(result_img, cv2.COLOR_GRAY2RGB)
 
-        self.result = FocusStackResult(
-            output_path=str(out_path.resolve()),
-            depth_map_path=saved_depth_map_path,
-            image_width=w,
-            image_height=h,
-            frame_count=n,
-            result_rgb=result_rgb,
+        self._set_result(
+            success=True,
+            focus_stack=FocusStackResult(
+                output_path=str(out_path.resolve()),
+                depth_map_path=saved_depth_map_path,
+                image_width=w,
+                image_height=h,
+                frame_count=n,
+                result_rgb=result_rgb,
+            ),
         )
 
         self._set_status("Done", 6, 6)
