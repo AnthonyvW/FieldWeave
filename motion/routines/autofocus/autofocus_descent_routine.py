@@ -14,6 +14,7 @@ Usage::
     routine = AutofocusDescent(motion=ctx.motion)
     routine.start()
     routine.wait()
+    result = routine.result  # RoutineResult(success=True, z_nm=..., focus_score=...)
 """
 
 from __future__ import annotations
@@ -130,6 +131,7 @@ class AutofocusDescent(AutomationRoutine):
 
         if not ctx.has_camera:
             error("[AutofocusDescent] No camera available — aborting")
+            self._set_result(success=False)
             return
 
         settings = self.motion.settings
@@ -340,3 +342,4 @@ class AutofocusDescent(AutomationRoutine):
             f"coarse={'PREVIEW' if coarse_scorer is score_preview else 'STILL'}  "
             f"fine={scorer_name}"
         )
+        self._set_result(success=True, z_nm=best_z, focus_score=best_s)

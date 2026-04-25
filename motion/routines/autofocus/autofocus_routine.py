@@ -14,6 +14,7 @@ Usage::
     routine = Autofocus(motion=ctx.motion)
     routine.start()
     routine.wait()
+    result = routine.result  # RoutineResult(success=True, z_nm=..., focus_score=...)
 """
 
 from __future__ import annotations
@@ -133,6 +134,7 @@ class Autofocus(AutomationRoutine):
 
         if not ctx.has_camera:
             error("[Autofocus] No camera available — aborting")
+            self._set_result(success=False)
             return
 
         settings = self.motion.settings
@@ -192,6 +194,7 @@ class Autofocus(AutomationRoutine):
 
         if baseline == float("-inf"):
             error("[Autofocus] Baseline capture failed — aborting")
+            self._set_result(success=False)
             return
 
         coarse_scorer = (
@@ -410,3 +413,4 @@ class Autofocus(AutomationRoutine):
             f"[Autofocus] Complete: Z={best_z / _NM_PER_MM:.3f} mm  "
             f"score={best_s:.3f}  Δbase={(best_s - baseline):+.3f}"
         )
+        self._set_result(success=True, z_nm=best_z, focus_score=best_s)

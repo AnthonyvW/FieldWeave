@@ -13,6 +13,11 @@ Subclasses should set :attr:`job_name` at construction time and call
 :meth:`_set_activity` / :meth:`_set_progress` during execution to surface
 human-readable status information to the UI.
 
+Subclasses that produce a meaningful result (e.g. autofocus routines) should
+call :meth:`_set_result` before returning from :meth:`steps`.  The result is
+then available via the :attr:`result` property and is propagated to the
+:class:`MotionControllerManager` as :attr:`~MotionControllerManager.last_routine_result`.
+
 Example::
 
     class MyRoutine(AutomationRoutine):
@@ -31,7 +36,8 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Callable, Generator
+from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING, Callable, Generator
 
 from common.logger import info, error, warning, debug
 
@@ -40,6 +46,36 @@ if TYPE_CHECKING:
 
 # Signature: (job_name, activity, progress_current, progress_total, eta_seconds) -> None
 RoutineStateCallback = Callable[[str, str, int, int, int], None]
+
+# Signature: (result: RoutineResult) -> None
+RoutineCompleteCallback = Callable[["RoutineResult"], None]
+
+
+@dataclass
+class RoutineResult:
+    """
+    Outcome produced by a completed :class:`AutomationRoutine`.
+
+    Attributes
+    ----------
+    success:
+        True if the routine ran to completion and produced a meaningful result.
+        False if it was stopped early, aborted due to an error, or produced no
+        usable output.
+    data:
+        Arbitrary key-value payload set by the routine.  Each routine
+        documents the keys it populates.  For example, autofocus routines
+        store ``z_nm`` and ``focus_score``; the calibration scale routine
+        stores ``dpi``, ``image_width``, ``image_height``, and
+        ``output_path``.  Use :meth:`get` to retrieve values with a default.
+    """
+
+    success: bool
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return ``data[key]``, or *default* if the key is absent."""
+        return self.data.get(key, default)
 
 
 class AutomationRoutine(ABC):
@@ -54,6 +90,11 @@ class AutomationRoutine(ABC):
     give the routine a human-readable display name.  During execution call
     :meth:`_set_activity` and :meth:`_set_progress` to push live status
     information to any registered :attr:`on_state_changed` callback.
+
+    Routines that produce a meaningful result should call :meth:`_set_result`
+    before returning from :meth:`steps`.  The result is exposed via the
+    :attr:`result` property and forwarded to any registered
+    :attr:`on_complete` callback when the routine finishes.
 
     Parameters
     ----------
@@ -81,9 +122,16 @@ class AutomationRoutine(ABC):
         self._progress_total: int = 0
         self._eta_seconds: int = 0
 
+        # Result produced by the routine (set via _set_result).
+        self._result: RoutineResult | None = None
+
         # Optional callback fired whenever any of the above fields change.
         # Signature: (job_name, activity, progress_current, progress_total, eta_seconds) -> None
         self.on_state_changed: RoutineStateCallback | None = None
+
+        # Optional callback fired once when the routine finishes (success or not).
+        # Signature: (result: RoutineResult) -> None
+        self.on_complete: RoutineCompleteCallback | None = None
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -98,6 +146,38 @@ class AutomationRoutine(ABC):
         stopped.  The framework will block at each yield until the routine
         is resumed, or raise :class:`_StopRoutine` to abort execution.
         """
+
+    # ------------------------------------------------------------------
+    # Result API for subclasses
+    # ------------------------------------------------------------------
+
+    def _set_result(self, *, success: bool, **data: Any) -> None:
+        """Record the outcome of this routine.
+
+        Should be called by subclasses before returning from :meth:`steps`,
+        both on successful completion and on detected failure (e.g. no camera).
+        If never called, :attr:`result` will reflect a generic failure.
+
+        Any keyword arguments beyond *success* are stored in
+        :attr:`RoutineResult.data` and can be retrieved via
+        :meth:`RoutineResult.get`.  Each routine should document the keys it
+        populates.
+
+        Parameters
+        ----------
+        success:
+            Whether the routine completed successfully and produced usable output.
+        **data:
+            Arbitrary payload.  For example autofocus routines pass
+            ``z_nm=...`` and ``focus_score=...``; the calibration scale
+            routine passes ``dpi=...``, ``image_width=...``, etc.
+        """
+        self._result = RoutineResult(success=success, data=dict(data))
+
+    @property
+    def result(self) -> RoutineResult | None:
+        """The result produced by this routine, or None if it has not finished."""
+        return self._result
 
     # ------------------------------------------------------------------
     # Status helpers for subclasses
@@ -195,6 +275,7 @@ class AutomationRoutine(ABC):
         self._stop_event.clear()
         self._pause_event.set()
         self._finished.clear()
+        self._result = None
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name=type(self).__name__)
         self._thread.start()
@@ -294,6 +375,18 @@ class AutomationRoutine(ABC):
             self._progress_total = 0
             self._eta_seconds = 0
             self._notify_state()
+
+            # Ensure _result is always populated so callers never see None
+            # after the routine has finished.
+            if self._result is None:
+                self._result = RoutineResult(success=False)
+
+            cb = self.on_complete
+            if cb is not None:
+                try:
+                    cb(self._result)
+                except Exception as exc:
+                    warning(f"[{type(self).__name__}] on_complete raised: {exc}")
 
     # ------------------------------------------------------------------
     # Helpers available to subclasses

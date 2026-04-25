@@ -14,6 +14,7 @@ Usage::
     routine = AutofocusFine(motion=ctx.motion)
     routine.start()
     routine.wait()
+    result = routine.result  # RoutineResult(success=True, z_nm=..., focus_score=...)
 """
 
 from __future__ import annotations
@@ -109,6 +110,7 @@ class AutofocusFine(AutomationRoutine):
 
         if not ctx.has_camera:
             error("[AutofocusFine] No camera available — aborting")
+            self._set_result(success=False)
             return
 
         settings = self.motion.settings
@@ -178,6 +180,7 @@ class AutofocusFine(AutomationRoutine):
 
         if baseline == float("-inf"):
             error("[AutofocusFine] Baseline capture failed (score=-inf) — aborting")
+            self._set_result(success=False)
             return
 
         if self._use_preview_if_below and baseline < self._focus_preview_threshold:
@@ -204,7 +207,7 @@ class AutofocusFine(AutomationRoutine):
         total_steps = (self._window_nm // fine_step_nm) * 2 + 1
         self._set_progress(0, total_steps)
 
-        def _climb(start_z: int, step: int) -> Generator[tuple[int, float], None, None]:
+        def _climb(start_z: int, step: int) -> tuple[int, float]:
             zt = start_z
             best_lz = start_z
             best_ls = scores.get(start_z, score_at(start_z, scores, search_scorer))
@@ -231,22 +234,14 @@ class AutofocusFine(AutomationRoutine):
                     zt = nxt
                     if no_imp >= self._no_improve_limit:
                         break
-                yield best_lz, best_ls  # pause/stop point: between fine steps
+            return best_lz, best_ls
 
-        up_z, up_s = center_nm, scores[center_nm]
-        for up_z, up_s in _climb(center_nm, fine_step_nm):
-            if self._check_stop():
-                return
-            yield
+        up_z, up_s = _climb(center_nm, fine_step_nm)
 
         if self._check_stop():
             return
 
-        down_z, down_s = center_nm, scores[center_nm]
-        for down_z, down_s in _climb(center_nm, -fine_step_nm):
-            if self._check_stop():
-                return
-            yield
+        down_z, down_s = _climb(center_nm, -fine_step_nm)
 
         best_z = up_z if up_s >= down_s else down_z
         best_s = up_s if up_s >= down_s else down_s
@@ -266,3 +261,4 @@ class AutofocusFine(AutomationRoutine):
             f"score={best_s:.3f}  Δbase={(best_s - baseline):+.3f}  "
             f"scorer={scorer_name}  step={step_mm:.4f} mm  window=±{window_mm:.3f} mm"
         )
+        self._set_result(success=True, z_nm=best_z, focus_score=best_s)

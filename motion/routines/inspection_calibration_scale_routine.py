@@ -23,6 +23,14 @@ The routine:
 Images are saved as JPEG with the stage position encoded in the filename:
   x{X_nm}_y{Y_nm}_z{Z_nm}.jpg
 
+The result is available via :attr:`~AutomationRoutine.result` after the routine
+finishes.  On success, ``result.data`` contains:
+
+- ``dpi`` (:class:`float`): measured dots per inch.
+- ``image_width`` (:class:`int`): stitched image width in pixels.
+- ``image_height`` (:class:`int`): stitched image height in pixels.
+- ``output_path`` (:class:`str`): path to the stitched output image.
+
 Usage::
 
     from common.app_context import get_app_context
@@ -37,6 +45,9 @@ Usage::
     )
     routine.start()
     routine.wait()
+    result = routine.result
+    if result and result.success:
+        print(f"DPI: {result.get('dpi')}")
 """
 
 from __future__ import annotations
@@ -115,7 +126,11 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
     After all images are captured a
     :class:`~post_processing.post_processing_routines.StitchAndMeasureRoutine`
     is started via the global post-processing manager and the routine blocks
-    until it completes.  :attr:`stitch_result` is populated on success.
+    until it completes.
+
+    On success, :attr:`~AutomationRoutine.result` is populated with
+    ``success=True`` and ``data`` keys ``dpi``, ``image_width``,
+    ``image_height``, and ``output_path``.
 
     Parameters
     ----------
@@ -163,10 +178,6 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         self._max_steps = max_steps
         self._capture_timeout_s = capture_timeout_s
 
-        self.stitch_result = None
-        """Populated with a :class:`~post_processing.post_processing_routines.StitchAndMeasureResult`
-        after the routine completes successfully, or left as None on failure."""
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -190,6 +201,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
 
         if not ctx.has_camera:
             error("[CalibrationScale] No camera available — aborting")
+            self._set_result(success=False)
             return
 
         save_dir = self._output_path / "raw_calibration_scale"
@@ -197,6 +209,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             save_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             error(f"[CalibrationScale] Could not create output directory: {exc}")
+            self._set_result(success=False)
             return
 
         info(f"[CalibrationScale] Saving images to: {save_dir}")
@@ -259,6 +272,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         initial_frame = capture_still_frame(camera_manager, timeout_s=self._capture_timeout_s)
         if initial_frame is None:
             error("[CalibrationScale] Initial frame capture failed — aborting")
+            self._set_result(success=False)
             return
 
         mv.reset_inspect_calibration_state()
@@ -277,6 +291,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
 
         if initial_result.tick_count == 0:
             error("[CalibrationScale] No ticks detected in initial frame — aborting")
+            self._set_result(success=False)
             return
 
         image_h, image_w = initial_frame.shape[:2]
@@ -438,16 +453,21 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
 
         stitch_routine.wait()
 
-        self.stitch_result = stitch_routine.result
+        stitch_result = stitch_routine.result
 
-        if self.stitch_result is None:
+        if stitch_result is None or not stitch_result.success:
             warning("[CalibrationScale] Stitch-and-measure completed but produced no result")
+            self._set_result(success=False)
         else:
+            dpi = stitch_result.get("dpi")
+            image_width = stitch_result.get("image_width")
+            image_height = stitch_result.get("image_height")
+            output_path = stitch_result.get("output_path")
             info(
                 f"[CalibrationScale] Stitch complete —"
-                f" DPI={self.stitch_result.dpi}"
-                f" size={self.stitch_result.image_width}x{self.stitch_result.image_height}"
-                f" output={self.stitch_result.output_path}"
+                f" DPI={dpi}"
+                f" size={image_width}x{image_height}"
+                f" output={output_path}"
             )
             s = ctx.machine_vision._copy_settings()
             s.inspect_calibration.last_calibrated = (
@@ -455,6 +475,13 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             )
             ctx.machine_vision.apply_settings(s)
             ctx.machine_vision.save_settings()
+            self._set_result(
+                success=True,
+                dpi=dpi,
+                image_width=image_width,
+                image_height=image_height,
+                output_path=output_path,
+            )
 
         yield
 

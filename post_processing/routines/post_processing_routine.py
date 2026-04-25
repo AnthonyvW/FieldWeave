@@ -15,6 +15,11 @@ Subclasses should set the class-level :attr:`job_name` and call
 :meth:`_set_activity` / :meth:`_set_progress` during execution to push
 human-readable status to the UI.
 
+Subclasses that produce a meaningful result should call :meth:`_set_result`
+before returning from :meth:`steps`.  The result is then available via the
+:attr:`result` property and forwarded to any registered :attr:`on_complete`
+callback when the routine finishes.
+
 Example::
 
     class MyRoutine(PostProcessingRoutine):
@@ -25,7 +30,8 @@ Example::
             do_something()
             yield
             self._set_activity("Step two")
-            do_something_else()
+            result = do_something_else()
+            self._set_result(success=True, value=result)
             yield
 """
 
@@ -34,13 +40,42 @@ from __future__ import annotations
 import threading
 import traceback
 from abc import ABC, abstractmethod
-from typing import Callable, Generator
+from dataclasses import dataclass, field
+from typing import Any, Callable, Generator
 
 from common.logger import info, error, warning
 from common.fieldweaveConfig import FieldWeaveSettings
 
 # Signature: (job_name, activity, progress_current, progress_total, eta_seconds) -> None
 RoutineStateCallback = Callable[[str, str, int, int, int], None]
+
+# Signature: (result: RoutineResult) -> None
+RoutineCompleteCallback = Callable[["RoutineResult"], None]
+
+
+@dataclass
+class RoutineResult:
+    """
+    Outcome produced by a completed :class:`PostProcessingRoutine`.
+
+    Attributes
+    ----------
+    success:
+        True if the routine ran to completion and produced a meaningful result.
+        False if it was stopped early, aborted due to an error, or produced no
+        usable output.
+    data:
+        Arbitrary key-value payload set by the routine.  Each routine
+        documents the keys it populates.  Use :meth:`get` to retrieve values
+        with a default.
+    """
+
+    success: bool
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return ``data[key]``, or *default* if the key is absent."""
+        return self.data.get(key, default)
 
 
 class PostProcessingRoutine(ABC):
@@ -55,6 +90,11 @@ class PostProcessingRoutine(ABC):
     the routine a human-readable display name.  During execution call
     :meth:`_set_activity` and :meth:`_set_progress` to push live status to any
     registered :attr:`on_state_changed` callback.
+
+    Routines that produce a meaningful result should call :meth:`_set_result`
+    before returning from :meth:`steps`.  The result is exposed via the
+    :attr:`result` property and forwarded to any registered :attr:`on_complete`
+    callback when the routine finishes.
 
     Parameters
     ----------
@@ -83,8 +123,11 @@ class PostProcessingRoutine(ABC):
         self._progress_total: int = 0
         self._eta_seconds: int = 0
 
+        self._result: RoutineResult | None = None
+
         # Wired by the manager after construction.
         self.on_state_changed: RoutineStateCallback | None = None
+        self.on_complete: RoutineCompleteCallback | None = None
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -97,6 +140,36 @@ class PostProcessingRoutine(ABC):
 
         Yield at each point where the routine can be cleanly paused or stopped.
         """
+
+    # ------------------------------------------------------------------
+    # Result API for subclasses
+    # ------------------------------------------------------------------
+
+    def _set_result(self, *, success: bool, **data: Any) -> None:
+        """Record the outcome of this routine.
+
+        Should be called by subclasses before returning from :meth:`steps`,
+        both on successful completion and on detected failure.  If never
+        called, :attr:`result` will reflect a generic failure.
+
+        Any keyword arguments beyond *success* are stored in
+        :attr:`RoutineResult.data` and can be retrieved via
+        :meth:`RoutineResult.get`.  Each routine should document the keys it
+        populates.
+
+        Parameters
+        ----------
+        success:
+            Whether the routine completed successfully and produced usable output.
+        **data:
+            Arbitrary payload stored in :attr:`RoutineResult.data`.
+        """
+        self._result = RoutineResult(success=success, data=dict(data))
+
+    @property
+    def result(self) -> RoutineResult | None:
+        """The result produced by this routine, or None if it has not finished."""
+        return self._result
 
     # ------------------------------------------------------------------
     # Status helpers for subclasses
@@ -194,6 +267,7 @@ class PostProcessingRoutine(ABC):
         self._stop_event.clear()
         self._pause_event.set()
         self._finished.clear()
+        self._result = None
         self._running = True
         self._thread = threading.Thread(
             target=self._run, daemon=True, name=type(self).__name__
@@ -298,3 +372,13 @@ class PostProcessingRoutine(ABC):
             self._progress_total = 0
             self._eta_seconds = 0
             self._notify_state()
+
+            if self._result is None:
+                self._result = RoutineResult(success=False)
+
+            cb = self.on_complete
+            if cb is not None:
+                try:
+                    cb(self._result)
+                except Exception as exc:
+                    warning(f"[{type(self).__name__}] on_complete raised: {exc}")

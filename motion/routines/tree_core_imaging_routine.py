@@ -19,14 +19,25 @@ Procedure (per slot)
     already leaves the stage at best focus).
 7.  Forward sweep: step towards tca.mark_reference_nm in overlap-derived
     increments, stopping before any step that would overshoot the mark.
-    Fine autofocus is run at each position before capturing.
+    Fine autofocus is run at each position before capturing, with adaptive
+    re-focus logic:
+    - If the focus score drops more than 0.35 in a single step the stage has
+      likely crossed a gap or the sample end.  The routine continues moving at
+      the current Z until the score recovers or the sweep ends.
+    - If the score drops more than 0.2 below the reference score (initially the
+      descent autofocus score) the routine moves up 1 mm above the current Z
+      (or 2 mm if already above the descent Z) and runs a new descent autofocus
+      to re-acquire focus.  The new score becomes the reference.  If the score
+      later recovers to the original descent score the original reference is
+      restored.
 8.  Return to the slot's starting position at the focused Z.
 9.  Reverse sweep: step away from tca.mark_reference_nm in the same
     increments until background detection reports bare background.  The
     starting position is skipped (already imaged in step 6).  At each
     new position a background check is performed first; if background is
     detected the sweep stops without running autofocus or capturing.
-    Otherwise fine autofocus runs and the image is captured.
+    Otherwise a descent autofocus is run from 1 mm above the current Z
+    and the image is captured.
 
 If ``image_calibration_scale`` is True, the calibration scale bar is imaged
 after all slots are complete.  The routine moves to the saved scale bar
@@ -82,6 +93,11 @@ _NM_PER_TICK = 10_000
 _SETTLE_S = 0.2
 _DWELL_S = 1.0
 
+_FOCUS_DROP_REACQUIRE = 0.2   # score drop below reference that triggers re-descent
+_FOCUS_DROP_GAP       = 0.35  # score drop in a single step that indicates a gap/end
+_REACQUIRE_LIFT_MM    = 1.0   # how far above current Z to start a re-acquisition descent
+_REACQUIRE_LIFT_ABOVE_DESCENT_MM = 2.0  # lift used when already above descent Z
+
 
 def _run_subroutine(subroutine: AutomationRoutine, parent: AutomationRoutine) -> None:
     """Start *subroutine* and wait for it, stopping it immediately if *parent* is stopped."""
@@ -100,18 +116,54 @@ def _run_centering(motion: MotionControllerManager, capture_timeout_s: float, pa
     _run_subroutine(centering, parent)
 
 
-def _run_autofocus_descent(motion: MotionControllerManager, parent: AutomationRoutine) -> int:
-    """Run an autofocus descent and return the best Z position in nm."""
+def _run_autofocus_descent(motion: MotionControllerManager, parent: AutomationRoutine) -> tuple[int, float]:
+    """Run an autofocus descent and return ``(best_z_nm, focus_score)``."""
     routine = AutofocusDescent(motion=motion)
     _run_subroutine(routine, parent)
-    return motion.get_position().z
+    result = motion.last_routine_result
+    z_nm = motion.get_position().z
+    score = result.get("focus_score", 0.0) if (result and result.success) else 0.0
+    return z_nm, score
 
 
-def _run_autofocus_fine(motion: MotionControllerManager, parent: AutomationRoutine) -> int:
-    """Run a fine autofocus pass and return the best Z position in nm."""
+def _run_autofocus_fine(motion: MotionControllerManager, parent: AutomationRoutine) -> tuple[int, float]:
+    """Run a fine autofocus pass and return ``(best_z_nm, focus_score)``."""
     routine = AutofocusFine(motion=motion)
     _run_subroutine(routine, parent)
-    return motion.get_position().z
+    result = motion.last_routine_result
+    z_nm = motion.get_position().z
+    score = result.get("focus_score", 0.0) if (result and result.success) else 0.0
+    return z_nm, score
+
+
+def _run_autofocus_descent_from_above(
+    motion: MotionControllerManager,
+    parent: AutomationRoutine,
+    current_z_nm: int,
+    descent_z_nm: int,
+) -> tuple[int, float]:
+    """
+    Lift the stage to re-acquisition height and run a descent autofocus.
+
+    If *current_z_nm* is at or below *descent_z_nm* (the original descent
+    height) the stage is raised by ``_REACQUIRE_LIFT_MM``; if it is already
+    above the original descent height it is raised by
+    ``_REACQUIRE_LIFT_ABOVE_DESCENT_MM`` to ensure there is enough room for
+    the descent to lock on.
+    """
+    if current_z_nm <= descent_z_nm:
+        lift_nm = int(_REACQUIRE_LIFT_MM * _NM_PER_MM)
+    else:
+        lift_nm = int(_REACQUIRE_LIFT_ABOVE_DESCENT_MM * _NM_PER_MM)
+
+    lift_target_z = current_z_nm + lift_nm
+    pos = motion.get_position()
+    motion.move_to_position(Position(x=pos.x, y=pos.y, z=lift_target_z), wait=True)
+    info(
+        f"[TreeCoreImaging] Re-acquisition lift to Z={lift_target_z / _NM_PER_MM:.3f} mm"
+        f" (lift={lift_nm / _NM_PER_MM:.1f} mm)"
+    )
+    return _run_autofocus_descent(motion, parent)
 
 
 class TreeCoreImagingRoutine(AutomationRoutine):
@@ -375,8 +427,12 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
             _advance(f"Autofocus descent — {slot_label}", slot_iter, 3, 6)
             info(f"[TreeCoreImaging] Running autofocus descent for {slot_label}")
-            focused_z_nm = _run_autofocus_descent(self.motion, self)
-            info(f"[TreeCoreImaging] Autofocus settled at Z={focused_z_nm / _NM_PER_MM:.3f} mm for {slot_label}")
+            focused_z_nm, descent_score = _run_autofocus_descent(self.motion, self)
+            descent_z_nm = focused_z_nm
+            info(
+                f"[TreeCoreImaging] Autofocus settled at Z={focused_z_nm / _NM_PER_MM:.3f} mm"
+                f"  score={descent_score:.3f} for {slot_label}"
+            )
 
             if self._check_stop():
                 return
@@ -454,6 +510,14 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             current_main_nm = main_start_nm
             forward_span_nm = max(1, abs(tca.mark_reference_nm - main_start_nm))
 
+            # Adaptive focus state.
+            # ref_score is the score we compare against for the >0.2 drop check.
+            # It starts as the descent score and updates after re-acquisition.
+            # If it later recovers back to descent_score, we revert.
+            ref_score = descent_score
+            prev_score = descent_score
+            in_gap = False  # True while crossing a detected gap/end
+
             while True:
                 if self._check_stop():
                     return
@@ -481,16 +545,90 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 self.motion.move_to_position(target, wait=True)
                 current_main_nm = next_main_nm
 
-                info(f"[TreeCoreImaging] Forward sweep — fine autofocus at {current_main_nm} nm")
                 sweep_frac = abs(current_main_nm - main_start_nm) / forward_span_nm
-                # Forward sweep occupies phases 4–5 (2 of 6 sub-phases = 1/3 of slot share)
                 slot_frac = 4 / 6 + sweep_frac * (1 / 6)
                 self._set_status(
                     f"Forward sweep — {slot_label}  pos={current_main_nm / _NM_PER_MM:.3f} mm",
                     _slot_pct(slot_iter, slot_frac),
                     100,
                 )
-                focused_z_nm = _run_autofocus_fine(self.motion, self)
+
+                info(f"[TreeCoreImaging] Forward sweep — fine autofocus at {current_main_nm} nm")
+                new_z_nm, new_score = _run_autofocus_fine(self.motion, self)
+
+                if self._check_stop():
+                    return
+
+                step_drop = prev_score - new_score
+
+                if in_gap:
+                    # We were in a gap — check whether focus has recovered.
+                    if new_score >= ref_score - _FOCUS_DROP_REACQUIRE:
+                        info(
+                            f"[TreeCoreImaging] Focus recovered (score={new_score:.3f}) — "
+                            f"exiting gap mode"
+                        )
+                        in_gap = False
+                        focused_z_nm = new_z_nm
+                        prev_score = new_score
+                    else:
+                        info(
+                            f"[TreeCoreImaging] Still in gap (score={new_score:.3f}) — "
+                            f"continuing at Z={focused_z_nm / _NM_PER_MM:.3f} mm"
+                        )
+                        # Don't update focused_z_nm or prev_score while in a gap.
+
+                elif step_drop >= _FOCUS_DROP_GAP:
+                    info(
+                        f"[TreeCoreImaging] Large focus drop {step_drop:.3f} ≥ {_FOCUS_DROP_GAP}"
+                        f" (score {prev_score:.3f}→{new_score:.3f}) — gap/end detected,"
+                        f" continuing at current Z"
+                    )
+                    in_gap = True
+                    # Don't update focused_z_nm; keep moving at current height.
+
+                elif new_score < ref_score - _FOCUS_DROP_REACQUIRE:
+                    info(
+                        f"[TreeCoreImaging] Focus drop {ref_score - new_score:.3f} ≥ {_FOCUS_DROP_REACQUIRE}"
+                        f" below reference {ref_score:.3f} — re-acquiring via descent"
+                    )
+                    reacq_z_nm, reacq_score = _run_autofocus_descent_from_above(
+                        self.motion, self, focused_z_nm, descent_z_nm
+                    )
+
+                    if self._check_stop():
+                        return
+
+                    focused_z_nm = reacq_z_nm
+                    ref_score = reacq_score
+                    prev_score = reacq_score
+                    info(
+                        f"[TreeCoreImaging] Re-acquisition: Z={focused_z_nm / _NM_PER_MM:.3f} mm"
+                        f"  score={ref_score:.3f}"
+                    )
+
+                    # If the re-acquired score is back at the original descent level,
+                    # revert the reference so subsequent drops are measured from there.
+                    if reacq_score >= descent_score - _FOCUS_DROP_REACQUIRE:
+                        ref_score = descent_score
+                        info(
+                            f"[TreeCoreImaging] Score restored to descent level — "
+                            f"reverting reference to descent_score={descent_score:.3f}"
+                        )
+
+                else:
+                    focused_z_nm = new_z_nm
+                    prev_score = new_score
+
+                    # Score has drifted back up to descent level — revert reference.
+                    if ref_score < descent_score and new_score >= descent_score - _FOCUS_DROP_REACQUIRE:
+                        ref_score = descent_score
+                        info(
+                            f"[TreeCoreImaging] Score organically recovered to descent level"
+                            f" — reverting reference to descent_score={descent_score:.3f}"
+                        )
+
+                actual_pos = self.motion.get_position()
                 _capture_and_save(slot_folder, actual_pos)
 
                 yield
@@ -520,6 +658,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             # The starting position itself is skipped — it was already imaged
             # at the top of the forward sweep.
             # Phase 5-6 (last 1/6 of slot share).
+            # Each new position runs a descent autofocus starting 1 mm above
+            # the current Z rather than a fine autofocus.
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Beginning reverse sweep for {slot_label}")
@@ -573,16 +713,20 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     info(f"[TreeCoreImaging] Background detected — reverse sweep complete for {slot_label}")
                     break
 
-                info(f"[TreeCoreImaging] Reverse sweep — fine autofocus at {current_main_nm} nm")
+                info(f"[TreeCoreImaging] Reverse sweep — descent autofocus at {current_main_nm} nm")
                 sweep_frac = abs(current_main_nm - main_start_nm) / reverse_span_nm
-                # Reverse sweep occupies phase 5–6 (last 1/6 of slot share)
                 slot_frac = 5 / 6 + sweep_frac * (1 / 6)
                 self._set_status(
                     f"Reverse sweep — {slot_label}  pos={current_main_nm / _NM_PER_MM:.3f} mm",
                     _slot_pct(slot_iter, slot_frac),
                     100,
                 )
-                focused_z_nm = _run_autofocus_fine(self.motion, self)
+
+                # Lift 1 mm above current Z and run a descent autofocus.
+                lift_z = focused_z_nm + int(_REACQUIRE_LIFT_MM * _NM_PER_MM)
+                pos = self.motion.get_position()
+                self.motion.move_to_position(Position(x=pos.x, y=pos.y, z=lift_z), wait=True)
+                focused_z_nm, _ = _run_autofocus_descent(self.motion, self)
 
                 if self._check_stop():
                     return

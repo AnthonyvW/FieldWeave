@@ -10,7 +10,7 @@ from motion.models import Position
 from motion.motion_config import MotionSystemSettings
 
 if TYPE_CHECKING:
-    from motion.routines.automation_routine import AutomationRoutine
+    from motion.routines.automation_routine import AutomationRoutine, RoutineResult
 
 # Fired when the MotionState string changes. Signature: (new_state: str) -> None
 MotionStateCallback = Callable[[str], None]
@@ -50,6 +50,15 @@ class MotionControllerManager:
     whenever the user issues a direct motion command (jog, home, move, etc.).
     This is used by the UI to clear the COMPLETE latch on the status bar.
 
+    Routine results
+    ---------------
+    The result of the most recently completed routine is stored in
+    :attr:`last_routine_result`.  This is overwritten each time a routine
+    finishes and is available immediately after :meth:`stop_routine` returns
+    or after :meth:`AutomationRoutine.wait` unblocks.  A child routine can
+    therefore start a sub-routine, wait for it, then inspect
+    ``self.motion.last_routine_result`` to act on what it found.
+
     Typical usage
     -------------
     manager = MotionControllerManager()
@@ -69,6 +78,7 @@ class MotionControllerManager:
         self._lock = threading.Lock()
         self._controller: MotionController | None = None
         self._active_routine: AutomationRoutine | None = None
+        self._last_routine_result: RoutineResult | None = None
 
         self._state_listeners: list[MotionStateCallback] = []
         self._routine_state_listeners: list[RoutineStateCallback] = []
@@ -224,6 +234,11 @@ class MotionControllerManager:
         """True if the active routine is currently paused."""
         return self._active_routine is not None and self._active_routine.is_paused
 
+    @property
+    def last_routine_result(self) -> RoutineResult | None:
+        """The result of the most recently completed routine, or None if no routine has finished yet."""
+        return self._last_routine_result
+
     def start_routine(self, routine: AutomationRoutine) -> None:
         """Start *routine*, replacing any previously finished routine.
 
@@ -234,10 +249,13 @@ class MotionControllerManager:
                 "A routine is already running. Call stop_routine() first."
             )
         self._active_routine = routine
-        # Wire up the routine's state callback so updates flow to our listeners.
         routine.on_state_changed = self._emit_routine_state
+        routine.on_complete = self._on_routine_complete
         info("Started Routine")
         routine.start()
+
+    def _on_routine_complete(self, result: RoutineResult) -> None:
+        self._last_routine_result = result
 
     def pause_routine(self) -> None:
         """Pause the active routine (no-op if none is running)."""

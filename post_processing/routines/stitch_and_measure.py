@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
 from typing import Generator
 
 import cv2
@@ -356,38 +355,6 @@ def _build_dpi_debug_overlay(
 
 
 # ---------------------------------------------------------------------------
-# Result types
-# ---------------------------------------------------------------------------
-
-@dataclass
-class StitchAndMeasureResult:
-    """
-    Produced by :class:`StitchAndMeasureRoutine` on successful completion.
-
-    Attach a done-callback to the routine or check this attribute after
-    ``wait()`` returns.
-    """
-
-    output_path: str
-    """Absolute path to the saved panorama JPEG."""
-
-    debug_path: str | None
-    """Absolute path to the DPI debug overlay image, or None if not saved."""
-
-    dpi: float | None
-    """Measured DPI, or None if scale-bar detection failed."""
-
-    image_width: int
-    image_height: int
-
-    stitched_rgb: np.ndarray
-    """
-    Final panorama in RGB888 order, shape (H, W, 3), dtype uint8.
-    Safe to wrap in QImage directly on the GUI thread after ``wait()`` returns.
-    """
-
-
-# ---------------------------------------------------------------------------
 # StitchAndMeasureRoutine
 # ---------------------------------------------------------------------------
 
@@ -399,8 +366,17 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
     filenames include ``_y<position>`` tags.  The output JPEG is written to
     *input_folder* using the folder's own name as the filename stem.
 
-    Results are available via the :attr:`result` attribute after the routine
-    completes (i.e. after :meth:`~PostProcessingRoutine.wait` returns).
+    On success, :attr:`~PostProcessingRoutine.result` is populated with
+    ``success=True`` and the following keys in ``result.data``:
+
+    - ``output_path`` (:class:`str`): absolute path to the saved panorama JPEG.
+    - ``debug_path`` (:class:`str` or ``None``): path to the DPI debug overlay, or None.
+    - ``dpi`` (:class:`float` or ``None``): measured DPI, or None if detection failed.
+    - ``image_width`` (:class:`int`): panorama width in pixels.
+    - ``image_height`` (:class:`int`): panorama height in pixels.
+    - ``stitched_rgb`` (:class:`numpy.ndarray`): final panorama in RGB888 order,
+      shape ``(H, W, 3)``, dtype ``uint8``.  Safe to wrap in QImage directly on
+      the GUI thread after :meth:`~PostProcessingRoutine.wait` returns.
 
     Parameters
     ----------
@@ -416,7 +392,6 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
     def __init__(self, settings: FieldWeaveSettings, input_folder: str) -> None:
         super().__init__(settings)
         self.input_folder = input_folder
-        self.result: StitchAndMeasureResult | None = None
 
     def steps(self) -> Generator[None, None, None]:
         sm = self.settings.post_processing.stitch_and_measure
@@ -513,7 +488,8 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
                 debug(f"StitchAndMeasureRoutine: debug overlay saved to {debug_path}")
 
         h, w = stitched.shape[:2]
-        self.result = StitchAndMeasureResult(
+        self._set_result(
+            success=True,
             output_path=output_path,
             debug_path=debug_path,
             dpi=dpi,
