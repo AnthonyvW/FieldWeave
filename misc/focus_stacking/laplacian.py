@@ -36,6 +36,7 @@ def _snap(name: str, step_start: float, checkpoints: list[_Checkpoint]) -> float
     now = time.perf_counter()
     current, peak = tracemalloc.get_traced_memory()
     checkpoints.append(_Checkpoint(name, now - step_start, current / 2**20, peak / 2**20))
+    tracemalloc.reset_peak()
     return now
 
 
@@ -219,37 +220,30 @@ def _image_to_lab(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(u8, cv2.COLOR_RGB2Lab).astype(np.float32)
 
 
-def _lum_pyramid(lab: np.ndarray, levels: int) -> list[np.ndarray]:
-    """Build luminance-only Laplacian pyramid bands for a Lab image.
-
-    Returns levels+1 entries: bands[0..levels-1] are Laplacian bands,
-    bands[levels] is the coarsest Gaussian residual.
-    """
-    gauss_lum: list[np.ndarray] = [lab[:, :, 0]]
-    for _ in range(levels):
-        gauss_lum.append(reduce(gauss_lum[-1]))
-    bands: list[np.ndarray] = []
-    for i in range(levels):
-        bands.append(gauss_lum[i] - expand(gauss_lum[i + 1], gauss_lum[i].shape))
-    bands.append(gauss_lum[-1])
-    return bands
-
-
 def _lab_lap_pyramid(lab: np.ndarray, levels: int) -> list[np.ndarray]:
     """Build full 3-channel Laplacian pyramid bands for a Lab image.
 
-    Returns levels+1 entries of shape (H_l, W_l, 3).
+    Returns levels+1 entries of shape (H_l, W_l, 3). Builds one level at a
+    time, keeping only the current and next Gaussian in memory simultaneously
+    so the full Gaussian stack is never allocated at once.
+    The luminance Laplacian bands are the [:,:,0] slice of each entry.
     """
-    gauss: list[np.ndarray] = [lab]
-    for _ in range(levels):
-        prev = gauss[-1]
-        gauss.append(np.stack([reduce(prev[:, :, c]) for c in range(3)], axis=-1))
     bands: list[np.ndarray] = []
-    for i in range(levels):
-        cur_shape = gauss[i].shape[:2]
-        exp = np.stack([expand(gauss[i + 1][:, :, c], cur_shape) for c in range(3)], axis=-1)
-        bands.append(gauss[i] - exp)
-    bands.append(gauss[-1])
+    current = lab
+    for _ in range(levels):
+        nxt = np.empty((
+            (current.shape[0] + 1) // 2,
+            (current.shape[1] + 1) // 2,
+            3,
+        ), dtype=np.float32)
+        for c in range(3):
+            nxt[:, :, c] = reduce(current[:, :, c])
+        exp = np.empty_like(current)
+        for c in range(3):
+            exp[:, :, c] = expand(nxt[:, :, c], current.shape[:2])
+        bands.append(current - exp)
+        current = nxt
+    bands.append(current)
     return bands
 
 
@@ -276,67 +270,82 @@ def stack_images(
     levels: int,
     sharpness: float,
     dark_threshold: float,
+    workers: int = 3,
 ) -> np.ndarray:
-    """Fuse a stack of images using cached-lum two-pass Laplacian pyramid fusion.
+    """Fuse a stack of images using single-pass unnormalized Laplacian pyramid fusion.
 
-    Pass 1 — read each image once, build its luminance Laplacian pyramid and
-    cache it in memory, compute per-level energy, and accumulate energy_sums.
-    Luminance bands total ~8 MiB per image (single channel, geometrically
-    shrinking) so caching all N is cheap relative to the full image stack.
+    Accumulates energy-weighted Lab bands and energy sums in one disk read per
+    image, then divides at the end. Mathematically identical to normalized fusion:
+      Σ(e_k / Σe_k · x_k) = Σ(e_k · x_k) / Σe_k
 
-    Pass 2 — iterate the cached lum pyramids to compute normalized weights,
-    then load each image once more from disk to build the full Lab pyramid and
-    accumulate weighted bands. Each image is loaded, fused, and discarded.
-
-    This halves disk reads vs the previous two-full-image-pass approach while
-    keeping peak RAM well below the full N-image stack.
+    workers controls how many images are processed concurrently. Peak RAM scales
+    with workers × ~100 MiB per image plus the fixed fused_lp accumulator.
+    Default of 3 workers balances speed and memory for most systems.
     """
-    n = len(src_paths)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import os
+
     img0 = np.array(Image.open(src_paths[0]).convert("RGB"), dtype=np.float32)
     h, w = img0.shape[:2]
     del img0
     cv2_size = (w, h)
 
-    # --- Pass 1: read each image once, cache lum pyramids, accumulate energy sums ---
-    t = time.perf_counter()
-    print("  Pass 1: building luminance pyramids...")
-    energy_sums: list[np.ndarray | None] = [None] * (levels + 1)
-    lum_pyramids: list[list[np.ndarray]] = []
+    n_workers = min(len(src_paths), workers if workers > 0 else (os.cpu_count() or 4))
 
-    for path, warp in zip(src_paths, warps):
-        lab = _image_to_lab(_load_and_warp(path, warp, cv2_size))
-        lum_bands = _lum_pyramid(lab, levels)
-        del lab
-        lum_pyramids.append(lum_bands)
-
-        for i in range(levels):
-            e = region_energy(lum_bands[i]) ** sharpness
-            energy_sums[i] = e if energy_sums[i] is None else energy_sums[i] + e
-
-        e_top = ((region_deviation(lum_bands[-1]) + region_entropy(lum_bands[-1])) * 0.5) ** sharpness
-        energy_sums[levels] = e_top if energy_sums[levels] is None else energy_sums[levels] + e_top
-
-    print(f"    done ({_elapsed(t)})")
-
-    # --- Pass 2: load each image once, fuse using cached lum weights ---
-    t = time.perf_counter()
-    print("  Pass 2: fusing...")
-    fused_lp: list[np.ndarray | None] = [None] * (levels + 1)
-
-    for (path, warp), lum_bands in zip(zip(src_paths, warps), lum_pyramids):
+    def _process_image(args: tuple[Path, np.ndarray]) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        path, warp = args
         lab = _image_to_lab(_load_and_warp(path, warp, cv2_size))
         lap = _lab_lap_pyramid(lab, levels)
         del lab
-
+        energies: list[np.ndarray] = []
         for i in range(levels):
-            w_map = (region_energy(lum_bands[i]) ** sharpness) / (energy_sums[i] + 1e-10)  # type: ignore[operator]
-            weighted = lap[i] * w_map[:, :, np.newaxis]
-            fused_lp[i] = weighted if fused_lp[i] is None else fused_lp[i] + weighted  # type: ignore[operator]
+            energies.append(region_energy(lap[i][:, :, 0]) ** sharpness)
+        lv = lap[-1][:, :, 0]
+        energies.append(((region_deviation(lv) + region_entropy(lv)) * 0.5) ** sharpness)
+        return energies, lap
 
-        e_top = ((region_deviation(lum_bands[-1]) + region_entropy(lum_bands[-1])) * 0.5) ** sharpness
-        w_top = e_top / (energy_sums[levels] + 1e-10)  # type: ignore[operator]
-        weighted_top = lap[-1] * w_top[:, :, np.newaxis]
-        fused_lp[levels] = weighted_top if fused_lp[levels] is None else fused_lp[levels] + weighted_top  # type: ignore[operator]
+    t = time.perf_counter()
+    print(f"  Fusing ({n_workers} workers)...")
+    energy_sums: list[np.ndarray | None] = [None] * (levels + 1)
+    fused_lp: list[np.ndarray | None] = [None] * (levels + 1)
+    weighted_buf: np.ndarray | None = None
+
+    items = list(zip(src_paths, warps))
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        pending: dict = {}
+        submit_idx = 0
+
+        while submit_idx < len(items) and len(pending) < n_workers:
+            f = pool.submit(_process_image, items[submit_idx])
+            pending[f] = submit_idx
+            submit_idx += 1
+
+        while pending:
+            done = next(as_completed(pending))
+            pending.pop(done)
+
+            if submit_idx < len(items):
+                f = pool.submit(_process_image, items[submit_idx])
+                pending[f] = submit_idx
+                submit_idx += 1
+
+            energies, lap = done.result()
+            for i in range(levels + 1):
+                e = energies[i]
+                band = lap[i]
+                lap[i] = None  # type: ignore[call-overload]
+                energy_sums[i] = e if energy_sums[i] is None else energy_sums[i] + e
+                if weighted_buf is None or weighted_buf.shape != band.shape:
+                    weighted_buf = np.empty_like(band)
+                np.multiply(band, e[:, :, np.newaxis], out=weighted_buf)
+                if fused_lp[i] is None:
+                    fused_lp[i] = weighted_buf.copy()
+                else:
+                    fused_lp[i] += weighted_buf  # type: ignore[operator]
+
+    for i in range(levels + 1):
+        fused_lp[i] /= energy_sums[i][:, :, np.newaxis] + 1e-10  # type: ignore[operator,index]
 
     print(f"    done ({_elapsed(t)})")
 
@@ -430,6 +439,14 @@ def main() -> None:
             "Raise if color casts remain in shadows; lower if legitimate dark colors are being desaturated."
         ),
     )
+    parser.add_argument(
+        "--workers", type=int, default=3,
+        help=(
+            "Number of parallel workers for stacking (default: 3). "
+            "Higher values are faster but increase peak RAM by ~100 MiB per additional worker. "
+            "Set to 0 to use all CPU cores."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.folder.is_dir():
@@ -460,7 +477,7 @@ def main() -> None:
         warps = [identity.copy() for _ in src_paths]
 
     print("Stacking...")
-    result = stack_images(src_paths, warps, levels, args.sharpness, args.dark_threshold)
+    result = stack_images(src_paths, warps, levels, args.sharpness, args.dark_threshold, args.workers)
     t = _snap("Stack", t, checkpoints)
 
     out_path = args.folder / "stacked.jpg"
