@@ -49,24 +49,17 @@ def _print_report(checkpoints: list[_Checkpoint], total_elapsed: float) -> None:
     print("  " + "-" * (len(header) - 2))
     print(f"  {'Total':<{name_w}}  {total_elapsed:>7.2f}s")
 
-def load_images(folder: Path) -> tuple[list[np.ndarray], tuple[int, int]]:
+def load_images(folder: Path) -> tuple[list[Path], tuple[int, int]]:
     paths = sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
     if len(paths) < 2:
         print(f"Error: need at least 2 images in '{folder}', found {len(paths)}.")
         sys.exit(1)
 
-    images = []
-    reference_size: tuple[int, int] | None = None
-    for path in paths:
-        img = Image.open(path).convert("RGB")
-        if reference_size is None:
-            reference_size = img.size
-        elif img.size != reference_size:
-            img = img.resize(reference_size, Image.LANCZOS)
-        images.append(np.array(img, dtype=np.float32))
-        print(f"  Loaded: {path.name}")
-
-    return images, reference_size  # type: ignore[return-value]
+    img0 = Image.open(paths[0]).convert("RGB")
+    reference_size: tuple[int, int] = img0.size
+    n = len(paths)
+    print(f"  Found {n} images, reference size: {reference_size[0]}x{reference_size[1]}")
+    return paths, reference_size
 
 
 def _to_gray_cv(image: np.ndarray) -> np.ndarray:
@@ -118,49 +111,52 @@ def _chain_affines(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return (a3 @ b3)[:2]
 
 
-def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.ndarray]:
-    """Align all images using OpenCV ECC, mirroring task_align.cc.
+def align_images(
+    src_paths: list[Path],
+    reference_size: tuple[int, int],
+    min_shift: float = 5.0,
+) -> list[np.ndarray]:
+    """Compute cumulative affine warps for all images using neighbour-chained ECC.
 
-    Each image is aligned against its neighbour (not the global reference)
-    and the per-step affine transforms are chained back to the reference frame.
-    This matches the default behaviour of the focus-stack C++ program, which
-    handles deep stacks where extreme images are too blurry to align directly
-    against the centre.
+    ECC is run on raw unwarped grayscale neighbor pairs so that interpolation
+    error from warp application never feeds back into subsequent alignment steps.
+    Warp matrices are chained purely mathematically. Only two raw grayscale
+    arrays are live at any time.
 
-    Two ECC passes are used per pair, mirroring match_transform():
-      - Rough pass at 256px (25 iterations, eps=0.01, Gaussian pyramid level 1)
-      - Fine pass at 2048px (50 iterations, eps=0.001, Gaussian pyramid level 3)
-
-    Transforms with a translation below min_shift pixels AND negligible
-    rotation/scale are skipped to avoid applying unnecessary resampling.
+    Returns a list of 2×3 float32 warp matrices, one per image. The first is
+    always identity. Images that fail to converge or fall below min_shift get
+    the previous cumulative warp (not identity) so the chain remains consistent.
     """
-def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.ndarray]:
-    """Align all images in-place using OpenCV ECC and return the cumulative warp
-    for each image (identity for images that were skipped or failed to converge).
-
-    The warp list has the same length as images and can be passed to
-    stack_images so images can be re-warped on the fly during pass 2 without
-    storing the full aligned stack in memory.
-    """
-    grays = [_to_gray_cv(np.clip(img, 0, 255).astype(np.uint8)) for img in images]
-    h, w = images[0].shape[:2]
+    ref_w, ref_h = reference_size
     identity = np.eye(2, 3, dtype=np.float32)
-    cumulative_warp = identity.copy()
     warps: list[np.ndarray] = [identity.copy()]
+    cumulative_warp = identity.copy()
 
-    for i in range(1, len(images)):
+    def _load_raw_gray(path: Path) -> np.ndarray:
+        img = np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+        if img.shape[1] != ref_w or img.shape[0] != ref_h:
+            img = cv2.resize(img, (ref_w, ref_h), interpolation=cv2.INTER_AREA)
+        return _to_gray_cv(img)
+
+    prev_gray = _load_raw_gray(src_paths[0])
+
+    for i in range(1, len(src_paths)):
+        src_gray = _load_raw_gray(src_paths[i])
+
         warp = identity.copy()
         converged = True
         for max_res, rough in [(256, True), (2048, False)]:
             try:
-                warp = _ecc_align(grays[i - 1], grays[i], max_res, rough)
+                warp = _ecc_align(prev_gray, src_gray, max_res, rough)
             except cv2.error:
                 converged = False
                 break
 
+        prev_gray = src_gray
+
         if not converged:
             print(f"  Image {i + 1}: ECC did not converge — using previous transform")
-            warps.append(identity.copy())
+            warps.append(cumulative_warp.copy())
             continue
 
         cumulative_warp = _chain_affines(cumulative_warp, warp)
@@ -175,14 +171,10 @@ def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.nd
         angle = np.degrees(np.arctan2(cumulative_warp[1, 0], cumulative_warp[0, 0]))
         tx, ty = cumulative_warp[0, 2], cumulative_warp[1, 2]
         print(f"  Image {i + 1}: rotation {angle:+.2f}°  shift ({ty:+.1f}, {tx:+.1f}) px")
-
         warps.append(cumulative_warp.copy())
-        src_u8 = np.clip(images[i], 0, 255).astype(np.uint8)
-        images[i] = cv2.warpAffine(src_u8, cumulative_warp, (w, h),
-                                   flags=cv2.INTER_CUBIC,
-                                   borderMode=cv2.BORDER_REFLECT).astype(np.float32)
 
-    return warps  # type: ignore[return-value]
+    return warps
+
 
 
 def _smooth(image: np.ndarray) -> np.ndarray:
@@ -262,12 +254,14 @@ def _lab_lap_pyramid(lab: np.ndarray, levels: int) -> list[np.ndarray]:
 
 
 def _load_and_warp(path: Path, warp: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    """Load an image from disk and apply a pre-computed affine warp.
+    """Load an image from disk, resize if needed, and apply a pre-computed affine warp.
 
     size is (w, h) as expected by cv2.warpAffine.
     Returns a float32 RGB array.
     """
     img = np.array(Image.open(path).convert("RGB"), dtype=np.float32)
+    if img.shape[1] != size[0] or img.shape[0] != size[1]:
+        img = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
     if not np.array_equal(warp, np.eye(2, 3, dtype=np.float32)):
         u8 = np.clip(img, 0, 255).astype(np.uint8)
         img = cv2.warpAffine(u8, warp, size,
@@ -449,24 +443,21 @@ def main() -> None:
     t = t_total
 
     print(f"Loading images from '{args.folder}'...")
-    images, size = load_images(args.folder)
-    src_paths = sorted(p for p in args.folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
+    src_paths, reference_size = load_images(args.folder)
     t = _snap("Load", t, checkpoints)
 
-    h, w = images[0].shape[:2]
-    levels = args.levels if args.levels > 0 else compute_levels((h, w))
-    print(f"Image size: {w}x{h}  |  Images: {len(images)}  |  Pyramid levels: {levels}  |  Sharpness: {args.sharpness}  |  Dark threshold: {args.dark_threshold}")
+    ref_w, ref_h = reference_size
+    levels = args.levels if args.levels > 0 else compute_levels((ref_h, ref_w))
+    print(f"Image size: {ref_w}x{ref_h}  |  Images: {len(src_paths)}  |  Pyramid levels: {levels}  |  Sharpness: {args.sharpness}  |  Dark threshold: {args.dark_threshold}")
 
     identity = np.eye(2, 3, dtype=np.float32)
     if not args.no_align:
         print("Aligning (ECC affine, neighbour-chained)...")
-        warps = align_images(images, min_shift=args.min_shift)
+        warps = align_images(src_paths, reference_size, min_shift=args.min_shift)
         t = _snap("Align", t, checkpoints)
     else:
         print("Skipping alignment.")
-        warps = [identity.copy() for _ in images]
-
-    del images
+        warps = [identity.copy() for _ in src_paths]
 
     print("Stacking...")
     result = stack_images(src_paths, warps, levels, args.sharpness, args.dark_threshold)
