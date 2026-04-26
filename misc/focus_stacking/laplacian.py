@@ -134,10 +134,19 @@ def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.nd
     Transforms with a translation below min_shift pixels AND negligible
     rotation/scale are skipped to avoid applying unnecessary resampling.
     """
+def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.ndarray]:
+    """Align all images in-place using OpenCV ECC and return the cumulative warp
+    for each image (identity for images that were skipped or failed to converge).
+
+    The warp list has the same length as images and can be passed to
+    stack_images so images can be re-warped on the fly during pass 2 without
+    storing the full aligned stack in memory.
+    """
     grays = [_to_gray_cv(np.clip(img, 0, 255).astype(np.uint8)) for img in images]
     h, w = images[0].shape[:2]
     identity = np.eye(2, 3, dtype=np.float32)
     cumulative_warp = identity.copy()
+    warps: list[np.ndarray] = [identity.copy()]
 
     for i in range(1, len(images)):
         warp = identity.copy()
@@ -151,6 +160,7 @@ def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.nd
 
         if not converged:
             print(f"  Image {i + 1}: ECC did not converge — using previous transform")
+            warps.append(identity.copy())
             continue
 
         cumulative_warp = _chain_affines(cumulative_warp, warp)
@@ -159,18 +169,20 @@ def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.nd
         is_identity_linear = np.allclose(cumulative_warp[:, :2], np.eye(2), atol=1e-3)
         if translation < min_shift and is_identity_linear:
             print(f"  Image {i + 1}: transform negligible — skipped")
+            warps.append(identity.copy())
             continue
 
         angle = np.degrees(np.arctan2(cumulative_warp[1, 0], cumulative_warp[0, 0]))
         tx, ty = cumulative_warp[0, 2], cumulative_warp[1, 2]
         print(f"  Image {i + 1}: rotation {angle:+.2f}°  shift ({ty:+.1f}, {tx:+.1f}) px")
 
+        warps.append(cumulative_warp.copy())
         src_u8 = np.clip(images[i], 0, 255).astype(np.uint8)
         images[i] = cv2.warpAffine(src_u8, cumulative_warp, (w, h),
                                    flags=cv2.INTER_CUBIC,
                                    borderMode=cv2.BORDER_REFLECT).astype(np.float32)
 
-    return images
+    return warps  # type: ignore[return-value]
 
 
 def _smooth(image: np.ndarray) -> np.ndarray:
@@ -210,154 +222,137 @@ def region_entropy(image: np.ndarray, window: int = 8) -> np.ndarray:
 
 
 
-def _fuse_level_low_memory(
-    gauss: np.ndarray,
-    next_gauss: np.ndarray,
-    weight_buf: np.ndarray,
-    weight_copy: np.ndarray,
-    sharpness: float,
-) -> np.ndarray:
-    """Low-memory fusion path for one pyramid level.
+def _image_to_lab(img: np.ndarray) -> np.ndarray:
+    u8 = np.clip(img, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(u8, cv2.COLOR_RGB2Lab).astype(np.float32)
 
-    Computes expand(next_gauss[k, L]) twice per image — once for weights,
-    once during accumulation — to avoid caching the expanded luminance bands.
-    Peak extra allocation per call is one (H, W) tmp array.
+
+def _lum_pyramid(lab: np.ndarray, levels: int) -> list[np.ndarray]:
+    """Build luminance-only Laplacian pyramid bands for a Lab image.
+
+    Returns levels+1 entries: bands[0..levels-1] are Laplacian bands,
+    bands[levels] is the coarsest Gaussian residual.
     """
-    n = gauss.shape[0]
-    cur_shape = gauss.shape[1:3]
-
-    for k in range(n):
-        lum_band = gauss[k, :, :, 0] - expand(next_gauss[k, :, :, 0], cur_shape)
-        weight_buf[k] = region_energy(lum_band) ** sharpness
-    weight_buf /= weight_buf.sum(axis=0, keepdims=True) + 1e-10
-    np.copyto(weight_copy, weight_buf)
-
-    fused_band = np.zeros(cur_shape + (3,), dtype=np.float32)
-    tmp = np.empty(cur_shape, dtype=np.float32)
-    for k in range(n):
-        for c in range(3):
-            np.subtract(gauss[k, :, :, c], expand(next_gauss[k, :, :, c], cur_shape), out=tmp)
-            fused_band[:, :, c] += tmp * weight_copy[k]
-    return fused_band
+    gauss_lum: list[np.ndarray] = [lab[:, :, 0]]
+    for _ in range(levels):
+        gauss_lum.append(reduce(gauss_lum[-1]))
+    bands: list[np.ndarray] = []
+    for i in range(levels):
+        bands.append(gauss_lum[i] - expand(gauss_lum[i + 1], gauss_lum[i].shape))
+    bands.append(gauss_lum[-1])
+    return bands
 
 
-def _fuse_level_high_performance(
-    gauss: np.ndarray,
-    next_gauss: np.ndarray,
-    weight_buf: np.ndarray,
-    weight_copy: np.ndarray,
-    sharpness: float,
-) -> np.ndarray:
-    """High-performance fusion path for one pyramid level.
+def _lab_lap_pyramid(lab: np.ndarray, levels: int) -> list[np.ndarray]:
+    """Build full 3-channel Laplacian pyramid bands for a Lab image.
 
-    Caches all N expanded luminance bands so expand() is called once per image
-    instead of twice. Trades one extra (N, H, W) allocation for fewer convolutions.
+    Returns levels+1 entries of shape (H_l, W_l, 3).
     """
-    n = gauss.shape[0]
-    cur_shape = gauss.shape[1:3]
+    gauss: list[np.ndarray] = [lab]
+    for _ in range(levels):
+        prev = gauss[-1]
+        gauss.append(np.stack([reduce(prev[:, :, c]) for c in range(3)], axis=-1))
+    bands: list[np.ndarray] = []
+    for i in range(levels):
+        cur_shape = gauss[i].shape[:2]
+        exp = np.stack([expand(gauss[i + 1][:, :, c], cur_shape) for c in range(3)], axis=-1)
+        bands.append(gauss[i] - exp)
+    bands.append(gauss[-1])
+    return bands
 
-    expanded_lum = np.empty((n,) + cur_shape, dtype=np.float32)
-    for k in range(n):
-        expanded_lum[k] = expand(next_gauss[k, :, :, 0], cur_shape)
-        weight_buf[k] = region_energy(gauss[k, :, :, 0] - expanded_lum[k]) ** sharpness
-    weight_buf /= weight_buf.sum(axis=0, keepdims=True) + 1e-10
-    np.copyto(weight_copy, weight_buf)
 
-    fused_band = np.zeros(cur_shape + (3,), dtype=np.float32)
-    tmp = np.empty(cur_shape, dtype=np.float32)
-    for k in range(n):
-        np.subtract(gauss[k, :, :, 0], expanded_lum[k], out=tmp)
-        fused_band[:, :, 0] += tmp * weight_copy[k]
-        for c in range(1, 3):
-            np.subtract(gauss[k, :, :, c], expand(next_gauss[k, :, :, c], cur_shape), out=tmp)
-            fused_band[:, :, c] += tmp * weight_copy[k]
-    return fused_band
+def _load_and_warp(path: Path, warp: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Load an image from disk and apply a pre-computed affine warp.
+
+    size is (w, h) as expected by cv2.warpAffine.
+    Returns a float32 RGB array.
+    """
+    img = np.array(Image.open(path).convert("RGB"), dtype=np.float32)
+    if not np.array_equal(warp, np.eye(2, 3, dtype=np.float32)):
+        u8 = np.clip(img, 0, 255).astype(np.uint8)
+        img = cv2.warpAffine(u8, warp, size,
+                             flags=cv2.INTER_CUBIC,
+                             borderMode=cv2.BORDER_REFLECT).astype(np.float32)
+    return img
 
 
 def stack_images(
-    images: list[np.ndarray],
+    src_paths: list[Path],
+    warps: list[np.ndarray],
     levels: int,
     sharpness: float,
     dark_threshold: float,
-    high_performance: bool = False,
 ) -> np.ndarray:
-    """Fuse a stack of aligned RGB images using Laplacian pyramid blending in Lab space.
+    """Fuse a stack of images using cached-lum two-pass Laplacian pyramid fusion.
 
-    When high_performance=False (default), expand() is called twice per image per
-    level for the luminance channel to avoid caching expanded bands, minimising
-    peak memory at the cost of redundant convolutions.
+    Pass 1 — read each image once, build its luminance Laplacian pyramid and
+    cache it in memory, compute per-level energy, and accumulate energy_sums.
+    Luminance bands total ~8 MiB per image (single channel, geometrically
+    shrinking) so caching all N is cheap relative to the full image stack.
 
-    When high_performance=True, expanded luminance bands are cached in an extra
-    (N, H, W) buffer so expand() is only called once per image per level.
+    Pass 2 — iterate the cached lum pyramids to compute normalized weights,
+    then load each image once more from disk to build the full Lab pyramid and
+    accumulate weighted bands. Each image is loaded, fused, and discarded.
+
+    This halves disk reads vs the previous two-full-image-pass approach while
+    keeping peak RAM well below the full N-image stack.
     """
-    n = len(images)
-    fuse_level = _fuse_level_high_performance if high_performance else _fuse_level_low_memory
+    n = len(src_paths)
+    img0 = np.array(Image.open(src_paths[0]).convert("RGB"), dtype=np.float32)
+    h, w = img0.shape[:2]
+    del img0
+    cv2_size = (w, h)
 
+    # --- Pass 1: read each image once, cache lum pyramids, accumulate energy sums ---
     t = time.perf_counter()
-    print("  Converting to Lab...")
-    gauss = np.empty((n,) + images[0].shape[:2] + (3,), dtype=np.float32)
-    for k in range(n):
-        img = images[k]
-        images[k] = None  # type: ignore[assignment]  # release RGB array immediately
-        u8 = np.clip(img, 0, 255).astype(np.uint8)
-        gauss[k] = cv2.cvtColor(u8, cv2.COLOR_RGB2Lab).astype(np.float32)
-    images.clear()
+    print("  Pass 1: building luminance pyramids...")
+    energy_sums: list[np.ndarray | None] = [None] * (levels + 1)
+    lum_pyramids: list[list[np.ndarray]] = []
+
+    for path, warp in zip(src_paths, warps):
+        lab = _image_to_lab(_load_and_warp(path, warp, cv2_size))
+        lum_bands = _lum_pyramid(lab, levels)
+        del lab
+        lum_pyramids.append(lum_bands)
+
+        for i in range(levels):
+            e = region_energy(lum_bands[i]) ** sharpness
+            energy_sums[i] = e if energy_sums[i] is None else energy_sums[i] + e
+
+        e_top = ((region_deviation(lum_bands[-1]) + region_entropy(lum_bands[-1])) * 0.5) ** sharpness
+        energy_sums[levels] = e_top if energy_sums[levels] is None else energy_sums[levels] + e_top
+
     print(f"    done ({_elapsed(t)})")
 
+    # --- Pass 2: load each image once, fuse using cached lum weights ---
     t = time.perf_counter()
-    mode = "high-performance" if high_performance else "low-memory"
-    print(f"  Fusing channels using streaming pyramid (levels={levels}, mode={mode})...")
+    print("  Pass 2: fusing...")
+    fused_lp: list[np.ndarray | None] = [None] * (levels + 1)
 
-    fused_lp: list[np.ndarray] = []
-    weight_buf: np.ndarray | None = None
-    weight_copy: np.ndarray | None = None
+    for (path, warp), lum_bands in zip(zip(src_paths, warps), lum_pyramids):
+        lab = _image_to_lab(_load_and_warp(path, warp, cv2_size))
+        lap = _lab_lap_pyramid(lab, levels)
+        del lab
 
-    for _ in range(levels):
-        cur_shape = gauss.shape[1:3]
+        for i in range(levels):
+            w_map = (region_energy(lum_bands[i]) ** sharpness) / (energy_sums[i] + 1e-10)  # type: ignore[operator]
+            weighted = lap[i] * w_map[:, :, np.newaxis]
+            fused_lp[i] = weighted if fused_lp[i] is None else fused_lp[i] + weighted  # type: ignore[operator]
 
-        if weight_buf is None or weight_buf.shape[1:] != cur_shape:
-            weight_buf = np.empty((n,) + cur_shape, dtype=np.float32)
-            weight_copy = np.empty_like(weight_buf)
-
-        next_h = (cur_shape[0] + 1) // 2
-        next_w = (cur_shape[1] + 1) // 2
-        next_gauss = np.empty((n, next_h, next_w, 3), dtype=np.float32)
-        for k in range(n):
-            for c in range(3):
-                next_gauss[k, :, :, c] = reduce(gauss[k, :, :, c])
-
-        fused_lp.append(fuse_level(gauss, next_gauss, weight_buf, weight_copy, sharpness))
-        gauss = next_gauss
-
-    # Coarsest residual level — deviation + entropy weights on luminance.
-    coarse_shape = gauss.shape[1:3]
-    if weight_buf is None or weight_buf.shape[1:] != coarse_shape:
-        weight_buf = np.empty((n,) + coarse_shape, dtype=np.float32)
-        weight_copy = np.empty_like(weight_buf)
-
-    for k in range(n):
-        lv = gauss[k, :, :, 0]
-        weight_buf[k] = ((region_deviation(lv) + region_entropy(lv)) * 0.5) ** sharpness
-    weight_buf /= weight_buf.sum(axis=0, keepdims=True) + 1e-10
-    np.copyto(weight_copy, weight_buf)
-
-    fused_band = np.zeros(coarse_shape + (3,), dtype=np.float32)
-    for k in range(n):
-        for c in range(3):
-            fused_band[:, :, c] += gauss[k, :, :, c] * weight_copy[k]
-    fused_lp.append(fused_band)
+        e_top = ((region_deviation(lum_bands[-1]) + region_entropy(lum_bands[-1])) * 0.5) ** sharpness
+        w_top = e_top / (energy_sums[levels] + 1e-10)  # type: ignore[operator]
+        weighted_top = lap[-1] * w_top[:, :, np.newaxis]
+        fused_lp[levels] = weighted_top if fused_lp[levels] is None else fused_lp[levels] + weighted_top  # type: ignore[operator]
 
     print(f"    done ({_elapsed(t)})")
 
     t = time.perf_counter()
-    print("  Reconstructing from fused pyramid...")
-    # fused_lp entries are (H, W, 3); reconstruct each channel independently.
-    image = fused_lp[-1].copy()
+    print("  Reconstructing...")
+    image = fused_lp[-1].copy()  # type: ignore[union-attr]
     for band in reversed(fused_lp[:-1]):
-        expanded = np.stack(
-            [expand(image[:, :, c], band.shape[:2]) for c in range(3)], axis=-1
-        )
-        image = expanded + band
+        cur_shape = band.shape[:2]  # type: ignore[union-attr]
+        exp = np.stack([expand(image[:, :, c], cur_shape) for c in range(3)], axis=-1)
+        image = exp + band  # type: ignore[operator]
     fused_lab = image
     print(f"    done ({_elapsed(t)})")
 
@@ -368,8 +363,7 @@ def stack_images(
 
     t = time.perf_counter()
     print("  Converting back to RGB...")
-    clipped = np.clip(fused_lab, 0, 255).astype(np.uint8)
-    result = cv2.cvtColor(clipped, cv2.COLOR_Lab2RGB)
+    result = cv2.cvtColor(np.clip(fused_lab, 0, 255).astype(np.uint8), cv2.COLOR_Lab2RGB)
     print(f"    done ({_elapsed(t)})")
 
     return result
@@ -409,7 +403,7 @@ def main() -> None:
     parser.add_argument("folder", type=Path, help="Folder containing input images.")
     parser.add_argument(
         "--no-align", action="store_true",
-        help="Skip DFT alignment (use when images are already registered).",
+        help="Skip ECC alignment (use when images are already registered).",
     )
     parser.add_argument(
         "--min-shift", type=float, default=5.0,
@@ -442,20 +436,12 @@ def main() -> None:
             "Raise if color casts remain in shadows; lower if legitimate dark colors are being desaturated."
         ),
     )
-    parser.add_argument(
-        "--performance", choices=["low", "high"], default="low",
-        help=(
-            "Memory/performance trade-off (default: low). "
-            "'low' minimises peak memory by recomputing expanded luminance bands during accumulation. "
-            "'high' caches expanded luminance bands in an extra (N, H, W) buffer to halve convolution "
-            "calls on the luminance channel, at the cost of higher peak memory."
-        ),
-    )
     args = parser.parse_args()
 
     if not args.folder.is_dir():
         print(f"Error: '{args.folder}' is not a directory.")
         sys.exit(1)
+
 
     checkpoints: list[_Checkpoint] = []
     t_total = time.perf_counter()
@@ -464,22 +450,26 @@ def main() -> None:
 
     print(f"Loading images from '{args.folder}'...")
     images, size = load_images(args.folder)
+    src_paths = sorted(p for p in args.folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
     t = _snap("Load", t, checkpoints)
 
     h, w = images[0].shape[:2]
     levels = args.levels if args.levels > 0 else compute_levels((h, w))
     print(f"Image size: {w}x{h}  |  Images: {len(images)}  |  Pyramid levels: {levels}  |  Sharpness: {args.sharpness}  |  Dark threshold: {args.dark_threshold}")
 
+    identity = np.eye(2, 3, dtype=np.float32)
     if not args.no_align:
         print("Aligning (ECC affine, neighbour-chained)...")
-        images = align_images(images, min_shift=args.min_shift)
+        warps = align_images(images, min_shift=args.min_shift)
         t = _snap("Align", t, checkpoints)
     else:
         print("Skipping alignment.")
+        warps = [identity.copy() for _ in images]
+
+    del images
 
     print("Stacking...")
-    result = stack_images(images, levels, args.sharpness, args.dark_threshold, args.performance == "high")
-    del images
+    result = stack_images(src_paths, warps, levels, args.sharpness, args.dark_threshold)
     t = _snap("Stack", t, checkpoints)
 
     out_path = args.folder / "stacked.jpg"
@@ -487,7 +477,6 @@ def main() -> None:
     t = _snap("Save", t, checkpoints)
 
     tracemalloc.stop()
-
     print(f"Saved: {out_path}")
     _print_report(checkpoints, time.perf_counter() - t_total)
 
