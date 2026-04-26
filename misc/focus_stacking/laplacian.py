@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+import tracemalloc
 from pathlib import Path
 
 import cv2
@@ -10,10 +12,42 @@ from PIL import Image
 from scipy.ndimage import convolve1d, uniform_filter
 
 
-KERNEL_1D = np.array([1, 4, 6, 4, 1], dtype=np.float64) / 16.0
+KERNEL_1D = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
+
+def _elapsed(start: float) -> str:
+    return f"{time.perf_counter() - start:.2f}s"
+
+
+class _Checkpoint:
+    __slots__ = ("name", "elapsed", "current_mib", "peak_mib")
+
+    def __init__(self, name: str, elapsed: float, current_mib: float, peak_mib: float) -> None:
+        self.name = name
+        self.elapsed = elapsed
+        self.current_mib = current_mib
+        self.peak_mib = peak_mib
+
+
+def _snap(name: str, step_start: float, checkpoints: list[_Checkpoint]) -> float:
+    """Record elapsed time and current tracemalloc stats, return now for the next timer."""
+    now = time.perf_counter()
+    current, peak = tracemalloc.get_traced_memory()
+    checkpoints.append(_Checkpoint(name, now - step_start, current / 2**20, peak / 2**20))
+    return now
+
+
+def _print_report(checkpoints: list[_Checkpoint], total_elapsed: float) -> None:
+    name_w = max(len(c.name) for c in checkpoints)
+    header = f"  {'Step':<{name_w}}  {'Time':>8}  {'Current MiB':>12}  {'Peak MiB':>10}"
+    print("\n" + header)
+    print("  " + "-" * (len(header) - 2))
+    for c in checkpoints:
+        print(f"  {c.name:<{name_w}}  {c.elapsed:>7.2f}s  {c.current_mib:>11.1f}  {c.peak_mib:>9.1f}")
+    print("  " + "-" * (len(header) - 2))
+    print(f"  {'Total':<{name_w}}  {total_elapsed:>7.2f}s")
 
 def load_images(folder: Path) -> tuple[list[np.ndarray], tuple[int, int]]:
     paths = sorted(p for p in folder.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS)
@@ -29,7 +63,7 @@ def load_images(folder: Path) -> tuple[list[np.ndarray], tuple[int, int]]:
             reference_size = img.size
         elif img.size != reference_size:
             img = img.resize(reference_size, Image.LANCZOS)
-        images.append(np.array(img, dtype=np.float64))
+        images.append(np.array(img, dtype=np.float32))
         print(f"  Loaded: {path.name}")
 
     return images, reference_size  # type: ignore[return-value]
@@ -103,36 +137,28 @@ def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.nd
     grays = [_to_gray_cv(np.clip(img, 0, 255).astype(np.uint8)) for img in images]
     h, w = images[0].shape[:2]
     identity = np.eye(2, 3, dtype=np.float32)
-
-    aligned = [images[0]]
     cumulative_warp = identity.copy()
 
     for i in range(1, len(images)):
-        ref_gray = grays[i - 1]
-        src_gray = grays[i]
-
         warp = identity.copy()
         converged = True
         for max_res, rough in [(256, True), (2048, False)]:
             try:
-                warp = _ecc_align(ref_gray, src_gray, max_res, rough)
+                warp = _ecc_align(grays[i - 1], grays[i], max_res, rough)
             except cv2.error:
                 converged = False
                 break
 
         if not converged:
             print(f"  Image {i + 1}: ECC did not converge — using previous transform")
-            aligned.append(images[i])
             continue
 
         cumulative_warp = _chain_affines(cumulative_warp, warp)
 
         translation = np.linalg.norm(cumulative_warp[:, 2])
-        linear_part = cumulative_warp[:, :2]
-        is_identity_linear = np.allclose(linear_part, np.eye(2), atol=1e-3)
+        is_identity_linear = np.allclose(cumulative_warp[:, :2], np.eye(2), atol=1e-3)
         if translation < min_shift and is_identity_linear:
             print(f"  Image {i + 1}: transform negligible — skipped")
-            aligned.append(images[i])
             continue
 
         angle = np.degrees(np.arctan2(cumulative_warp[1, 0], cumulative_warp[0, 0]))
@@ -140,12 +166,11 @@ def align_images(images: list[np.ndarray], min_shift: float = 5.0) -> list[np.nd
         print(f"  Image {i + 1}: rotation {angle:+.2f}°  shift ({ty:+.1f}, {tx:+.1f}) px")
 
         src_u8 = np.clip(images[i], 0, 255).astype(np.uint8)
-        warped = cv2.warpAffine(src_u8, cumulative_warp, (w, h),
-                                flags=cv2.INTER_CUBIC,
-                                borderMode=cv2.BORDER_REFLECT)
-        aligned.append(warped.astype(np.float64))
+        images[i] = cv2.warpAffine(src_u8, cumulative_warp, (w, h),
+                                   flags=cv2.INTER_CUBIC,
+                                   borderMode=cv2.BORDER_REFLECT).astype(np.float32)
 
-    return aligned
+    return images
 
 
 def _smooth(image: np.ndarray) -> np.ndarray:
@@ -159,33 +184,11 @@ def reduce(image: np.ndarray) -> np.ndarray:
 
 def expand(image: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
     h, w = image.shape
-    upsampled = np.zeros((h * 2, w * 2), dtype=np.float64)
+    upsampled = np.zeros((h * 2, w * 2), dtype=np.float32)
     upsampled[::2, ::2] = image
     expanded = convolve1d(convolve1d(upsampled, KERNEL_1D * 2, axis=0), KERNEL_1D * 2, axis=1)
     return expanded[: target_shape[0], : target_shape[1]]
 
-
-def gaussian_pyramid(image: np.ndarray, levels: int) -> list[np.ndarray]:
-    pyramid = [image.copy()]
-    for _ in range(levels):
-        pyramid.append(reduce(pyramid[-1]))
-    return pyramid
-
-
-def laplacian_pyramid(image: np.ndarray, levels: int) -> list[np.ndarray]:
-    gauss = gaussian_pyramid(image, levels)
-    lp = []
-    for i in range(levels):
-        lp.append(gauss[i] - expand(gauss[i + 1], gauss[i].shape))
-    lp.append(gauss[-1])
-    return lp
-
-
-def reconstruct(lp: list[np.ndarray]) -> np.ndarray:
-    image = lp[-1].copy()
-    for level in reversed(lp[:-1]):
-        image = expand(image, level.shape) + level
-    return image
 
 
 def region_energy(lp_level: np.ndarray, window: int = 3) -> np.ndarray:
@@ -205,92 +208,171 @@ def region_entropy(image: np.ndarray, window: int = 8) -> np.ndarray:
     return uniform_filter(ent, size=window)
 
 
-def compute_energy_weights(lp_levels: list[np.ndarray], sharpness: float) -> np.ndarray:
-    """Compute normalised per-pixel weights from Laplacian energy.
-
-    The sharpness exponent controls how peaked the distribution is.
-    At 1.0 weights are proportional to energy (soft blend). Higher values
-    increasingly favour the dominant image, approaching argmax at the limit.
-    Returns an array of shape (N, H, W) that sums to 1 along axis 0.
-    """
-    energies = np.stack([region_energy(lv) for lv in lp_levels], axis=0)
-    energies = energies ** sharpness
-    total = energies.sum(axis=0, keepdims=True) + 1e-10
-    return energies / total
 
 
-def compute_top_level_weights(levels: list[np.ndarray], sharpness: float) -> np.ndarray:
-    """Compute normalised weights for the coarsest pyramid level.
-
-    Uses local standard deviation and entropy, both derived from luminance,
-    to produce a (N, H, W) weight array that sums to 1 along axis 0.
-    Average of the two metrics is taken before normalising so neither
-    dominates. The sharpness exponent is applied to the combined score.
-    """
-    devs = np.stack([region_deviation(lv) for lv in levels], axis=0)
-    ents = np.stack([region_entropy(lv) for lv in levels], axis=0)
-    combined = ((devs + ents) / 2.0) ** sharpness
-    total = combined.sum(axis=0, keepdims=True) + 1e-10
-    return combined / total
-
-
-def fuse_with_weights(levels: list[np.ndarray], weights: np.ndarray) -> np.ndarray:
-    """Blend pyramid levels using precomputed per-pixel weights.
-
-    levels  : list of N arrays each shaped (H, W)
-    weights : array shaped (N, H, W), summing to 1 along axis 0
-    """
-    stacked = np.stack(levels, axis=0)
-    return (stacked * weights).sum(axis=0)
-
-
-def compute_level_weights(
-    lum_pyramids: list[list[np.ndarray]],
-    levels: int,
+def _fuse_level_low_memory(
+    gauss: np.ndarray,
+    next_gauss: np.ndarray,
+    weight_buf: np.ndarray,
+    weight_copy: np.ndarray,
     sharpness: float,
-) -> list[np.ndarray]:
-    """Compute fusion weight maps for every pyramid level from luminance pyramids.
+) -> np.ndarray:
+    """Low-memory fusion path for one pyramid level.
 
-    Returns a list of (N, H, W) weight arrays, one per pyramid level including
-    the coarsest residual.
+    Computes expand(next_gauss[k, L]) twice per image — once for weights,
+    once during accumulation — to avoid caching the expanded luminance bands.
+    Peak extra allocation per call is one (H, W) tmp array.
     """
-    all_weights = []
-    for i in range(levels + 1):
-        layer = [p[i] for p in lum_pyramids]
-        if i == levels:
-            all_weights.append(compute_top_level_weights(layer, sharpness))
-        else:
-            all_weights.append(compute_energy_weights(layer, sharpness))
-    return all_weights
+    n = gauss.shape[0]
+    cur_shape = gauss.shape[1:3]
+
+    for k in range(n):
+        lum_band = gauss[k, :, :, 0] - expand(next_gauss[k, :, :, 0], cur_shape)
+        weight_buf[k] = region_energy(lum_band) ** sharpness
+    weight_buf /= weight_buf.sum(axis=0, keepdims=True) + 1e-10
+    np.copyto(weight_copy, weight_buf)
+
+    fused_band = np.zeros(cur_shape + (3,), dtype=np.float32)
+    tmp = np.empty(cur_shape, dtype=np.float32)
+    for k in range(n):
+        for c in range(3):
+            np.subtract(gauss[k, :, :, c], expand(next_gauss[k, :, :, c], cur_shape), out=tmp)
+            fused_band[:, :, c] += tmp * weight_copy[k]
+    return fused_band
 
 
-def fuse_channel(
+def _fuse_level_high_performance(
+    gauss: np.ndarray,
+    next_gauss: np.ndarray,
+    weight_buf: np.ndarray,
+    weight_copy: np.ndarray,
+    sharpness: float,
+) -> np.ndarray:
+    """High-performance fusion path for one pyramid level.
+
+    Caches all N expanded luminance bands so expand() is called once per image
+    instead of twice. Trades one extra (N, H, W) allocation for fewer convolutions.
+    """
+    n = gauss.shape[0]
+    cur_shape = gauss.shape[1:3]
+
+    expanded_lum = np.empty((n,) + cur_shape, dtype=np.float32)
+    for k in range(n):
+        expanded_lum[k] = expand(next_gauss[k, :, :, 0], cur_shape)
+        weight_buf[k] = region_energy(gauss[k, :, :, 0] - expanded_lum[k]) ** sharpness
+    weight_buf /= weight_buf.sum(axis=0, keepdims=True) + 1e-10
+    np.copyto(weight_copy, weight_buf)
+
+    fused_band = np.zeros(cur_shape + (3,), dtype=np.float32)
+    tmp = np.empty(cur_shape, dtype=np.float32)
+    for k in range(n):
+        np.subtract(gauss[k, :, :, 0], expanded_lum[k], out=tmp)
+        fused_band[:, :, 0] += tmp * weight_copy[k]
+        for c in range(1, 3):
+            np.subtract(gauss[k, :, :, c], expand(next_gauss[k, :, :, c], cur_shape), out=tmp)
+            fused_band[:, :, c] += tmp * weight_copy[k]
+    return fused_band
+
+
+def stack_images(
     images: list[np.ndarray],
     levels: int,
-    weights: list[np.ndarray],
-    prebuilt_pyramids: list[list[np.ndarray]] | None = None,
+    sharpness: float,
+    dark_threshold: float,
+    high_performance: bool = False,
 ) -> np.ndarray:
-    """Fuse a single channel using precomputed luminance-derived weight maps."""
-    pyramids = prebuilt_pyramids if prebuilt_pyramids is not None else [laplacian_pyramid(img, levels) for img in images]
-    fused_lp = [
-        fuse_with_weights([p[i] for p in pyramids], weights[i])
-        for i in range(levels + 1)
-    ]
-    return reconstruct(fused_lp)
+    """Fuse a stack of aligned RGB images using Laplacian pyramid blending in Lab space.
 
+    When high_performance=False (default), expand() is called twice per image per
+    level for the luminance channel to avoid caching expanded bands, minimising
+    peak memory at the cost of redundant convolutions.
 
-def _rgb_to_lab(images: list[np.ndarray]) -> list[np.ndarray]:
-    result = []
-    for img in images:
+    When high_performance=True, expanded luminance bands are cached in an extra
+    (N, H, W) buffer so expand() is only called once per image per level.
+    """
+    n = len(images)
+    fuse_level = _fuse_level_high_performance if high_performance else _fuse_level_low_memory
+
+    t = time.perf_counter()
+    print("  Converting to Lab...")
+    gauss = np.empty((n,) + images[0].shape[:2] + (3,), dtype=np.float32)
+    for k in range(n):
+        img = images[k]
+        images[k] = None  # type: ignore[assignment]  # release RGB array immediately
         u8 = np.clip(img, 0, 255).astype(np.uint8)
-        lab = cv2.cvtColor(u8, cv2.COLOR_RGB2Lab).astype(np.float64)
-        result.append(lab)
+        gauss[k] = cv2.cvtColor(u8, cv2.COLOR_RGB2Lab).astype(np.float32)
+    images.clear()
+    print(f"    done ({_elapsed(t)})")
+
+    t = time.perf_counter()
+    mode = "high-performance" if high_performance else "low-memory"
+    print(f"  Fusing channels using streaming pyramid (levels={levels}, mode={mode})...")
+
+    fused_lp: list[np.ndarray] = []
+    weight_buf: np.ndarray | None = None
+    weight_copy: np.ndarray | None = None
+
+    for _ in range(levels):
+        cur_shape = gauss.shape[1:3]
+
+        if weight_buf is None or weight_buf.shape[1:] != cur_shape:
+            weight_buf = np.empty((n,) + cur_shape, dtype=np.float32)
+            weight_copy = np.empty_like(weight_buf)
+
+        next_h = (cur_shape[0] + 1) // 2
+        next_w = (cur_shape[1] + 1) // 2
+        next_gauss = np.empty((n, next_h, next_w, 3), dtype=np.float32)
+        for k in range(n):
+            for c in range(3):
+                next_gauss[k, :, :, c] = reduce(gauss[k, :, :, c])
+
+        fused_lp.append(fuse_level(gauss, next_gauss, weight_buf, weight_copy, sharpness))
+        gauss = next_gauss
+
+    # Coarsest residual level — deviation + entropy weights on luminance.
+    coarse_shape = gauss.shape[1:3]
+    if weight_buf is None or weight_buf.shape[1:] != coarse_shape:
+        weight_buf = np.empty((n,) + coarse_shape, dtype=np.float32)
+        weight_copy = np.empty_like(weight_buf)
+
+    for k in range(n):
+        lv = gauss[k, :, :, 0]
+        weight_buf[k] = ((region_deviation(lv) + region_entropy(lv)) * 0.5) ** sharpness
+    weight_buf /= weight_buf.sum(axis=0, keepdims=True) + 1e-10
+    np.copyto(weight_copy, weight_buf)
+
+    fused_band = np.zeros(coarse_shape + (3,), dtype=np.float32)
+    for k in range(n):
+        for c in range(3):
+            fused_band[:, :, c] += gauss[k, :, :, c] * weight_copy[k]
+    fused_lp.append(fused_band)
+
+    print(f"    done ({_elapsed(t)})")
+
+    t = time.perf_counter()
+    print("  Reconstructing from fused pyramid...")
+    # fused_lp entries are (H, W, 3); reconstruct each channel independently.
+    image = fused_lp[-1].copy()
+    for band in reversed(fused_lp[:-1]):
+        expanded = np.stack(
+            [expand(image[:, :, c], band.shape[:2]) for c in range(3)], axis=-1
+        )
+        image = expanded + band
+    fused_lab = image
+    print(f"    done ({_elapsed(t)})")
+
+    t = time.perf_counter()
+    print("  Suppressing chroma in dark regions...")
+    fused_lab = _suppress_dark_chroma(fused_lab, dark_threshold)
+    print(f"    done ({_elapsed(t)})")
+
+    t = time.perf_counter()
+    print("  Converting back to RGB...")
+    clipped = np.clip(fused_lab, 0, 255).astype(np.uint8)
+    result = cv2.cvtColor(clipped, cv2.COLOR_Lab2RGB)
+    print(f"    done ({_elapsed(t)})")
+
     return result
-
-
-def _lab_to_rgb(lab: np.ndarray) -> np.ndarray:
-    clipped = np.clip(lab, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(clipped, cv2.COLOR_Lab2RGB)
 
 
 def _suppress_dark_chroma(fused_lab: np.ndarray, threshold: float) -> np.ndarray:
@@ -308,31 +390,6 @@ def _suppress_dark_chroma(fused_lab: np.ndarray, threshold: float) -> np.ndarray
     result[:, :, 1] = 128.0 + (fused_lab[:, :, 1] - 128.0) * mask
     result[:, :, 2] = 128.0 + (fused_lab[:, :, 2] - 128.0) * mask
     return result
-
-
-def stack_images(images: list[np.ndarray], levels: int, sharpness: float, dark_threshold: float) -> np.ndarray:
-    print("  Converting to Lab...")
-    lab_images = _rgb_to_lab(images)
-
-    lum_channels = [img[:, :, 0] for img in lab_images]
-    lum_pyramids = [laplacian_pyramid(lum, levels) for lum in lum_channels]
-
-    print(f"  Computing luminance-based fusion weights (sharpness={sharpness})...")
-    weights = compute_level_weights(lum_pyramids, levels, sharpness)
-
-    fused_lab = np.zeros_like(lab_images[0])
-    channel_names = ("L", "a", "b")
-    for c in range(3):
-        print(f"  Fusing {channel_names[c]} channel across {len(lab_images)} images...")
-        channel_slices = [img[:, :, c] for img in lab_images]
-        prebuilt = lum_pyramids if c == 0 else None
-        fused_lab[:, :, c] = fuse_channel(channel_slices, levels, weights, prebuilt)
-
-    print("  Suppressing chroma in dark regions...")
-    fused_lab = _suppress_dark_chroma(fused_lab, dark_threshold)
-
-    print("  Converting back to RGB...")
-    return _lab_to_rgb(fused_lab)
 
 
 def compute_levels(shape: tuple[int, int], max_levels: int = 6) -> int:
@@ -385,31 +442,55 @@ def main() -> None:
             "Raise if color casts remain in shadows; lower if legitimate dark colors are being desaturated."
         ),
     )
+    parser.add_argument(
+        "--performance", choices=["low", "high"], default="low",
+        help=(
+            "Memory/performance trade-off (default: low). "
+            "'low' minimises peak memory by recomputing expanded luminance bands during accumulation. "
+            "'high' caches expanded luminance bands in an extra (N, H, W) buffer to halve convolution "
+            "calls on the luminance channel, at the cost of higher peak memory."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.folder.is_dir():
         print(f"Error: '{args.folder}' is not a directory.")
         sys.exit(1)
 
+    checkpoints: list[_Checkpoint] = []
+    t_total = time.perf_counter()
+    tracemalloc.start()
+    t = t_total
+
     print(f"Loading images from '{args.folder}'...")
     images, size = load_images(args.folder)
-    h, w = images[0].shape[:2]
+    t = _snap("Load", t, checkpoints)
 
+    h, w = images[0].shape[:2]
     levels = args.levels if args.levels > 0 else compute_levels((h, w))
     print(f"Image size: {w}x{h}  |  Images: {len(images)}  |  Pyramid levels: {levels}  |  Sharpness: {args.sharpness}  |  Dark threshold: {args.dark_threshold}")
 
     if not args.no_align:
         print("Aligning (ECC affine, neighbour-chained)...")
         images = align_images(images, min_shift=args.min_shift)
+        t = _snap("Align", t, checkpoints)
     else:
         print("Skipping alignment.")
 
     print("Stacking...")
-    result = stack_images(images, levels, args.sharpness, args.dark_threshold)
+    result = stack_images(images, levels, args.sharpness, args.dark_threshold, args.performance == "high")
+    del images
+    t = _snap("Stack", t, checkpoints)
 
     out_path = args.folder / "stacked.jpg"
     Image.fromarray(result).save(out_path, "JPEG", quality=args.quality)
+    t = _snap("Save", t, checkpoints)
+
+    tracemalloc.stop()
+
     print(f"Saved: {out_path}")
+    _print_report(checkpoints, time.perf_counter() - t_total)
+
 
 
 if __name__ == "__main__":
