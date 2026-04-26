@@ -5,6 +5,8 @@ import sys
 import time
 import tracemalloc
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 import cv2
 import numpy as np
@@ -70,7 +72,7 @@ def _to_gray_cv(image: np.ndarray) -> np.ndarray:
 
 def _ecc_align(ref_gray: np.ndarray, src_gray: np.ndarray,
                max_resolution: int, rough: bool) -> np.ndarray:
-    """Single ECC alignment pass, mirroring task_align.cc match_transform().
+    """Single cv2 ECC alignment pass.
 
     Downscales both images so the longer edge is at most max_resolution,
     runs findTransformECC with MOTION_AFFINE, then rescales the translation
@@ -282,8 +284,6 @@ def stack_images(
     with workers × ~100 MiB per image plus the fixed fused_lp accumulator.
     Default of 3 workers balances speed and memory for most systems.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import os
 
     img0 = np.array(Image.open(src_paths[0]).convert("RGB"), dtype=np.float32)
     h, w = img0.shape[:2]
