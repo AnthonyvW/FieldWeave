@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-
+# --red-scale 0.997748 --blue-scale 1.005603 --red-shift -0.5941 +0.0007 --blue-shift +0.0431 -0.6501
 # ---------------------------------------------------------------------------
 # Core correction logic
 # ---------------------------------------------------------------------------

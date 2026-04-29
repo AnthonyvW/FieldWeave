@@ -1,5 +1,11 @@
 ./input/
 output/
+misc/stats/output/
+misc/stats/samples/
+misc/input/
+misc/qttest/
+misc/test_img/
+config/cameras/
 
 misc/test_img/
 misc/input/
