@@ -7,7 +7,7 @@ other files need to change.
 
 Current routines
 ----------------
-- :class:`StitchAndMeasureRoutine` — stitches a folder of Y-ordered JPEGs into
+- :class:`StitchAndMeasureRoutine` — stitches a folder of Y-ordered images into
   a panorama, corrects orientation, crops black borders, saves the result, then
   measures DPI from the embedded scale bar.
 """
@@ -23,6 +23,7 @@ import numpy as np
 
 from common.app_context import get_app_context
 from common.logger import debug, warning
+from common.setting_types import FileFormat
 from common.fieldweaveConfig import FieldWeaveSettings
 from post_processing.routines.post_processing_routine import PostProcessingRoutine
 
@@ -40,16 +41,16 @@ def _parse_y_position(filename: str) -> int:
 
 
 def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str, int]]:
-    valid_extensions = {'.jpg', '.jpeg', '.JPG', '.JPEG'}
-    jpeg_files = sorted([
+    valid_extensions = {f".{fmt.value}" for fmt in FileFormat}
+    image_files = sorted([
         f for f in os.listdir(image_folder)
-        if os.path.splitext(f)[1] in valid_extensions
+        if os.path.splitext(f)[1].lower() in valid_extensions
     ])
-    if not jpeg_files:
-        raise ValueError(f"No JPEG images found in {image_folder}")
+    if not image_files:
+        raise ValueError(f"No supported images found in {image_folder}")
 
     entries: list[tuple[int, str]] = [
-        (_parse_y_position(f), f) for f in jpeg_files
+        (_parse_y_position(f), f) for f in image_files
     ]
     entries.sort(key=lambda e: e[0], reverse=True)
 
@@ -371,16 +372,17 @@ def _build_dpi_debug_overlay(
 
 class StitchAndMeasureRoutine(PostProcessingRoutine):
     """
-    Stitch a folder of Y-ordered JPEG images into a panorama, then measure DPI.
+    Stitch a folder of Y-ordered images into a panorama, then measure DPI.
 
-    *input_folder* must contain exactly one subfolder of JPEG images whose
-    filenames include ``_y<position>`` tags.  The output JPEG is written to
-    *input_folder* using the folder's own name as the filename stem.
+    *input_folder* must contain exactly one subfolder of images whose
+    filenames include ``_y<position>`` tags.  The output image is written to
+    *input_folder* using the folder's own name as the filename stem, with the
+    extension determined by the camera's current format setting.
 
     On success, :attr:`~PostProcessingRoutine.result` is populated with
     ``success=True`` and the following keys in ``result.data``:
 
-    - ``output_path`` (:class:`str`): absolute path to the saved panorama JPEG.
+    - ``output_path`` (:class:`str`): absolute path to the saved panorama.
     - ``debug_path`` (:class:`str` or ``None``): path to the DPI debug overlay, or None.
     - ``dpi`` (:class:`float` or ``None``): measured DPI, or None if detection failed.
     - ``image_width`` (:class:`int`): panorama width in pixels.
@@ -475,7 +477,9 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         self._set_status("Measuring DPI", 3, 4)
 
         root_name = os.path.basename(self.input_folder)
-        output_path = os.path.join(self.input_folder, f"{root_name}.jpg")
+        ctx = get_app_context()
+        extension = ctx.camera.underlying_camera.settings.fformat.value
+        output_path = os.path.join(self.input_folder, f"{root_name}.{extension}")
         cv2.imwrite(output_path, stitched)
         debug(f"StitchAndMeasureRoutine: panorama saved to {output_path}")
 

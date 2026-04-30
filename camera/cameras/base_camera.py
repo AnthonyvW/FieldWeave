@@ -173,13 +173,16 @@ class BaseCamera(ABC):
             )
         return self._settings
     
-    def save_settings(self) -> None:
+    def save_settings(self) -> bool:
         """
         Save current settings to config file.
-        
+
         This creates a backup of the previous settings before saving.
         Call this when the user clicks "Save" or "Apply" in the GUI.
-        
+
+        Returns:
+            True if settings were saved successfully, False otherwise
+
         Example:
             >>> # User adjusted settings via GUI
             >>> camera.settings.set_exposure(150)
@@ -189,10 +192,14 @@ class BaseCamera(ABC):
         """
         if self._settings is None or self._settings_manager is None:
             raise RuntimeError("Settings not initialized")
-        
+
         info(f"Saving settings for {self.model}")
-        self._settings_manager.save(self._settings)
-        info("Settings saved successfully")
+        saved = self._settings_manager.save(self._settings)
+        if saved:
+            info("Settings saved successfully")
+        else:
+            error("Failed to save settings")
+        return saved
     
     def load_settings(self, filepath: Path | str | None = None) -> None:
         """

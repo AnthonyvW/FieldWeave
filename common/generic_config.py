@@ -469,34 +469,37 @@ class ConfigManager(Generic[S], ABC):
             error(f"Failed to load settings from {p}: {e}")
             raise IOError(f"Failed to load settings from {path}") from e
 
-    def save(self, settings: S) -> None:
+    def save(self, settings: S) -> bool:
         """
         Save settings to the active settings file.
-        
+
         Creates a backup of existing settings before saving.
         Automatically adds config_type and config_version metadata.
-        
+
         Args:
             settings: Settings instance to save
-        
-        Raises:
-            ConfigValidationError: If settings fail validation
-            IOError: If file cannot be written
+
+        Returns:
+            True if settings were saved successfully, False otherwise
         """
-        # Validate before saving
-        self._validate(settings, "before save")
-        
-        # Backup existing file
+        try:
+            self._validate(settings, "before save")
+        except ConfigValidationError:
+            return False
+
         self._backup_if_exists()
-        
-        # Convert to dict and add metadata
+
         data = self.to_dict(settings)
         data_with_metadata = self._add_metadata(data)
-        
-        # Save
+
         p = self.active_path()
-        self._save_dict_to_file(data_with_metadata, p)
+        try:
+            self._save_dict_to_file(data_with_metadata, p)
+        except IOError:
+            return False
+
         info(f"Saved settings to {p.name}")
+        return True
 
     def write_defaults(self, settings: S | None = None) -> Path:
         """
@@ -538,7 +541,8 @@ class ConfigManager(Generic[S], ABC):
         """
         defaults = self.load_defaults()
         self._backup_if_exists()
-        self.save(defaults)
+        if not self.save(defaults):
+            raise IOError("Failed to save restored defaults")
         info("Restored defaults as active settings")
         return defaults
 
@@ -616,5 +620,6 @@ class ConfigManager(Generic[S], ABC):
             error(f"Edit transaction failed: {e}")
             raise
         else:
-            self.save(settings)
+            if not self.save(settings):
+                raise IOError("Edit transaction failed: could not save settings")
             info("Edit transaction completed")

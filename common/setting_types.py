@@ -9,6 +9,7 @@ class FileFormat(str, Enum):
     PNG = 'png'
     TIFF = 'tiff'
     JPEG = 'jpeg'
+    JPG = 'jpg'
 
 
 class RGBALevel(NamedTuple):

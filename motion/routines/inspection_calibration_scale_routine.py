@@ -20,7 +20,7 @@ The routine:
      centre along the bar axis.
   5. Stitches the captured images and measures DPI.
 
-Images are saved as JPEG with the stage position encoded in the filename:
+Images are saved with the stage position encoded in the filename:
   x{X_nm}_y{Y_nm}_z{Z_nm}.jpg
 
 The result is available via :attr:`~AutomationRoutine.result` after the routine

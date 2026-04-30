@@ -11,6 +11,7 @@ from PySide6.QtCore import Slot, Signal, QTimer
 from PySide6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush
 from common.logger import info, error, warning, debug
 from common.app_context import get_app_context
+from common.setting_types import FileFormat
 from motion.routines.autofocus.autofocus_routine import Autofocus
 from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
 from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
@@ -221,12 +222,7 @@ class CameraControlsWidget(QWidget):
         self._default_folder = Path("./output")
         self._current_folder = self._default_folder
         
-        # Supported image formats
-        self._image_formats = {
-            "TIFF": ".tiff",
-            "JPEG": ".jpg",
-            "PNG": ".png"
-        }
+
         
         # Ensure output folder exists
         self._ensure_output_folder()
@@ -644,10 +640,11 @@ class CameraControlsWidget(QWidget):
         format_label.setMinimumWidth(100)
         
         self._format_combo = QComboBox()
-        self._format_combo.addItems(self._image_formats.keys())
-        
+        self._format_combo.addItems(f.value for f in FileFormat)
+
         # Set default format from camera settings
-        self._format_combo.setCurrentText(get_app_context().camera.settings.fformat.upper())
+        self._format_combo.setCurrentText(get_app_context().camera.settings.fformat.value)
+        self._format_combo.currentIndexChanged.connect(self._on_format_changed)
         
         self._open_folder_button = QPushButton("Browse Output")
         self._open_folder_button.clicked.connect(self._open_folder)
@@ -738,31 +735,46 @@ class CameraControlsWidget(QWidget):
                 f"Could not open folder: {e}"
             )
     
+    @Slot(int)
+    def _on_format_changed(self, index: int) -> None:
+        ctx = get_app_context()
+        if ctx.camera is None:
+            return
+
+        new_format = self._format_combo.itemText(index)
+
+        reply = QMessageBox.question(
+            self,
+            "Save Settings",
+            f"Save '{new_format}' as the default image format?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        ctx.camera.settings.set_fformat(new_format)
+        saved = ctx.camera.underlying_camera.save_settings()
+
+        if saved and ctx.toast:
+            ctx.toast.success(f"Image format set to {new_format}", title="Settings Saved")
+        elif not saved and ctx.toast:
+            ctx.toast.error("Failed to save settings", title="Settings Error")
+
     def _generate_filename(self) -> str:
-        """Generate a filename based on current timestamp and selected format"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        format_name = self._format_combo.currentText()
-        extension = self._image_formats[format_name]
-        return f"image_{timestamp}{extension}"
+        extension = self._format_combo.currentText()
+        return f"image_{timestamp}.{extension}"
     
     def _get_filepath(self) -> Path:
-        """Get the complete filepath for saving"""
-        # Get selected format
-        format_name = self._format_combo.currentText()
-        extension = self._image_formats[format_name]
-        
-        # Use custom filename if provided, otherwise generate one
+        extension = self._format_combo.currentText()
+
         filename = self._filename_edit.text().strip()
         if not filename:
             filename = self._generate_filename()
         else:
-            # Remove any existing extension
-            filename_path = Path(filename)
-            filename_base = filename_path.stem
-            
-            # Add the selected extension
-            filename = f"{filename_base}{extension}"
-        
+            filename = f"{Path(filename).stem}.{extension}"
+
         return self._current_folder / filename
     
     @Slot()

@@ -9,8 +9,7 @@ If a :class:`FocusStackRoutineConfig` is supplied the routine will automatically
 launch a :class:`FocusStackRoutine` via the application's
 :class:`PostProcessingManager` once all images have been captured.  The
 stacked output is written to ``<output_folder>/stacked.<ext>`` where the
-extension comes from ``focus_stack_config.output_extension`` (default
-``jpeg``).
+extension comes from ``focus_stack_config.output_extension``.
 
 Usage::
 

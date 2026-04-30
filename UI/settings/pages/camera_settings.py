@@ -970,6 +970,17 @@ class CameraSettingsWidget(QWidget):
                     debug(f"Updated checkbox widget for '{field_name}' to {value}")
                 finally:
                     self._updating_from_camera = False
+            elif control and isinstance(control, QComboBox):
+                self._updating_from_camera = True
+                try:
+                    index = control.findData(value)
+                    if index >= 0:
+                        control.blockSignals(True)
+                        control.setCurrentIndex(index)
+                        control.blockSignals(False)
+                        debug(f"Updated combo widget for '{field_name}' to {value}")
+                finally:
+                    self._updating_from_camera = False
         else:
             debug(f"No widget found for '{field_name}' (this is normal for controller-only fields)")
         

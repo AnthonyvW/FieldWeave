@@ -50,8 +50,9 @@ class CameraSettings(ABC):
     fformat: FileFormat
     
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
-    _file_formats: tuple[str] = (f.value for f in FileFormat)
-    
+    _file_formats: tuple[str, ...] = tuple(f.value for f in FileFormat)
+    _ui_update_callback: Any | None = field(default=None, repr=False, compare=False)
+
     def __post_init__(self) -> None:
         if isinstance(self.fformat, str):
             self.fformat = FileFormat(self.fformat)
@@ -190,12 +191,14 @@ class CameraSettings(ABC):
     def set_level_range(self, low: RGBALevel, high: RGBALevel) -> None:
         pass
     
-    def set_fformat(self, value: str, index: int | None = None) -> None:        
-        try:
-            format_enum = FileFormat(value)
-            self.fformat = format_enum
-        except ValueError as e:
-            raise ValueError(f"Invalid file format: {value}. Must be one of: png, tiff, jpeg") from e
+    def set_fformat(self, value: str, index: int | None = None) -> None:
+        normalized = value.lower()
+        format_enum = FileFormat(normalized) if normalized in FileFormat._value2member_map_ else None
+        if format_enum is None:
+            raise ValueError(f"Invalid file format: {value}. Must be one of: {', '.join(f.value for f in FileFormat)}")
+        self.fformat = format_enum
+        if self._ui_update_callback is not None:
+            self._ui_update_callback("fformat", format_enum)
     
     @abstractmethod
     def get_preview_resolutions(self) -> list['CameraResolution']:
