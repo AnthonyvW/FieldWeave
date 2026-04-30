@@ -17,11 +17,8 @@ if [ ! -d "venv" ]; then
     fi
 fi
 
-echo "Activating virtual environment..."
-source venv/bin/activate
-
 echo "Installing/updating dependencies..."
-if ! pip install -r requirements.txt; then
+if ! venv/bin/pip install -r requirements.txt; then
     echo "ERROR: Failed to install requirements."
     exit 1
 fi
