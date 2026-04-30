@@ -4,3 +4,4 @@ pyserial==3.5
 PyYAML==6.0.2
 pillow==12.2.0
 pyside6==6.10.1
+focusweave @ git+https://github.com/AnthonyvW/FocusWeave.git@main

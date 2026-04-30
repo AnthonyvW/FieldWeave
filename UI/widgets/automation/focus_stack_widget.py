@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QToolButton,
 )
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -23,7 +24,7 @@ from PySide6.QtGui import QDesktopServices
 from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_scan import ZStackScan
-from post_processing.routines.focus_stack_routine import FocusStackConfig
+from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 
@@ -205,7 +206,7 @@ class FocusStackWidget(QWidget):
         self._step_spin.setMinimum(printer_step)
         self._step_spin.setMaximum(10.0)
         self._step_spin.setSingleStep(printer_step)
-        self._step_spin.setValue(printer_step)
+        self._step_spin.setValue(0.2)
         self._step_spin.valueChanged.connect(self._update_summary)
         step_layout.addWidget(self._step_spin)
 
@@ -233,115 +234,193 @@ class FocusStackWidget(QWidget):
         fs_settings_layout.setContentsMargins(0, 4, 0, 0)
         fs_settings_layout.setSpacing(6)
 
-        # Depth radius
-        depth_row = QWidget()
-        depth_layout = QHBoxLayout(depth_row)
-        depth_layout.setContentsMargins(0, 0, 0, 0)
-        depth_layout.setSpacing(8)
-        depth_layout.addWidget(QLabel("Depth radius:"))
-
-        self._depth_radius_spin = QSpinBox()
-        self._depth_radius_spin.setFixedHeight(28)
-        self._depth_radius_spin.setMinimum(0)
-        self._depth_radius_spin.setMaximum(20)
-        self._depth_radius_spin.setValue(1)
-        self._depth_radius_spin.setToolTip(
-            "Restrict pixel selection to a window of [peak-R, peak+R] frames "
-            "around each pixel's best-focus frame. 0 = disabled."
-        )
-        depth_layout.addWidget(self._depth_radius_spin)
-        depth_layout.addStretch(1)
-        fs_settings_layout.addWidget(depth_row)
-
-        # Smooth source
-        smooth_row = QWidget()
-        smooth_layout = QHBoxLayout(smooth_row)
-        smooth_layout.setContentsMargins(0, 0, 0, 0)
-        smooth_layout.setSpacing(8)
-        smooth_layout.addWidget(QLabel("Smooth source radius:"))
-
-        self._smooth_source_spin = QSpinBox()
-        self._smooth_source_spin.setFixedHeight(28)
-        self._smooth_source_spin.setMinimum(0)
-        self._smooth_source_spin.setMaximum(99)
-        self._smooth_source_spin.setValue(15)
-        self._smooth_source_spin.setToolTip(
-            "Apply two passes of median filtering to the source-frame map after "
-            "selection. Removes isolated outlier frame assignments. 0 = disabled."
-        )
-        smooth_layout.addWidget(self._smooth_source_spin)
-        smooth_layout.addStretch(1)
-        fs_settings_layout.addWidget(smooth_row)
-
-        # Sigma
-        sigma_row = QWidget()
-        sigma_layout = QHBoxLayout(sigma_row)
-        sigma_layout.setContentsMargins(0, 0, 0, 0)
-        sigma_layout.setSpacing(8)
-        sigma_layout.addWidget(QLabel("Focus map sigma:"))
-
-        self._sigma_spin = QDoubleSpinBox()
-        self._sigma_spin.setFixedHeight(28)
-        self._sigma_spin.setDecimals(1)
-        self._sigma_spin.setMinimum(0.5)
-        self._sigma_spin.setMaximum(20.0)
-        self._sigma_spin.setSingleStep(0.5)
-        self._sigma_spin.setValue(5.0)
-        self._sigma_spin.setToolTip(
-            "Gaussian smoothing radius for focus maps. Larger values produce "
-            "smoother region boundaries."
-        )
-        sigma_layout.addWidget(self._sigma_spin)
-        sigma_layout.addStretch(1)
-        fs_settings_layout.addWidget(sigma_row)
-
-        # Warp model
-        warp_row = QWidget()
-        warp_layout = QHBoxLayout(warp_row)
-        warp_layout.setContentsMargins(0, 0, 0, 0)
-        warp_layout.setSpacing(8)
-        warp_layout.addWidget(QLabel("Alignment:"))
+        # Alignment
+        align_row = QWidget()
+        align_layout = QHBoxLayout(align_row)
+        align_layout.setContentsMargins(0, 0, 0, 0)
+        align_layout.setSpacing(8)
+        align_layout.addWidget(QLabel("Alignment:"))
 
         self._no_align_check = QCheckBox("Skip alignment")
-        self._no_align_check.setChecked(True)
+        self._no_align_check.setChecked(False)
         self._no_align_check.setToolTip(
-            "Skip ECC alignment. Enable when images are already registered."
+            "Skip ECC alignment. Use when images are already registered."
         )
         self._no_align_check.stateChanged.connect(self._on_no_align_changed)
-        warp_layout.addWidget(self._no_align_check)
-        warp_layout.addStretch(1)
-        fs_settings_layout.addWidget(warp_row)
+        align_layout.addWidget(self._no_align_check)
+        align_layout.addStretch(1)
+        fs_settings_layout.addWidget(align_row)
 
-        # Score power
-        power_row = QWidget()
-        power_layout = QHBoxLayout(power_row)
-        power_layout.setContentsMargins(0, 0, 0, 0)
-        power_layout.setSpacing(8)
-        power_layout.addWidget(QLabel("Score power:"))
-
-        self._score_power_spin = QDoubleSpinBox()
-        self._score_power_spin.setFixedHeight(28)
-        self._score_power_spin.setDecimals(1)
-        self._score_power_spin.setMinimum(1.0)
-        self._score_power_spin.setMaximum(5.0)
-        self._score_power_spin.setSingleStep(0.5)
-        self._score_power_spin.setValue(2.0)
-        self._score_power_spin.setToolTip(
-            "Exponent applied to the raw Tenengrad score before smoothing. "
-            "Increase to 3-4 if halo contamination persists."
+        # Crop to intersection
+        self._crop_check = QCheckBox("Crop to intersection")
+        self._crop_check.setChecked(False)
+        self._crop_check.setToolTip(
+            "Crop the output to the largest rectangle covered by every frame after "
+            "alignment. Removes border regions but shrinks the output image."
         )
-        power_layout.addWidget(self._score_power_spin)
-        power_layout.addStretch(1)
-        fs_settings_layout.addWidget(power_row)
+        fs_settings_layout.addWidget(self._crop_check)
 
-        # Save depth map
-        self._save_depth_map_check = QCheckBox("Save depth map")
-        self._save_depth_map_check.setChecked(True)
-        self._save_depth_map_check.setToolTip(
-            "Save a greyscale source-frame depth map alongside the stacked output."
+        # Keep original size
+        self._keep_size_check = QCheckBox("Keep original size")
+        self._keep_size_check.setChecked(True)
+        self._keep_size_check.setToolTip(
+            "Keep the output image the same size as the input images. "
+            "Warps are applied in-place rather than expanding the canvas."
         )
-        fs_settings_layout.addWidget(self._save_depth_map_check)
+        fs_settings_layout.addWidget(self._keep_size_check)
 
+        # Advanced settings (collapsible)
+        self._advanced_toggle = QToolButton()
+        self._advanced_toggle.setText("Advanced settings")
+        self._advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._advanced_toggle.setCheckable(True)
+        self._advanced_toggle.setChecked(False)
+        self._advanced_toggle.setObjectName("AdvancedSettingsToggle")
+        self._advanced_toggle.toggled.connect(self._on_advanced_toggled)
+        fs_settings_layout.addWidget(self._advanced_toggle)
+
+        self._advanced_widget = QWidget()
+        self._advanced_widget.setVisible(False)
+        advanced_layout = QVBoxLayout(self._advanced_widget)
+        advanced_layout.setContentsMargins(12, 0, 0, 0)
+        advanced_layout.setSpacing(6)
+
+        # Approach distance
+        approach_row = QWidget()
+        approach_row_layout = QHBoxLayout(approach_row)
+        approach_row_layout.setContentsMargins(0, 0, 0, 0)
+        approach_row_layout.setSpacing(8)
+        approach_row_layout.addWidget(QLabel("Approach distance:"))
+
+        self._approach_spin = QDoubleSpinBox()
+        self._approach_spin.setFixedHeight(28)
+        self._approach_spin.setDecimals(3)
+        self._approach_spin.setSuffix(" mm")
+        self._approach_spin.setMinimum(0.0)
+        self._approach_spin.setMaximum(10.0)
+        self._approach_spin.setSingleStep(0.1)
+        self._approach_spin.setValue(0.4)
+        self._approach_spin.setToolTip(
+            "Before starting the scan, the stage will overshoot the near end by this "
+            "distance, then return to it. This eliminates backlash and wobble from "
+            "the direction change at the start of the sweep."
+        )
+        approach_row_layout.addWidget(self._approach_spin)
+        approach_row_layout.addStretch(1)
+        advanced_layout.addWidget(approach_row)
+
+        # Sharpness
+        sharpness_row = QWidget()
+        sharpness_layout = QHBoxLayout(sharpness_row)
+        sharpness_layout.setContentsMargins(0, 0, 0, 0)
+        sharpness_layout.setSpacing(8)
+        sharpness_layout.addWidget(QLabel("Sharpness:"))
+
+        self._sharpness_spin = QDoubleSpinBox()
+        self._sharpness_spin.setFixedHeight(28)
+        self._sharpness_spin.setDecimals(1)
+        self._sharpness_spin.setMinimum(1.0)
+        self._sharpness_spin.setMaximum(8.0)
+        self._sharpness_spin.setSingleStep(0.5)
+        self._sharpness_spin.setValue(4.0)
+        self._sharpness_spin.setToolTip(
+            "Weight sharpness exponent. Higher values favour the sharpest pixel "
+            "more aggressively (approaching hard selection). Lower values blend "
+            "more smoothly. Useful range: 1.0 (soft) to 8.0 (near-hard)."
+        )
+        sharpness_layout.addWidget(self._sharpness_spin)
+        sharpness_layout.addStretch(1)
+        advanced_layout.addWidget(sharpness_row)
+
+        # Cull threshold
+        cull_row = QWidget()
+        cull_layout = QHBoxLayout(cull_row)
+        cull_layout.setContentsMargins(0, 0, 0, 0)
+        cull_layout.setSpacing(8)
+
+        self._cull_check = QCheckBox("Cull out-of-focus frames")
+        self._cull_check.setChecked(False)
+        self._cull_check.setToolTip(
+            "Discard frames whose focus score falls below the threshold fraction "
+            "of the sharpest frame. At least the two sharpest frames are always kept."
+        )
+        cull_layout.addWidget(self._cull_check)
+
+        self._cull_threshold_spin = QDoubleSpinBox()
+        self._cull_threshold_spin.setFixedHeight(28)
+        self._cull_threshold_spin.setDecimals(2)
+        self._cull_threshold_spin.setMinimum(0.0)
+        self._cull_threshold_spin.setMaximum(1.0)
+        self._cull_threshold_spin.setSingleStep(0.05)
+        self._cull_threshold_spin.setValue(0.6)
+        self._cull_threshold_spin.setToolTip(
+            "Frames scoring below this fraction of the peak score are culled. "
+            "Raise toward 1.0 to cull more aggressively."
+        )
+        cull_layout.addWidget(self._cull_threshold_spin)
+        cull_layout.addStretch(1)
+        advanced_layout.addWidget(cull_row)
+
+        # Slabbing
+        self._slab_check = QCheckBox("Enable slabbing")
+        self._slab_check.setChecked(False)
+        self._slab_check.setToolTip(
+            "Split the image set into overlapping sub-stacks, stack each "
+            "independently, then fuse the results. Reduces peak RAM for large stacks."
+        )
+        self._slab_check.stateChanged.connect(self._on_slab_enabled_changed)
+        advanced_layout.addWidget(self._slab_check)
+
+        self._slab_params_widget = QWidget()
+        self._slab_params_widget.setVisible(False)
+        slab_params_layout = QHBoxLayout(self._slab_params_widget)
+        slab_params_layout.setContentsMargins(20, 0, 0, 0)
+        slab_params_layout.setSpacing(8)
+
+        slab_params_layout.addWidget(QLabel("Size:"))
+        self._slab_size_spin = QSpinBox()
+        self._slab_size_spin.setFixedHeight(28)
+        self._slab_size_spin.setMinimum(2)
+        self._slab_size_spin.setMaximum(500)
+        self._slab_size_spin.setValue(20)
+        self._slab_size_spin.setToolTip("Number of images per sub-stack.")
+        slab_params_layout.addWidget(self._slab_size_spin)
+
+        slab_params_layout.addWidget(QLabel("Overlap:"))
+        self._slab_overlap_spin = QSpinBox()
+        self._slab_overlap_spin.setFixedHeight(28)
+        self._slab_overlap_spin.setMinimum(0)
+        self._slab_overlap_spin.setMaximum(499)
+        self._slab_overlap_spin.setValue(5)
+        self._slab_overlap_spin.setToolTip(
+            "Number of images shared between adjacent slabs. Must be less than size."
+        )
+        slab_params_layout.addWidget(self._slab_overlap_spin)
+        slab_params_layout.addStretch(1)
+        advanced_layout.addWidget(self._slab_params_widget)
+
+        # Workers
+        workers_row = QWidget()
+        workers_layout = QHBoxLayout(workers_row)
+        workers_layout.setContentsMargins(0, 0, 0, 0)
+        workers_layout.setSpacing(8)
+        workers_layout.addWidget(QLabel("Workers:"))
+
+        self._workers_spin = QSpinBox()
+        self._workers_spin.setFixedHeight(28)
+        self._workers_spin.setMinimum(1)
+        self._workers_spin.setMaximum(16)
+        self._workers_spin.setValue(3)
+        self._workers_spin.setToolTip(
+            "Number of parallel workers for stacking. Higher values are faster "
+            "but increase peak RAM by ~100 MiB per additional worker."
+        )
+        workers_layout.addWidget(self._workers_spin)
+        workers_layout.addStretch(1)
+        advanced_layout.addWidget(workers_row)
+
+        fs_settings_layout.addWidget(self._advanced_widget)
         fs_layout.addWidget(self._fs_settings_widget)
         main_layout.addWidget(fs_group)
 
@@ -354,6 +433,7 @@ class FocusStackWidget(QWidget):
         self._summary_label.setObjectName("AreaScanSummary")
         self._summary_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._summary_label.setWordWrap(True)
+        self._summary_label.setVisible(False)
         main_layout.addWidget(self._summary_label)
 
         # ---- Start button ------------------------------------------------
@@ -372,24 +452,18 @@ class FocusStackWidget(QWidget):
 
         self._pause_resume_btn = QPushButton("Pause")
         self._pause_resume_btn.setFixedHeight(32)
-        self._pause_resume_btn.setObjectName("AreaScanSecondaryButton")
+        self._pause_resume_btn.setObjectName("AutomationPause")
         self._pause_resume_btn.clicked.connect(self._on_pause_resume_clicked)
-        controls_layout.addWidget(self._pause_resume_btn)
+        controls_layout.addWidget(self._pause_resume_btn, 1)
 
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setFixedHeight(32)
-        self._stop_btn.setObjectName("AreaScanStop")
+        self._stop_btn.setObjectName("AutomationStop")
         self._stop_btn.clicked.connect(self._on_stop_clicked)
-        controls_layout.addWidget(self._stop_btn)
+        controls_layout.addWidget(self._stop_btn, 1)
 
         self._controls_widget.setVisible(False)
         main_layout.addWidget(self._controls_widget)
-
-        # ---- Status label ------------------------------------------------
-        self._status_label = QLabel("")
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._status_label.setObjectName("AreaScanSummary")
-        main_layout.addWidget(self._status_label)
 
         # ---- Post-run results row (hidden until a run completes) ---------
         self._results_widget = QWidget()
@@ -399,17 +473,14 @@ class FocusStackWidget(QWidget):
 
         self._open_folder_btn = QPushButton("Open Folder")
         self._open_folder_btn.setFixedHeight(30)
-        self._open_folder_btn.setObjectName("AreaScanSecondaryButton")
         self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
-        results_layout.addWidget(self._open_folder_btn)
+        results_layout.addWidget(self._open_folder_btn, 1)
 
         self._view_image_btn = QPushButton("View Stacked Image")
         self._view_image_btn.setFixedHeight(30)
-        self._view_image_btn.setObjectName("AreaScanSecondaryButton")
         self._view_image_btn.clicked.connect(self._on_view_image_clicked)
-        results_layout.addWidget(self._view_image_btn)
+        results_layout.addWidget(self._view_image_btn, 1)
 
-        results_layout.addStretch(1)
         self._results_widget.setVisible(False)
         main_layout.addWidget(self._results_widget)
 
@@ -472,27 +543,29 @@ class FocusStackWidget(QWidget):
     def _resolve_output_folder(self) -> str:
         return self._output_folder.resolved_path
 
-    def _build_focus_stack_config(self) -> FocusStackConfig | None:
-        """Build a FocusStackConfig from the current widget state, or None if disabled."""
+    def _build_focus_stack_config(self) -> FocusStackRoutineConfig | None:
+        """Build a FocusStackRoutineConfig from the current widget state, or None if disabled."""
         if not self._fs_enable_check.isChecked():
             return None
 
-        cfg = FocusStackConfig()
-        cfg.depth_radius = self._depth_radius_spin.value() or None
-        cfg.smooth_source = self._smooth_source_spin.value() or None
-        cfg.sigma = self._sigma_spin.value()
-        cfg.score_power = self._score_power_spin.value()
-        cfg.no_align = self._no_align_check.isChecked()
-        # depth_map_path is left as None here; ZStackScan fills it in relative
-        # to the output folder when focus_stack_config.depth_map_path is None.
-        if not self._save_depth_map_check.isChecked():
-            cfg.depth_map_path = ""  # empty string signals "don't save"
-        return cfg
+        slab: tuple[int, int] | None = None
+        if self._slab_check.isChecked():
+            slab = (self._slab_size_spin.value(), self._slab_overlap_spin.value())
+
+        return FocusStackRoutineConfig(
+            no_align=self._no_align_check.isChecked(),
+            sharpness=self._sharpness_spin.value(),
+            cull=self._cull_threshold_spin.value() if self._cull_check.isChecked() else None,
+            workers=self._workers_spin.value(),
+            crop=self._crop_check.isChecked(),
+            keep_size=self._keep_size_check.isChecked(),
+            slab=slab,
+        )
 
     def _update_summary(self) -> None:
         """Refresh the summary label and enable/disable the start button."""
         if self._z_start is None or self._z_end is None:
-            self._summary_label.setText("")
+            self._summary_label.setVisible(False)
             self._start_btn.setEnabled(False)
             return
 
@@ -502,7 +575,7 @@ class FocusStackWidget(QWidget):
         fmt = f".{decimals}f"
 
         if step <= 0:
-            self._summary_label.setText("")
+            self._summary_label.setVisible(False)
             self._start_btn.setEnabled(False)
             return
 
@@ -515,6 +588,7 @@ class FocusStackWidget(QWidget):
             f"Range: {distance:{fmt}} mm\n"
             f"Frames: ~{n_frames}  |  Step: {step:{fmt}} mm  |  Est. time: {time_str}"
         )
+        self._summary_label.setVisible(True)
         self._start_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
@@ -524,8 +598,17 @@ class FocusStackWidget(QWidget):
     def _on_fs_enabled_changed(self) -> None:
         self._fs_settings_widget.setEnabled(self._fs_enable_check.isChecked())
 
+    def _on_advanced_toggled(self, checked: bool) -> None:
+        self._advanced_widget.setVisible(checked)
+        self._advanced_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+        )
+
     def _on_no_align_changed(self) -> None:
         pass  # Reserved for warp model selector if added later
+
+    def _on_slab_enabled_changed(self) -> None:
+        self._slab_params_widget.setVisible(self._slab_check.isChecked())
 
     def _set_start_position(self) -> None:
         z = self._get_current_z_mm()
@@ -585,6 +668,7 @@ class FocusStackWidget(QWidget):
             z_end_nm=round(self._z_end * _NM_PER_MM),
             step_nm=round(step_mm * _NM_PER_MM),
             output_folder=output_folder,
+            approach_distance_nm=round(self._approach_spin.value() * _NM_PER_MM),
             focus_stack_config=focus_stack_config,
         )
         motion.start_routine(self._routine)
@@ -612,16 +696,13 @@ class FocusStackWidget(QWidget):
         if self._routine.is_paused:
             self._routine.resume()
             self._pause_resume_btn.setText("Pause")
-            self._status_label.setText("Running...")
         else:
             self._routine.pause()
             self._pause_resume_btn.setText("Resume")
-            self._status_label.setText("Paused.")
 
     def _on_stop_clicked(self) -> None:
         if self._routine is not None:
             self._routine.stop()
-        self._status_label.setText("Stopping...")
 
     # ------------------------------------------------------------------
     # Routine state helpers
@@ -636,7 +717,6 @@ class FocusStackWidget(QWidget):
         self._fs_settings_widget.setEnabled(False)
         self._pause_resume_btn.setText("Pause")
         self._controls_widget.setVisible(True)
-        self._status_label.setText("Running...")
         self._poll_timer.start()
 
     def _exit_running_state(self) -> None:
@@ -648,7 +728,6 @@ class FocusStackWidget(QWidget):
         self._fs_enable_check.setEnabled(True)
         self._fs_settings_widget.setEnabled(self._fs_enable_check.isChecked())
         self._controls_widget.setVisible(False)
-        self._status_label.setText("Finished.")
         self._routine = None
         self._update_summary()
 
@@ -666,7 +745,6 @@ class FocusStackWidget(QWidget):
         self._pause_resume_btn.setText(
             "Resume" if self._routine.is_paused else "Pause"
         )
-        self._status_label.setText(self._routine.activity)
 
     # ------------------------------------------------------------------
     # Public accessors (for the parent automation widget)

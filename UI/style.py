@@ -691,5 +691,18 @@ def apply_style(app: QApplication) -> None:
             color: #666;
         }}
 
+        /* Collapsible advanced settings toggle */
+        QToolButton#AdvancedSettingsToggle {{
+            background: transparent;
+            border: none;
+            padding: 0px;
+            font-size: 13px;
+            color: #2c2c2c;
+            icon-size: 10px;
+        }}
+        QToolButton#AdvancedSettingsToggle:hover {{
+            color: #000000;
+        }}
+
         """
     )
