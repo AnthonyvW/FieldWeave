@@ -12,7 +12,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot, Qt
 
 from camera.cameras.base_camera import BaseCamera
-from camera.cameras.amscope_camera import AmscopeCamera, _HRESULT_NAMES
+from camera.cameras.amscope_camera import AmscopeCamera, _get_amcam, _HRESULT_NAMES
 from camera.threaded_camera import ThreadedCamera
 from camera.camera_enumerator import (
     CameraEnumerator,
@@ -596,9 +596,7 @@ class CameraManager(QObject):
             base_camera = self._active_camera.underlying_camera
             if isinstance(base_camera, AmscopeCamera):
                 try:
-                    amcam = AmscopeCamera._get_sdk_static()
-                    # get_LastError returns the HRESULT of the most recent failure
-                    hr = amcam.Amcam.get_LastError()
+                    hr = _get_amcam().Amcam.get_LastError()
                     hr_unsigned = hr & 0xFFFFFFFF
                     description = _HRESULT_NAMES.get(hr_unsigned, f"0x{hr_unsigned:08X}")
                 except Exception:

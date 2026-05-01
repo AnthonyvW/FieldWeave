@@ -33,23 +33,12 @@ class BaseCamera(ABC):
     Abstract base class for camera operations.
     Defines the interface that all camera implementations must follow.
     """
-    
-    # Class-level flag to track if SDK has been loaded
-    _sdk_loaded = False
-    
+
     def __init__(self, model: str):
-        """
-        Initialize camera base class.
-        
-        Args:
-            model: Camera model identifier (e.g., "MU500", "MU3000")
-        """
         self.model = model
         self._is_open = False
         self._callback = None
         self._callback_context = None
-        
-        # Settings management (initialized after camera is opened)
         self._settings_manager: CameraSettingsManager | None = None
         self._settings: CameraSettings | None = None
 
@@ -58,79 +47,14 @@ class BaseCamera(ABC):
         """Check if camera is currently open"""
         return self._is_open
     
-    @classmethod
-    @abstractmethod
-    def ensure_sdk_loaded(cls, sdk_path: Path | None = None) -> bool:
-        """
-        Ensure the camera SDK is loaded and ready to use.
-        
-        This method should be called before any camera operations.
-        Implementations should handle:
-        - Loading vendor SDK libraries
-        - Platform-specific initialization
-        - Setting up library search paths
-        - Extracting SDK files if needed
-        
-        Args:
-            sdk_path: Optional path to SDK location. If None, use default location.
-            
-        Returns:
-            True if SDK is loaded successfully, False otherwise
-            
-        Note:
-            This is a class method so it can be called before instantiating cameras.
-            Most implementations should track SDK load state to avoid reloading.
-        """
-        pass
-    
-    @classmethod
-    def is_sdk_loaded(cls) -> bool:
-        """
-        Check if SDK has been loaded.
-        
-        Returns:
-            True if SDK is loaded, False otherwise
-        """
-        return cls._sdk_loaded
-    
     @abstractmethod
     def _get_settings_class(self) -> type[CameraSettings]:
-        """
-        Get the appropriate settings class for this camera.
-        
-        This method must be implemented by subclasses to return their
-        concrete settings class (e.g., AmscopeSettings, ToupcamSettings).
-        
-        Returns:
-            Concrete CameraSettings subclass for this camera type
-            
-        Example:
-            In AmscopeCamera:
-            >>> def _get_settings_class(self):
-            ...     from camera.settings.amscope_settings import AmscopeSettings
-            ...     return AmscopeSettings
-        """
         pass
 
     def initialize_settings(self) -> None:
         """
         Initialize the settings system for this camera.
-        
-        This should be called after the camera is opened.
-        It creates a settings manager specific to this camera model,
-        loads the saved settings (or defaults if none exist), and
-        applies them to the camera hardware.
-        
-        Note:
-            The settings manager expects a CameraSettings subclass specific
-            to this camera model. The subclass must implement all abstract
-            methods from CameraSettings and provide metadata via get_metadata().
-        
-        Example:
-            >>> camera = MU500Camera()
-            >>> camera.open("camera_id")
-            >>> camera.initialize_settings()
-            >>> # Now camera.settings is available
+        Should be called after the camera is opened.
         """
         
         info(f"Initializing settings for {self.model}")

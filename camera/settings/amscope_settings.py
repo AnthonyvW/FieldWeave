@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     from camera.cameras.base_camera import BaseCamera, CameraResolution
 
 
+def _get_amcam():
+    from camera.cameras.amscope_camera import _get_amcam as _sdk_getter  # pylint: disable=import-outside-toplevel
+    return _sdk_getter()
+
+
 @dataclass
 class AmscopeSettings(CameraSettings):
     version: str = "0"
@@ -518,7 +523,7 @@ class AmscopeSettings(CameraSettings):
                 debug("Camera is open, stopping to set rotation")
                 self._camera.stop_capture()
 
-            amcam = self._camera._get_sdk()
+            amcam = _get_amcam()
             self._camera._hcam.put_Option(amcam.AMCAM_OPTION_ROTATE, degrees)
 
             if camera_was_open:
@@ -549,7 +554,7 @@ class AmscopeSettings(CameraSettings):
         self.dfc_enable = enabled
         if self._camera and hasattr(self._camera, '_hcam'):
             try:
-                amcam = self._camera._get_sdk()
+                amcam = _get_amcam()
                 self._camera._hcam.put_Option(amcam.AMCAM_OPTION_DFC, 1 if enabled else 0)
                 debug(f"Set DFC enable to {enabled}")
             except Exception as e:
@@ -566,7 +571,7 @@ class AmscopeSettings(CameraSettings):
                 self._dfc_initialized = False
                 
                 # Reset DFC to clear any existing data before capturing new frames
-                amcam = self._camera._get_sdk()
+                amcam = _get_amcam()
                 self._camera._hcam.put_Option(amcam.AMCAM_OPTION_DFC, -1)
                 info("Reset DFC before capturing new frames")
                 
@@ -752,7 +757,7 @@ class AmscopeSettings(CameraSettings):
             error("Cannot set histogram mode: camera not open")
             return False
 
-        amcam = self._camera._get_sdk()
+        amcam = _get_amcam()
         try:
             self._camera._hcam.put_Option(amcam.AMCAM_OPTION_HISTOGRAM, 1 if enabled else 0)
             self._histogram_enabled = enabled
@@ -990,10 +995,10 @@ class AmscopeSettings(CameraSettings):
         info(f"Applying settings to camera {camera.model}")
         
         try:
-            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_COLORMATIX, 1)
-            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_WBGAIN, 1)
-            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_LINEAR, 0)
-            self._camera._hcam.put_Option(self._camera._get_sdk().AMCAM_OPTION_CURVE, 2)
+            self._camera._hcam.put_Option(_get_amcam().AMCAM_OPTION_COLORMATIX, 1)
+            self._camera._hcam.put_Option(_get_amcam().AMCAM_OPTION_WBGAIN, 1)
+            self._camera._hcam.put_Option(_get_amcam().AMCAM_OPTION_LINEAR, 0)
+            self._camera._hcam.put_Option(_get_amcam().AMCAM_OPTION_CURVE, 2)
             if self.preview_resolution:
                 self.set_preview_resolution(self.preview_resolution)
             if self.still_resolution:
@@ -1044,10 +1049,10 @@ class AmscopeSettings(CameraSettings):
             self.set_dfc_quantity(self.dfc_quantity)
             self.set_dfc_enable(self.dfc_enable)
 
-            debug(f"COLORMATIX={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_COLORMATIX)}")
-            debug(f"WBGAIN={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_WBGAIN)}")
-            debug(f"CURVE={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_CURVE)}")
-            debug(f"LINEAR={self._camera._hcam.get_Option(self._camera._get_sdk().AMCAM_OPTION_LINEAR)}")
+            debug(f"COLORMATIX={self._camera._hcam.get_Option(_get_amcam().AMCAM_OPTION_COLORMATIX)}")
+            debug(f"WBGAIN={self._camera._hcam.get_Option(_get_amcam().AMCAM_OPTION_WBGAIN)}")
+            debug(f"CURVE={self._camera._hcam.get_Option(_get_amcam().AMCAM_OPTION_CURVE)}")
+            debug(f"LINEAR={self._camera._hcam.get_Option(_get_amcam().AMCAM_OPTION_LINEAR)}")
             debug("Successfully applied all settings to camera")
         except Exception as e:
             exception(f"Failed to apply settings to camera: {e}")
@@ -1095,13 +1100,13 @@ class AmscopeSettings(CameraSettings):
                 r = still_resolutions[0]
                 self.still_resolution = f"{r.width}x{r.height}"
 
-            rotate_raw = hcam.get_Option(camera._get_sdk().AMCAM_OPTION_ROTATE)
+            rotate_raw = hcam.get_Option(_get_amcam().AMCAM_OPTION_ROTATE)
             self.rotate = rotate_raw if rotate_raw in (0, 90, 180, 270) else 0
             self.hflip = bool(hcam.get_HFlip())
             self.vflip = bool(hcam.get_VFlip())
             
             # Dark Field Correction
-            amcam = camera._get_sdk()
+            amcam = _get_amcam()
             dfc_val = hcam.get_Option(amcam.AMCAM_OPTION_DFC)
             dfc_state = dfc_val & 0xff
             self.dfc_enable = (dfc_state == 1)  # 0=disabled, 1=enabled, 2=inited
