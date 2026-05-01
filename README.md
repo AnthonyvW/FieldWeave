@@ -1,4 +1,4 @@
-# FieldWeave - Low Cost Gigapixel Scanner
+# FieldWeave - Low Cost Gigapixel Imaging Machine
 
 [![Windows](https://custom-icon-badges.demolab.com/badge/Windows-0078D6?logo=windows11&logoColor=white)](#)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](#)
