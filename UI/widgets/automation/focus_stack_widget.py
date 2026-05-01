@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QToolButton,
 )
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl, QMetaObject, Slot
 from PySide6.QtGui import QDesktopServices
 
 def _open_path(path: str) -> None:
@@ -32,7 +32,8 @@ def _open_path(path: str) -> None:
 from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_scan import ZStackScan
-from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
+from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig, FocusStackResult
+from post_processing.routines.post_processing_routine import RoutineResult
 from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 
@@ -139,7 +140,11 @@ class FocusStackWidget(QWidget):
         self._routine: ZStackScan | None = None
         self._last_output_folder: str | None = None
         self._last_stacked_path: str | None = None
+        self._pending_stack_result: FocusStackResult | None = None
         self._setup_ui()
+
+        ctx = get_app_context()
+        ctx.post_processing.add_routine_complete_listener(self._on_routine_complete)
 
 
     # ------------------------------------------------------------------
@@ -242,32 +247,6 @@ class FocusStackWidget(QWidget):
         fs_settings_layout.setContentsMargins(0, 4, 0, 0)
         fs_settings_layout.setSpacing(6)
 
-        # Alignment
-        align_row = QWidget()
-        align_layout = QHBoxLayout(align_row)
-        align_layout.setContentsMargins(0, 0, 0, 0)
-        align_layout.setSpacing(8)
-        align_layout.addWidget(QLabel("Alignment:"))
-
-        self._no_align_check = QCheckBox("Skip alignment")
-        self._no_align_check.setChecked(False)
-        self._no_align_check.setToolTip(
-            "Skip ECC alignment. Use when images are already registered."
-        )
-        self._no_align_check.stateChanged.connect(self._on_no_align_changed)
-        align_layout.addWidget(self._no_align_check)
-        align_layout.addStretch(1)
-        fs_settings_layout.addWidget(align_row)
-
-        # Crop to intersection
-        self._crop_check = QCheckBox("Crop to intersection")
-        self._crop_check.setChecked(False)
-        self._crop_check.setToolTip(
-            "Crop the output to the largest rectangle covered by every frame after "
-            "alignment. Removes border regions but shrinks the output image."
-        )
-        fs_settings_layout.addWidget(self._crop_check)
-
         # Keep original size
         self._keep_size_check = QCheckBox("Keep original size")
         self._keep_size_check.setChecked(True)
@@ -293,6 +272,24 @@ class FocusStackWidget(QWidget):
         advanced_layout = QVBoxLayout(self._advanced_widget)
         advanced_layout.setContentsMargins(12, 0, 0, 0)
         advanced_layout.setSpacing(6)
+
+        # Skip alignment
+        self._no_align_check = QCheckBox("Skip alignment")
+        self._no_align_check.setChecked(False)
+        self._no_align_check.setToolTip(
+            "Skip ECC alignment. Use when images are already registered."
+        )
+        self._no_align_check.stateChanged.connect(self._on_no_align_changed)
+        advanced_layout.addWidget(self._no_align_check)
+
+        # Crop to intersection
+        self._crop_check = QCheckBox("Crop to intersection")
+        self._crop_check.setChecked(False)
+        self._crop_check.setToolTip(
+            "Crop the output to the largest rectangle covered by every frame after "
+            "alignment. Removes border regions but shrinks the output image."
+        )
+        advanced_layout.addWidget(self._crop_check)
 
         # Approach distance
         approach_row = QWidget()
@@ -444,6 +441,25 @@ class FocusStackWidget(QWidget):
         self._summary_label.setVisible(False)
         main_layout.addWidget(self._summary_label)
 
+        # ---- Post-run results row (hidden until a run completes) ---------
+        self._results_widget = QWidget()
+        results_layout = QHBoxLayout(self._results_widget)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(8)
+
+        self._open_folder_btn = QPushButton("Open Folder")
+        self._open_folder_btn.setFixedHeight(30)
+        self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
+        results_layout.addWidget(self._open_folder_btn, 1)
+
+        self._view_image_btn = QPushButton("View Stacked Image")
+        self._view_image_btn.setFixedHeight(30)
+        self._view_image_btn.clicked.connect(self._on_view_image_clicked)
+        results_layout.addWidget(self._view_image_btn, 1)
+
+        self._results_widget.setVisible(False)
+        main_layout.addWidget(self._results_widget)
+
         # ---- Start button ------------------------------------------------
         self._start_btn = QPushButton("Start Automation")
         self._start_btn.setObjectName("AreaScanStart")
@@ -472,25 +488,6 @@ class FocusStackWidget(QWidget):
 
         self._controls_widget.setVisible(False)
         main_layout.addWidget(self._controls_widget)
-
-        # ---- Post-run results row (hidden until a run completes) ---------
-        self._results_widget = QWidget()
-        results_layout = QHBoxLayout(self._results_widget)
-        results_layout.setContentsMargins(0, 0, 0, 0)
-        results_layout.setSpacing(8)
-
-        self._open_folder_btn = QPushButton("Open Folder")
-        self._open_folder_btn.setFixedHeight(30)
-        self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
-        results_layout.addWidget(self._open_folder_btn, 1)
-
-        self._view_image_btn = QPushButton("View Stacked Image")
-        self._view_image_btn.setFixedHeight(30)
-        self._view_image_btn.clicked.connect(self._on_view_image_clicked)
-        results_layout.addWidget(self._view_image_btn, 1)
-
-        self._results_widget.setVisible(False)
-        main_layout.addWidget(self._results_widget)
 
         main_layout.addStretch(1)
 
@@ -736,15 +733,44 @@ class FocusStackWidget(QWidget):
         self._fs_enable_check.setEnabled(True)
         self._fs_settings_widget.setEnabled(self._fs_enable_check.isChecked())
         self._controls_widget.setVisible(False)
+
+        stacked_path = self._last_stacked_path
         self._routine = None
         self._update_summary()
 
         if self._last_output_folder is not None:
             self._view_image_btn.setVisible(
-                self._last_stacked_path is not None
-                and Path(self._last_stacked_path).exists()
+                stacked_path is not None and Path(stacked_path).exists()
             )
             self._results_widget.setVisible(True)
+
+    def _on_routine_complete(self, result: RoutineResult) -> None:
+        """Called from the routine's background thread — marshal Qt calls to main thread."""
+        if not result.success:
+            QMetaObject.invokeMethod(self, "_notify_failure", Qt.ConnectionType.QueuedConnection)
+            return
+        fs_result: FocusStackResult | None = result.get("focus_stack")
+        if fs_result is not None:
+            self._pending_stack_result = fs_result
+        QMetaObject.invokeMethod(self, "_notify_success", Qt.ConnectionType.QueuedConnection)
+
+    @Slot()
+    def _notify_failure(self) -> None:
+        ctx = get_app_context()
+        if ctx.toast is not None:
+            ctx.toast.error("Focus stack automation failed.")
+
+    @Slot()
+    def _notify_success(self) -> None:
+        ctx = get_app_context()
+        if ctx.toast is not None:
+            ctx.toast.success("Focus stack automation complete.")
+        fs_result = self._pending_stack_result
+        self._pending_stack_result = None
+        if fs_result is not None:
+            preview = ctx.camera_preview
+            if preview is not None:
+                preview.show_static_image(fs_result.result_rgb)
 
     def _poll_routine_state(self) -> None:
         if self._routine is None or not self._routine.is_running:

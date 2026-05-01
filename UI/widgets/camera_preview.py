@@ -321,6 +321,9 @@ class CameraPreview(QFrame):
 
         self._preview_hidden: bool = False
 
+        self._static_image: np.ndarray | None = None
+        self._static_image_position: tuple[int, int, int] | None = None
+
         self._video_label = OverlayLabel()
         self._video_label.setObjectName("VideoLabel")
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -413,6 +416,35 @@ class CameraPreview(QFrame):
                 preview.overlays.crosshair = True
         """
         return self._overlays
+
+    def show_static_image(self, image: np.ndarray) -> None:
+        """Display a static RGB image in place of the live camera stream.
+
+        The static image is shown until the stage position changes from where
+        it was when this was called.
+        """
+        self._static_image = image
+        ctx = get_app_context()
+        if ctx.motion is not None:
+            pos = ctx.motion.get_position()
+            self._static_image_position = (pos.x, pos.y, pos.z)
+        else:
+            self._static_image_position = None
+        h, w = image.shape[:2]
+        q_image = QImage(image.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+        lw = self._video_label.width()
+        lh = self._video_label.height()
+        if lw > 0 and lh > 0:
+            scaled = q_image.scaled(
+                lw, lh,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._video_label.setPixmap(QPixmap.fromImage(scaled))
+
+    def clear_static_image(self) -> None:
+        """Resume live camera display, discarding any pinned static image."""
+        self._static_image = None
 
     def _connect_to_camera_manager(self) -> None:
         ctx = get_app_context()
@@ -522,27 +554,34 @@ class CameraPreview(QFrame):
         if not src:
             return
 
-        try:
-            camera = camera_manager.active_camera
-            if not camera:
+        camera = camera_manager.active_camera
+        if not camera:
+            return
+
+        stride = type(camera.underlying_camera).calculate_stride(width, 24)
+        required = stride * height
+
+        if width != self._preview_width or height != self._preview_height:
+            self._preview_buf = bytearray(required)
+            self._preview_width = width
+            self._preview_height = height
+
+        self._preview_buf[:required] = src[:required]
+        self._preview_seq = camera_manager.preview_frame_seq
+
+        if self._static_image is not None:
+            if self._static_image_position is not None:
+                ctx = get_app_context()
+                if ctx.motion is not None:
+                    pos = ctx.motion.get_position()
+                    if (pos.x, pos.y, pos.z) != self._static_image_position:
+                        self._static_image = None
+                        self._static_image_position = None
+            if self._static_image is not None:
                 return
 
-            stride = type(camera.underlying_camera).calculate_stride(width, 24)
-            required = stride * height
-
-            if width != self._preview_width or height != self._preview_height:
-                self._preview_buf = bytearray(required)
-                self._preview_width = width
-                self._preview_height = height
-
-            self._preview_buf[:required] = src[:required]
-            self._preview_seq = camera_manager.preview_frame_seq
-
-            if self._preview_seq >= self._still_seq:
-                self._render_display(self._preview_buf, width, height, stride)
-
-        except Exception as e:
-            error(f"Preview: error handling preview frame: {e}")
+        if self._preview_seq >= self._still_seq:
+            self._render_display(self._preview_buf, width, height, stride)
 
     @Slot(int, int)
     def _on_still_frame_ready(self, width: int, height: int) -> None:
@@ -552,26 +591,24 @@ class CameraPreview(QFrame):
         src = camera_manager.get_current_still_frame()
         if not src:
             return
-        try:
-            camera = camera_manager.active_camera
-            if not camera:
-                return
 
-            stride = type(camera.underlying_camera).calculate_stride(width, 24)
-            required = stride * height
+        camera = camera_manager.active_camera
+        if not camera:
+            return
 
-            if width != self._still_width or height != self._still_height:
-                self._still_buf = bytearray(required)
-                self._still_width = width
-                self._still_height = height
+        stride = type(camera.underlying_camera).calculate_stride(width, 24)
+        required = stride * height
 
-            self._still_buf[:required] = src[:required]
-            self._still_seq = camera_manager.still_frame_seq
+        if width != self._still_width or height != self._still_height:
+            self._still_buf = bytearray(required)
+            self._still_width = width
+            self._still_height = height
 
+        self._still_buf[:required] = src[:required]
+        self._still_seq = camera_manager.still_frame_seq
+
+        if self._static_image is None:
             self._render_display(self._still_buf, width, height, stride)
-
-        except Exception as e:
-            error(f"Preview: error handling still frame: {e}")
 
     # ------------------------------------------------------------------
     # Rendering
@@ -586,54 +623,51 @@ class CameraPreview(QFrame):
     ) -> None:
         if self._preview_hidden:
             return
-        try:
-            self._current_full_width = width
-            self._current_full_height = height
 
-            # QImage(buf, ...) does not copy the data — it holds a raw pointer
-            # into buf.  Call .copy() immediately so the QImage owns its memory
-            # and cannot be invalidated if buf is reassigned elsewhere.
-            image = QImage(buf, width, height, stride, QImage.Format.Format_RGB888).copy()
+        self._current_full_width = width
+        self._current_full_height = height
 
-            if self._channel_overlay.needs_filter:
-                image = self._channel_overlay.apply(image)
+        # QImage(buf, ...) does not copy the data — it holds a raw pointer
+        # into buf.  Call .copy() immediately so the QImage owns its memory
+        # and cannot be invalidated if buf is reassigned elsewhere.
+        image = QImage(buf, width, height, stride, QImage.Format.Format_RGB888).copy()
 
-            # image.bits() returns a raw pointer; keep image alive in a local
-            # so the GC cannot collect it while ptr is still being read.
-            ptr = image.bits()
-            full_arr = (
-                np.frombuffer(ptr, dtype=np.uint8)
-                .reshape((image.height(), image.bytesPerLine()))
-                [:, : image.width() * 3]
-                .reshape((image.height(), image.width(), 3))
+        if self._channel_overlay.needs_filter:
+            image = self._channel_overlay.apply(image)
+
+        # image.bits() returns a raw pointer; keep image alive in a local
+        # so the GC cannot collect it while ptr is still being read.
+        ptr = image.bits()
+        full_arr = (
+            np.frombuffer(ptr, dtype=np.uint8)
+            .reshape((image.height(), image.bytesPerLine()))
+            [:, : image.width() * 3]
+            .reshape((image.height(), image.width(), 3))
+            .copy()
+        )
+        del ptr
+        self._video_label.notify_full(full_arr)
+
+        lw = self._video_label.width()
+        lh = self._video_label.height()
+        if lw > 0 and lh > 0:
+            scaled = image.scaled(
+                lw, lh,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+
+            scaled_ptr = scaled.bits()
+            scaled_arr = (
+                np.frombuffer(scaled_ptr, dtype=np.uint8)
+                .reshape((scaled.height(), scaled.bytesPerLine()))
+                [:, : scaled.width() * 3]
+                .reshape((scaled.height(), scaled.width(), 3))
                 .copy()
             )
-            del ptr
-            self._video_label.notify_full(full_arr)
-
-            lw = self._video_label.width()
-            lh = self._video_label.height()
-            if lw > 0 and lh > 0:
-                scaled = image.scaled(
-                    lw, lh,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation,
-                )
-
-                scaled_ptr = scaled.bits()
-                scaled_arr = (
-                    np.frombuffer(scaled_ptr, dtype=np.uint8)
-                    .reshape((scaled.height(), scaled.bytesPerLine()))
-                    [:, : scaled.width() * 3]
-                    .reshape((scaled.height(), scaled.width(), 3))
-                    .copy()
-                )
-                del scaled_ptr
-                self._video_label.notify_scaled(scaled_arr)
-                self._video_label.setPixmap(QPixmap.fromImage(scaled))
-
-        except Exception as e:
-            error(f"Preview: error rendering frame: {e}")
+            del scaled_ptr
+            self._video_label.notify_scaled(scaled_arr)
+            self._video_label.setPixmap(QPixmap.fromImage(scaled))
 
     # ------------------------------------------------------------------
     # Camera manager state slots

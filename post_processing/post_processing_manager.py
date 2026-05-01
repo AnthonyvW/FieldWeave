@@ -31,11 +31,15 @@ from common.fieldweaveConfig import (
 )
 
 if TYPE_CHECKING:
-    from post_processing.routines.post_processing_routine import PostProcessingRoutine
+    from post_processing.routines.post_processing_routine import PostProcessingRoutine, RoutineResult
 
 # Fired when the active routine publishes a status update.
 # Signature: (job_name, activity, progress_current, progress_total, eta_seconds) -> None
 RoutineStateCallback = Callable[[str, str, int, int, int], None]
+
+# Fired when the active routine finishes (success or failure).
+# Signature: (result: RoutineResult) -> None
+RoutineCompleteCallback = Callable[["RoutineResult"], None]
 
 
 class PostProcessingManager:
@@ -82,6 +86,7 @@ class PostProcessingManager:
 
         self._active_routine: PostProcessingRoutine | None = None
         self._routine_state_listeners: list[RoutineStateCallback] = []
+        self._routine_complete_listeners: list[RoutineCompleteCallback] = []
 
         info("PostProcessingManager: initialised")
 
@@ -150,6 +155,32 @@ class PostProcessingManager:
                 warning(f"PostProcessingManager: routine state listener raised: {exc}")
 
     # ------------------------------------------------------------------
+    # Routine complete listeners
+    # ------------------------------------------------------------------
+
+    def add_routine_complete_listener(self, listener: RoutineCompleteCallback) -> None:
+        """Subscribe to routine completion.
+
+        *listener* is called once when the active routine finishes, whether
+        successful or not.
+        Signature: ``(result: RoutineResult) -> None``
+        """
+        self._routine_complete_listeners.append(listener)
+
+    def remove_routine_complete_listener(self, listener: RoutineCompleteCallback) -> None:
+        try:
+            self._routine_complete_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def _emit_routine_complete(self, result: RoutineResult) -> None:
+        for listener in list(self._routine_complete_listeners):
+            try:
+                listener(result)
+            except Exception as exc:
+                warning(f"PostProcessingManager: routine complete listener raised: {exc}")
+
+    # ------------------------------------------------------------------
     # Routine management
     # ------------------------------------------------------------------
 
@@ -180,6 +211,7 @@ class PostProcessingManager:
             )
         self._active_routine = routine
         routine.on_state_changed = self._emit_routine_state
+        routine.on_complete = self._emit_routine_complete
         info(f"PostProcessingManager: starting routine '{routine.job_name}'")
         routine.start()
 
