@@ -1,0 +1,6 @@
+training/
+delete/
+dataset_patches/
+not_annotated/
+old/
+predicted_masks/

@@ -1,0 +1,914 @@
+from __future__ import annotations
+
+import math
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QMessageBox,
+    QGroupBox
+)
+from PySide6.QtGui import QPainter, QColor, QPen
+from PySide6.QtCore import Qt, QRectF, QTimer, QEvent
+
+from common.app_context import get_app_context
+from common.logger import warning
+from motion.motion_controller_manager import MotionState
+from motion.motion_config import MotionSystemSettings
+
+# Nanometres per millimetre.
+_NM_PER_MM = 1_000_000
+
+# Fallback preset values (nm) used when no settings are available.
+_FALLBACK_PRESETS_NM: list[int] = [40_000, 400_000, 2_000_000, 10_000_000]
+
+
+def _settings_presets_nm(s: MotionSystemSettings) -> list[int]:
+    """Return exactly 4 step-preset values in nm from *s*, padding with fallbacks."""
+    raw: list[int] = getattr(s, "step_presets", [])
+    padded = (list(raw) + list(_FALLBACK_PRESETS_NM))[:4]
+    return padded
+
+
+def _format_mm(nm: int) -> str:
+    """Format a nanometre value as a compact millimetre label."""
+    mm = nm / _NM_PER_MM
+    # Drop trailing zeros but keep at least 2 decimal places for small values.
+    if mm < 1.0:
+        return f"{mm:.3g}mm"
+    return f"{mm:g}mm"
+
+
+def clamp(v: int, lo: int = 0, hi: int = 255) -> int:
+    return max(lo, min(hi, v))
+
+
+def adjust_color(c: QColor, factor: float) -> QColor:
+    return QColor(
+        clamp(int(c.red() * factor)),
+        clamp(int(c.green() * factor)),
+        clamp(int(c.blue() * factor)),
+    )
+
+
+class DiamondButton(QPushButton):
+    def __init__(
+        self,
+        label: str = "",
+        parent: QWidget | None = None,
+        base_color: QColor = QColor(208, 211, 214),
+        font_px: int = 28,
+        size: int = 90,
+        text_offset_y: int = 0
+    ):
+        super().__init__("", parent)
+        self.setFixedSize(size, size)
+        self.setStyleSheet("border: none; background: transparent;")
+        self.setMouseTracking(True)
+
+        # Enable mouse tracking on parent to handle pass-through
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+
+        self._base = QColor(base_color)
+        self._hover: bool = False
+        self._label = label
+        self._font_px = font_px
+        self._text_offset_y = text_offset_y
+
+    @property
+    def hover(self) -> bool:
+        return self._hover
+
+    @hover.setter
+    def hover(self, value: bool) -> None:
+        if self._hover != value:
+            self._hover = value
+            self.update()
+
+    def enterEvent(self, event):
+        # Don't automatically set hover - check in mouseMoveEvent
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hover = False
+        self.unsetCursor()
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # Update hover state based on whether mouse is over diamond
+        is_over_diamond = self.hitButton(event.position().toPoint())
+        self.hover = is_over_diamond
+
+        # Set or unset cursor based on position
+        if is_over_diamond:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
+
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        # Check if click is inside diamond
+        if self.hitButton(event.position().toPoint()):
+            super().mousePressEvent(event)
+        else:
+            # Pass the event to the parent by ignoring it
+            event.ignore()
+
+    def mouseReleaseEvent(self, event):
+        if self.hitButton(event.position().toPoint()):
+            super().mouseReleaseEvent(event)
+        else:
+            event.ignore()
+
+    def hitButton(self, pos):
+        w = self.width()
+        h = self.height()
+
+        cx = w / 2
+        cy = h / 2
+
+        # Translate point to origin
+        x = pos.x() - cx
+        y = pos.y() - cy
+
+        # Rotate point by -45 degrees (inverse of the 45 degree rotation in paintEvent)
+        angle = -45 * math.pi / 180
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+
+        rotated_x = x * cos_a - y * sin_a
+        rotated_y = x * sin_a + y * cos_a
+
+        # Check if the rotated point is inside the square
+        side = min(w, h) / math.sqrt(2)
+        half_side = side / 2
+
+        return (abs(rotated_x) <= half_side and abs(rotated_y) <= half_side)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+
+        color = QColor(self._base)
+        if self._hover:
+            color = adjust_color(color, 0.90)  # Darken on hover
+        if self.isDown():
+            color = adjust_color(color, 0.85)
+
+        # Move origin to center
+        painter.translate(w / 2, h / 2)
+
+        # Rotate 45 degrees
+        painter.rotate(45)
+
+        # Define square centered at origin
+        side = min(w, h) / math.sqrt(2)  # scale factor controls diamond size
+        rect = QRectF(-side / 2, -side / 2, side, side)
+
+        # Fill
+        painter.setBrush(color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(rect)
+
+        # Border
+        pen = QPen(QColor(120, 120, 120))
+        pen.setWidth(2)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+
+        # Reset transform for text
+        painter.resetTransform()
+
+        # Draw label normally with offset
+        font = self.font()
+        font.setPixelSize(self._font_px)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(Qt.GlobalColor.black)
+
+        # Apply vertical offset to text rect
+        text_rect = self.rect()
+        if self._text_offset_y != 0:
+            text_rect = text_rect.adjusted(
+                0, self._text_offset_y, 0, self._text_offset_y)
+
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self._label)
+
+
+class NavigationWidget(QWidget):
+    _instances: list[NavigationWidget] = []
+
+    @classmethod
+    def notify_settings_changed(cls) -> None:
+        """
+        Call this after navigation settings are saved to push the updated
+        presets and axis-inversion flags to every live NavigationWidget.
+        NavigationSettingsWidget._on_save() calls this automatically.
+        """
+        for instance in list(cls._instances):
+            instance.refresh_from_settings()
+
+    # ------------------------------------------------------------------
+    # Step size — shared across instances, stored in nm
+    # ------------------------------------------------------------------
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        NavigationWidget._instances.append(self)
+        self.destroyed.connect(
+            lambda: NavigationWidget._instances.remove(self))
+
+        # Axis-inversion flags — updated by refresh_from_settings().
+        self._invert_x: bool = False
+        self._invert_y: bool = False
+        self._invert_z: bool = False
+
+        # Step size owned by this widget instance (nm).  Never written back to
+        # the motion system's settings — the motion system manages its own value.
+        self._step_size_nm: int = _FALLBACK_PRESETS_NM[0]
+
+        # Declare all widget attributes here so they are always defined in __init__
+        self.top_btn: DiamondButton
+        self.bot_btn: DiamondButton
+        self.left_btn: DiamondButton
+        self.right_btn: DiamondButton
+        self.center_btn: DiamondButton
+        self.z_up_btn: QPushButton
+        self.z_down_btn: QPushButton
+        self.position_label: QLabel
+        self.step_buttons: list[tuple[QPushButton, int]]  # (button, size_nm)
+
+        # Step-size preset buttons container — rebuilt by refresh_from_settings().
+        self._step_buttons_layout: QHBoxLayout | None = None
+
+        self._setup_ui()
+
+        # Overlay is created lazily in showEvent once the widget has a parent,
+        # so we can reparent it to the grandparent and cover its layout margins.
+        self._overlay: QWidget | None = None
+        self._overlay_label: QLabel | None = None
+        self._motion_available: bool = False
+
+        # Poll until the controller is ready, then switch to a position-refresh timer
+        self._ready_timer = QTimer(self)
+        self._ready_timer.setInterval(500)
+        self._ready_timer.timeout.connect(self._check_motion_ready)
+        self._ready_timer.start()
+
+        self._position_timer = QTimer(self)
+        self._position_timer.setInterval(200)
+        self._position_timer.timeout.connect(self._update_position_display)
+
+        # Start in the unavailable state
+        self._set_motion_available(False)
+
+        # Apply current settings (presets + inversion flags).
+        self.refresh_from_settings()
+
+    # ------------------------------------------------------------------
+    # Settings refresh — called at init and after settings are saved
+    # ------------------------------------------------------------------
+
+    def refresh_from_settings(self) -> None:
+        """
+        Pull the latest presets and axis-inversion flags from the motion
+        controller settings and update the widget accordingly.
+
+        Safe to call from any point after __init__ completes.
+        """
+        ctx = get_app_context()
+        s: MotionSystemSettings | None = (
+            ctx.motion.settings if ctx.motion is not None else None
+        )
+
+        if s is not None:
+            self._invert_x = getattr(s, "invert_x", False)
+            self._invert_y = getattr(s, "invert_y", False)
+            self._invert_z = getattr(s, "invert_z", False)
+            presets_nm = _settings_presets_nm(s)
+        else:
+            self._invert_x = False
+            self._invert_y = False
+            self._invert_z = False
+            presets_nm = list(_FALLBACK_PRESETS_NM)
+
+        self._rebuild_step_buttons(presets_nm)
+
+    # ------------------------------------------------------------------
+    # UI setup
+    # ------------------------------------------------------------------
+
+    def _setup_ui(self) -> None:
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(15)
+
+        # Set white background
+        self.setStyleSheet("""
+            NavigationWidget {
+                background: white;
+            }
+        """)
+
+        # Step size controls
+        step_size_controls = self._create_step_size_controls()
+        main_layout.addWidget(step_size_controls)
+
+        # Combined jog controls
+        jog_controls = self._create_jog_controls()
+        main_layout.addWidget(jog_controls)
+
+        main_layout.addStretch(1)
+
+    def _ensure_overlay(self) -> None:
+        """
+        Create the overlay the first time we are shown with a real parent.
+        Parenting to self.parent() (the CollapsibleSection content widget) means
+        Qt will not clip the overlay to NavigationWidget's own bounds, so we can
+        expand it to cover the layout margins that surround us.
+        """
+        if self._overlay is not None:
+            return
+        overlay_parent = self.parent()
+        if overlay_parent is None:
+            return  # Not yet placed in a hierarchy — try again on next showEvent
+
+        self._overlay = QWidget(overlay_parent)
+        self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+        self._overlay.show()
+
+        self._overlay_label = QLabel(
+            "Connecting to Motion System...", self._overlay)
+        self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._overlay_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-style: italic;
+                background: transparent;
+            }
+        """)
+
+        # Apply whatever state we already decided on
+        self._set_motion_available(self._motion_available)
+
+    def _reposition_overlay(self) -> None:
+        """
+        Position the overlay in its parent's coordinate space so it covers
+        NavigationWidget plus the layout margins the parent applies around it.
+        """
+        if self._overlay is None:
+            return
+        overlay_parent = self._overlay.parent()
+        if overlay_parent is None:
+            return
+
+        # Where does NavigationWidget sit inside overlay_parent?
+        origin = self.mapTo(overlay_parent, self.rect().topLeft())
+        x, y = origin.x(), origin.y()
+        w, h = self.width(), self.height()
+
+        # Expand outward by the margins the parent layout adds around us
+        parent = self.parent()
+        if parent is not None:
+            layout = parent.layout()
+            if layout is not None:
+                left, top, right, bottom = layout.getContentsMargins()
+                x -= left
+                y -= top
+                w += left + right
+                h += top + bottom
+
+        self._overlay.setGeometry(x, y, w, h)
+        self._overlay_label.setGeometry(
+            0, 0, self._overlay.width(), self._overlay.height())
+        self._overlay.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reposition_overlay()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._ensure_overlay()
+        self._reposition_overlay()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._reposition_overlay()
+
+    def _set_overlay_message(self, message: str) -> None:
+        """Update the overlay label text if the overlay has been created."""
+        if self._overlay_label is not None:
+            self._overlay_label.setText(message)
+
+    def _check_motion_ready(self) -> None:
+        """Poll every 500 ms and update overlay/position timer to reflect current state."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            return
+        state = ctx.motion.get_state()
+        routine_running = ctx.motion.routine_running
+
+        if state == MotionState.READY and not routine_running:
+            if not self._motion_available:
+                # Transition into ready — apply settings once on first entry.
+                self._set_motion_available(True)
+                self.refresh_from_settings()
+            if not self._position_timer.isActive():
+                self._position_timer.start()
+        elif state in (MotionState.FAILED, MotionState.FAULTED):
+            self._set_motion_available(False)
+            self._position_timer.stop()
+            self.position_label.setText("X: --  Y: --  Z: -- mm")
+            self._set_overlay_message("Motion System Not Connected")
+        elif state == MotionState.HOMING:
+            self._set_motion_available(False)
+            self._position_timer.stop()
+            self.position_label.setText("X: --  Y: --  Z: -- mm")
+            self._set_overlay_message("Homing Motion System...")
+        elif routine_running:
+            self._set_motion_available(False)
+            if not self._position_timer.isActive():
+                self._position_timer.start()
+        else:
+            self._set_motion_available(False)
+            self._position_timer.stop()
+            self.position_label.setText("X: --  Y: --  Z: -- mm")
+            self._set_overlay_message("Connecting to Motion System...")
+
+    def _set_motion_available(self, available: bool) -> None:
+        """Show or hide the tinted overlay without touching button enabled state.
+
+        Interaction is blocked by raising an opaque overlay that absorbs all
+        mouse events, so the buttons retain their normal appearance at all times.
+        """
+        self._motion_available = available
+        if self._overlay is None:
+            return
+        if available:
+            # Let mouse events fall through to the buttons beneath
+            self._overlay.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+            self._overlay_label.hide()
+            self._overlay.lower()
+        else:
+            # Overlay sits on top and absorbs all input — buttons stay visually unchanged
+            self._overlay.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 100);")
+            self._overlay_label.show()
+            self._overlay.raise_()
+
+    # ------------------------------------------------------------------
+    # Step size controls
+    # ------------------------------------------------------------------
+
+    def _create_step_size_controls(self) -> QWidget:
+        """Create step size selection buttons with position display."""
+        group = QGroupBox("Step Size")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(10, 5, 10, 5)
+        group_layout.setSpacing(10)
+
+        # Buttons row — kept as an attribute so _rebuild_step_buttons can clear it.
+        buttons_row = QWidget()
+        self._step_buttons_layout = QHBoxLayout(buttons_row)
+        self._step_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self._step_buttons_layout.setSpacing(8)
+
+        self.step_buttons = []
+        # Populated properly by refresh_from_settings() → _rebuild_step_buttons()
+        # after __init__ completes; initialise with fallbacks so the widget is
+        # never in an empty state during construction.
+        self._populate_step_buttons(_FALLBACK_PRESETS_NM)
+
+        group_layout.addWidget(buttons_row)
+
+        # Position display
+        self.position_label = QLabel()
+        self.position_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.position_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                padding: 2px;
+            }
+        """)
+        self._update_position_display()
+        group_layout.addWidget(self.position_label)
+
+        return group
+
+    def _populate_step_buttons(self, presets_nm: list[int]) -> None:
+        """
+        Fill *self._step_buttons_layout* with one button per preset.
+
+        Does NOT clear the layout first — call _rebuild_step_buttons() for that.
+        """
+        self.step_buttons = []
+        for size_nm in presets_nm:
+            btn = QPushButton(_format_mm(size_nm))
+            btn.setFixedHeight(30)
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    padding: 0px;
+                }
+                QPushButton:checked {
+                    background-color: rgb(140, 143, 146);
+                    color: white;
+                    border: 1px solid rgb(100, 103, 106);
+                }
+            """)
+            btn.clicked.connect(lambda checked, s=size_nm: self._set_step_size_nm(s))
+            self._step_buttons_layout.addWidget(btn)
+            self.step_buttons.append((btn, size_nm))
+
+        self._sync_step_size_buttons()
+
+    def _rebuild_step_buttons(self, presets_nm: list[int]) -> None:
+        """
+        Tear down and recreate the step-size buttons for a new set of presets.
+
+        If the currently selected step size is not in the new preset list the
+        first preset is selected instead.
+        """
+        if self._step_buttons_layout is None:
+            return
+
+        # Remove all existing buttons from the layout and delete them.
+        while self._step_buttons_layout.count():
+            item = self._step_buttons_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # If the current step size is no longer in the new presets, fall back
+        # to the first preset so the controller speed stays consistent.
+        if self._current_step_size_nm() not in presets_nm and presets_nm:
+            self._set_step_size_nm(presets_nm[0], notify_instances=False)
+
+        self._populate_step_buttons(presets_nm)
+
+    def _current_step_size_nm(self) -> int:
+        """Return the step size currently selected on this widget."""
+        return self._step_size_nm
+
+    def _set_step_size_nm(self, size_nm: int, *, notify_instances: bool = True) -> None:
+        """Set this widget's step size and, optionally, sync button states on all live instances."""
+        self._step_size_nm = size_nm
+
+        if notify_instances:
+            for instance in list(NavigationWidget._instances):
+                instance._sync_step_size_buttons()
+
+    def _sync_step_size_buttons(self) -> None:
+        """Update checked states to reflect this widget's current step size."""
+        current = self._current_step_size_nm()
+        for btn, btn_size_nm in self.step_buttons:
+            btn.setChecked(btn_size_nm == current)
+
+    # ------------------------------------------------------------------
+    # Jog controls
+    # ------------------------------------------------------------------
+
+    def _create_jog_controls(self) -> QWidget:
+        """Create combined jog controls with diamond navigation and Z-axis."""
+        group = QGroupBox("Jog")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.setSpacing(0)
+
+        # Top row: diamond and z-axis controls
+        top_row = QWidget()
+        top_layout = QHBoxLayout(top_row)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(15)
+
+        # Diamond panel
+        diamond_container = self._create_diamond_panel()
+        top_layout.addWidget(diamond_container, 0,
+                             Qt.AlignmentFlag.AlignCenter)
+
+        # Z-axis controls
+        z_container = self._create_z_controls()
+        top_layout.addWidget(z_container, 0, Qt.AlignmentFlag.AlignCenter)
+
+        top_layout.addStretch(1)
+
+        group_layout.addWidget(top_row)
+
+        return group
+
+    def _create_diamond_panel(self) -> QWidget:
+        """Create the diamond navigation with home button in center."""
+        container = QWidget()
+        container.setFixedSize(240, 200)  # Slightly larger for better spacing
+
+        # Outer arrows (Unicode) - larger size
+        self.top_btn = DiamondButton(
+            "↑", parent=container, font_px=32, size=90)
+        self.left_btn = DiamondButton(
+            "←", parent=container, font_px=32, size=90, text_offset_y=-3)
+        self.right_btn = DiamondButton(
+            "→", parent=container, font_px=32, size=90, text_offset_y=-3)
+        self.bot_btn = DiamondButton(
+            "↓", parent=container, font_px=32, size=90)
+
+        # Center home icon - smaller and orange
+        self.center_btn = DiamondButton(
+            "H",
+            parent=container,
+            font_px=20,
+            size=60  # Smaller than outer buttons
+        )
+
+        # Install event filters on all buttons for click pass-through
+        for btn in [self.top_btn, self.left_btn, self.right_btn, self.bot_btn, self.center_btn]:
+            btn.installEventFilter(self)
+
+        # Connect buttons to movement handlers
+        self.top_btn.clicked.connect(self._move_up)
+        self.left_btn.clicked.connect(self._move_left)
+        self.right_btn.clicked.connect(self._move_right)
+        self.bot_btn.clicked.connect(self._move_down)
+        self.center_btn.clicked.connect(self._go_home)
+
+        self.center_btn.raise_()
+
+        # Position buttons when container is shown
+        container.resizeEvent = lambda event: self._layout_diamond_buttons(
+            container)
+
+        return container
+
+    def eventFilter(self, obj, event):
+        """Intercept button events and pass through if in corner regions"""
+
+        # Only filter events on DiamondButtons
+        if not isinstance(obj, DiamondButton):
+            return super().eventFilter(obj, event)
+
+        # Handle mouse move events for hover
+        if event.type() == QEvent.Type.MouseMove:
+            btn_local_pos = event.position().toPoint()
+            is_over_obj_diamond = obj.hitButton(btn_local_pos)
+            global_pos = obj.mapToGlobal(btn_local_pos)
+
+            # Define buttons in z-order (home button is on top)
+            buttons = [self.center_btn, self.top_btn, self.left_btn,
+                       self.right_btn, self.bot_btn]
+
+            # Find which button should be hovered
+            hovered_btn = None
+
+            if is_over_obj_diamond:
+                # Mouse is over this button's diamond - it should be hovered
+                hovered_btn = obj
+            else:
+                # Mouse is in corner region - check buttons beneath
+                for btn in buttons:
+                    if btn is obj:
+                        continue
+
+                    btn_local = btn.mapFromGlobal(global_pos)
+                    if btn.geometry().contains(btn.mapToParent(btn_local)):
+                        if btn.hitButton(btn_local):
+                            hovered_btn = btn
+                            break  # Stop at first match (top-most button)
+
+            # Update hover state on all buttons
+            for btn in buttons:
+                if btn is hovered_btn:
+                    # Set hover on this button
+                    if not btn.hover:
+                        btn.hover = True
+                        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                else:
+                    # Clear hover on all other buttons
+                    if btn.hover:
+                        btn.hover = False
+                        btn.unsetCursor()
+
+            return False  # Don't consume move events
+
+        # Handle mouse button press events
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                # Check if click is actually inside the diamond shape
+                btn_local_pos = event.position().toPoint()
+                if not obj.hitButton(btn_local_pos):
+                    # Click is in corner region - manually pass to buttons beneath
+                    global_pos = obj.mapToGlobal(btn_local_pos)
+
+                    # Define buttons in z-order (home button is on top)
+                    buttons = [self.center_btn, self.top_btn, self.left_btn,
+                               self.right_btn, self.bot_btn]
+
+                    for btn in buttons:
+                        if btn is obj:
+                            continue  # Skip the button we're filtering
+
+                        # Check if this button is beneath the click
+                        btn_local = btn.mapFromGlobal(global_pos)
+                        if btn.geometry().contains(btn.mapToParent(btn_local)):
+                            if btn.hitButton(btn_local):
+                                # Manually trigger this button (first match due to z-order)
+                                btn.clicked.emit()
+                                return True  # Consume the event
+
+                    # No button beneath, just consume the event (don't trigger anything)
+                    return True
+
+        return super().eventFilter(obj, event)
+
+    def _layout_diamond_buttons(self, container: QWidget) -> None:
+        """Layout the diamond buttons in proper positions"""
+        # Container center
+        cx = container.width() // 2
+        cy = container.height() // 2
+
+        # Simple positioning: place outer buttons at fixed distance from center
+        # Distance should be enough to have visible gap between buttons
+        distance = 50  # Distance from center to outer button centers
+
+        def place(btn: QPushButton, x: int, y: int) -> None:
+            """Place button centered at x, y"""
+            btn.move(x - btn.width() // 2, y - btn.height() // 2)
+
+        # Place outer buttons in cardinal directions
+        place(self.top_btn, cx, cy - distance)
+        place(self.bot_btn, cx, cy + distance)
+        place(self.left_btn, cx - distance, cy)
+        place(self.right_btn, cx + distance, cy)
+
+        # Place home button at center
+        place(self.center_btn, cx, cy)
+
+        self.center_btn.raise_()
+
+    def _create_z_controls(self) -> QWidget:
+        """Create Z-axis increase/decrease buttons"""
+        container = QWidget()
+        container.setFixedHeight(200)  # Match diamond container height
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        # Add stretch to center vertically
+        layout.addStretch(1)
+
+        # Increase button - smaller with border
+        self.z_up_btn = QPushButton("▲")
+        self.z_up_btn.setFixedSize(55, 55)  # Smaller square
+        self.z_up_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgb(208, 211, 214);
+                border: 2px solid rgb(120, 120, 120);
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: rgb(187, 190, 193);
+            }
+            QPushButton:pressed {
+                background-color: rgb(177, 180, 182);
+            }
+        """)
+        self.z_up_btn.clicked.connect(self._z_increase)
+        layout.addWidget(self.z_up_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        # Decrease button - smaller with border
+        self.z_down_btn = QPushButton("▼")
+        self.z_down_btn.setFixedSize(55, 55)  # Smaller square
+        self.z_down_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgb(208, 211, 214);
+                border: 2px solid rgb(120, 120, 120);
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: rgb(187, 190, 193);
+            }
+            QPushButton:pressed {
+                background-color: rgb(177, 180, 182);
+            }
+        """)
+        self.z_down_btn.clicked.connect(self._z_decrease)
+        layout.addWidget(self.z_down_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        # Add stretch to center vertically
+        layout.addStretch(1)
+
+        return container
+
+    def _update_position_display(self) -> None:
+        """Update the position display label from the live controller position."""
+        ctx = get_app_context()
+        if ctx.motion is None or not ctx.motion.is_ready():
+            return
+        x_mm, y_mm, z_mm = ctx.motion.get_position().to_mm()
+        position_text = f"X: {x_mm:.2f}  Y: {y_mm:.2f}  Z: {z_mm:.2f} mm"
+        self.position_label.setText(position_text)
+        if self._overlay_label is not None and self._overlay_label.isVisible():
+            self._set_overlay_message(f"Automation Running...\n{position_text}")
+
+    # ------------------------------------------------------------------
+    # Movement helpers
+    # ------------------------------------------------------------------
+
+    def _move_up(self) -> None:
+        """Move stage up (positive Y, subject to inversion)."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("y", -step if self._invert_y else step)
+        self._update_position_display()
+
+    def _move_down(self) -> None:
+        """Move stage down (negative Y, subject to inversion)."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("y", step if self._invert_y else -step)
+        self._update_position_display()
+
+    def _move_left(self) -> None:
+        """Move stage left (negative X, subject to inversion)."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("x", step if self._invert_x else -step)
+        self._update_position_display()
+
+    def _move_right(self) -> None:
+        """Move stage right (positive X, subject to inversion)."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("x", -step if self._invert_x else step)
+        self._update_position_display()
+
+    def _go_home(self) -> None:
+        """Return stage to home position."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Confirm Homing")
+        dialog.setText("Are you sure you want to home the motion system?")
+        dialog.setInformativeText(
+            "Ensure the path is clear before continuing."
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.button(QMessageBox.StandardButton.Ok).setText("Yes")
+        dialog.button(QMessageBox.StandardButton.Cancel).setText("No")
+
+        if dialog.exec() != QMessageBox.StandardButton.Ok:
+            return
+
+        ctx.motion.home()
+        self._update_position_display()
+
+    def _z_increase(self) -> None:
+        """Increase Z height (subject to inversion)."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("z", -step if self._invert_z else step)
+        self._update_position_display()
+
+    def _z_decrease(self) -> None:
+        """Decrease Z height (subject to inversion)."""
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("NavigationWidget: motion command ignored — controller not ready")
+            return
+        step = self._current_step_size_nm()
+        ctx.motion.move_axis("z", step if self._invert_z else -step)
+        self._update_position_display()

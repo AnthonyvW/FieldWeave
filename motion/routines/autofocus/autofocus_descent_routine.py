@@ -1,0 +1,345 @@
+"""
+Descent-only autofocus automation routine.
+
+Starts at the current Z position and marches downward toward the Z floor,
+scoring each coarse step. A fine-polish pass then refines around the best
+coarse position using still captures.
+
+Usage::
+
+    from common.app_context import get_app_context
+    from motion.routines.autofocus_descent import AutofocusDescent
+
+    ctx = get_app_context()
+    routine = AutofocusDescent(motion=ctx.motion)
+    routine.start()
+    routine.wait()
+    result = routine.result  # RoutineResult(success=True, z_nm=..., focus_score=...)
+"""
+
+from __future__ import annotations
+
+from typing import Generator
+
+from common.app_context import get_app_context
+from common.logger import info, error
+from motion.motion_controller_manager import MotionControllerManager
+from motion.routines.automation_routine import AutomationRoutine
+from motion.routines.autofocus.autofocus_utils import (
+    move_z_and_wait,
+    quantize,
+    score_still_frame,
+    score_preview_frame,
+)
+
+_NM_PER_MM = 1_000_000
+
+
+class AutofocusDescent(AutomationRoutine):
+    """
+    Descent-only autofocus: coarse downward march, then fine polish.
+
+    The routine descends from the current Z position toward the Z floor in
+    coarse steps, scoring each position via the machine-vision manager. Once
+    the coarse sweep is complete (or an early-stop condition is met) a fine
+    bidirectional polish is performed around the best coarse position.
+
+    All distance parameters are in millimetres for readability at the call
+    site; they are converted to nanometres internally to match the motion
+    system's coordinate space. The fine step size is not a parameter — it is
+    read from ``motion.settings.step_size`` at runtime so it always reflects
+    the configured minimum step for the connected machine.
+
+    Parameters
+    ----------
+    motion:
+        Active :class:`MotionControllerManager`.
+    focus_preview_threshold:
+        If the baseline still-score is *below* this value the coarse sweep
+        uses the faster preview scorer. Above it, stills are used throughout.
+    z_floor_mm:
+        Hard lower Z limit in mm. The routine will not descend past this.
+    coarse_step_mm:
+        Distance between coarse evaluation positions in mm.
+    max_offset_mm:
+        Maximum total descent from the starting Z position in mm.
+    drop_stop_peak:
+        If the score drops more than this below the running peak, abort the
+        coarse sweep early.
+    drop_stop_base:
+        If the score drops more than this below the baseline *and* no position
+        better than the start has been found yet, abort early.
+    settle_still_s:
+        Seconds to wait after the move settles before capturing a still.
+    settle_preview_s:
+        Seconds to wait after the move settles before scoring the preview.
+    fine_allow_preview:
+        When True the fine pass may use the preview scorer if the baseline
+        was below *focus_preview_threshold*. Defaults to False (always stills).
+    fine_no_improve_limit:
+        Number of consecutive non-improving fine steps before stopping each
+        climb direction.
+    qualified_score_threshold:
+        Minimum score a coarse position must reach to be considered a real
+        focus candidate. Positions below this threshold are recorded as a
+        fallback only. If the sweep ends without any position meeting the
+        threshold, the best sub-threshold position is used instead.
+    """
+
+    job_name = "Autofocus (Descent)"
+
+    def __init__(
+        self,
+        motion: MotionControllerManager,
+        *,
+        focus_preview_threshold: float = 0.9,
+        z_floor_mm: float = 0.0,
+        coarse_step_mm: float = 0.20,
+        max_offset_mm: float = 5.60,
+        drop_stop_peak: float = 0.02,
+        drop_stop_base: float = 0.03,
+        settle_still_s: float = 0.4,
+        settle_preview_s: float = 0.4,
+        fine_allow_preview: bool = False,
+        fine_no_improve_limit: int = 2,
+        qualified_score_threshold: float = 0.6,
+    ) -> None:
+        super().__init__(motion)
+
+        self._focus_preview_threshold = focus_preview_threshold
+        self._z_floor_nm = int(round(z_floor_mm * _NM_PER_MM))
+        self._coarse_step_nm = int(round(coarse_step_mm * _NM_PER_MM))
+        self._max_offset_nm = int(round(max_offset_mm * _NM_PER_MM))
+        self._drop_stop_peak = drop_stop_peak
+        self._drop_stop_base = drop_stop_base
+        self._settle_still_s = settle_still_s
+        self._settle_preview_s = settle_preview_s
+        self._fine_allow_preview = fine_allow_preview
+        self._fine_no_improve_limit = fine_no_improve_limit
+        self._qualified_score_threshold = qualified_score_threshold
+
+    # ------------------------------------------------------------------
+    # AutomationRoutine implementation
+    # ------------------------------------------------------------------
+
+    def steps(self) -> Generator[None, None, None]:
+        ctx = get_app_context()
+        camera_manager = ctx.camera_manager
+        mv = ctx.machine_vision
+
+        self._set_activity("Initialising")
+
+        if not ctx.has_camera:
+            error("[AutofocusDescent] No camera available — aborting")
+            self._set_result(success=False)
+            return
+
+        settings = self.motion.settings
+        fine_step_nm: int = settings.step_size if settings is not None else 40_000
+
+        z_floor = self._z_floor_nm
+
+        # ----------------------------------------------------------------
+        # Scorer callables
+        # ----------------------------------------------------------------
+
+        def score_still() -> float:
+            return score_still_frame(camera_manager, mv, self._settle_still_s, "[AutofocusDescent]")
+
+        def score_preview() -> float:
+            return score_preview_frame(camera_manager, mv, self._settle_preview_s, "[AutofocusDescent]")
+
+        # ----------------------------------------------------------------
+        # Motion / cache helpers
+        # ----------------------------------------------------------------
+
+        def move(z_nm: int) -> None:
+            move_z_and_wait(self.motion, z_nm, z_floor)
+
+        def within_env(z_nm: int) -> bool:
+            return (start_nm - self._max_offset_nm) <= z_nm <= start_nm and z_nm >= z_floor
+
+        def score_at(z_nm: int, cache: dict[int, float], scorer) -> float:
+            z_nm = quantize(z_nm, fine_step_nm)
+            if z_nm < z_floor or not within_env(z_nm):
+                return float("-inf")
+            if z_nm in cache:
+                return cache[z_nm]
+            move(z_nm)
+            s = scorer()
+            cache[z_nm] = s
+            return s
+
+        # ----------------------------------------------------------------
+        # Establish start position & baseline
+        # ----------------------------------------------------------------
+
+        start_nm = quantize(self.motion.get_position().z, fine_step_nm)
+        self._set_activity(f"Baseline  Z={start_nm / _NM_PER_MM:.3f} mm")
+
+        scores: dict[int, float] = {}
+
+        move(start_nm)
+        baseline = score_still()
+        scores[start_nm] = baseline
+        best_z = start_nm
+        best_s = baseline
+        info(f"[AutofocusDescent] Baseline Z={start_nm / _NM_PER_MM:.3f} mm  score={baseline:.3f}")
+
+        coarse_scorer = (
+            score_preview if baseline < self._focus_preview_threshold else score_still
+        )
+        info(
+            f"[AutofocusDescent] Coarse scorer: "
+            f"{'PREVIEW' if coarse_scorer is score_preview else 'STILL'} "
+            f"(baseline={baseline:.3f})"
+        )
+
+        yield  # pause/stop point: after baseline
+
+        # ----------------------------------------------------------------
+        # Coarse descent
+        # ----------------------------------------------------------------
+
+        steps_max = min(
+            self._max_offset_nm // self._coarse_step_nm,
+            (start_nm - z_floor) // self._coarse_step_nm,
+        )
+        peak_s = baseline
+        total_coarse = steps_max
+        self._set_progress(0, total_coarse + 1)  # +1 accounts for the fine pass
+
+        # Qualified: meets the score threshold and is the true focus target.
+        # Fallback: best sub-threshold position used only if no qualified
+        # position is ever found.
+        qualified_z: int | None = None
+        qualified_s: float = float("-inf")
+        fallback_z = start_nm
+        fallback_s = baseline
+
+        for k in range(1, steps_max + 1):
+            if self._check_stop():
+                return
+
+            target = quantize(start_nm - k * self._coarse_step_nm, fine_step_nm)
+            target = max(target, z_floor)
+
+            self._set_status(
+                f"Coarse ↓  Z={target / _NM_PER_MM:.3f} mm  ({k}/{steps_max})",
+                k, total_coarse + 1,
+            )
+
+            s = score_at(target, scores, coarse_scorer)
+            info(
+                f"[AutofocusDescent] ↓{self._coarse_step_nm / _NM_PER_MM:.3f} mm "
+                f"Z={target / _NM_PER_MM:.3f}  score={s:.3f}  Δbase={(s - baseline):+.3f}"
+            )
+
+            if s >= self._qualified_score_threshold:
+                if s > qualified_s:
+                    qualified_s, qualified_z = s, target
+            else:
+                if s > fallback_s:
+                    fallback_s, fallback_z = s, target
+
+            if s > peak_s:
+                peak_s = s
+
+            # Drop-stop checks only apply once a qualified position has been
+            # found; below the threshold there is no reliable peak to drop from.
+            if qualified_z is not None:
+                if (peak_s - s) >= self._drop_stop_peak:
+                    info("[AutofocusDescent] Early stop (peak-drop)")
+                    break
+            else:
+                if (baseline - s) >= self._drop_stop_base:
+                    info("[AutofocusDescent] Early stop (baseline-drop)")
+                    break
+
+            if target == z_floor:
+                break
+
+            yield  # pause/stop point: between coarse steps
+
+        if qualified_z is not None:
+            best_z, best_s = qualified_z, qualified_s
+            info(
+                f"[AutofocusDescent] Coarse best (qualified) "
+                f"Z={best_z / _NM_PER_MM:.3f} mm  score={best_s:.3f}"
+            )
+        else:
+            best_z, best_s = fallback_z, fallback_s
+            info(
+                f"[AutofocusDescent] No qualified position found — "
+                f"using fallback Z={best_z / _NM_PER_MM:.3f} mm  score={best_s:.3f}"
+            )
+
+        # ----------------------------------------------------------------
+        # Fine polish
+        # ----------------------------------------------------------------
+
+        if self._check_stop():
+            return
+
+        if self._fine_allow_preview and baseline < self._focus_preview_threshold:
+            fine_scorer = score_preview
+            scorer_name = "PREVIEW"
+        else:
+            fine_scorer = score_still
+            scorer_name = "STILL"
+
+        info(
+            f"[AutofocusDescent] Fine search using {scorer_name} "
+            f"(step={fine_step_nm / _NM_PER_MM:.4f} mm)"
+        )
+        self._set_activity(f"Fine polish  Z≈{best_z / _NM_PER_MM:.3f} mm  ({scorer_name})")
+
+        def _climb(start_z: int, step: int) -> tuple[int, float]:
+            zt = start_z
+            best_lz = start_z
+            best_ls = scores.get(start_z, score_at(start_z, scores, fine_scorer))
+            no_imp = 0
+            while True:
+                nxt = quantize(zt + step, fine_step_nm)
+                if nxt < z_floor or not within_env(nxt):
+                    break
+                s = score_at(nxt, scores, fine_scorer)
+                info(
+                    f"[AutofocusDescent] Fine {'↑' if step > 0 else '↓'}"
+                    f"{abs(step) / _NM_PER_MM:.4f} mm  Z={nxt / _NM_PER_MM:.3f}  score={s:.3f}"
+                )
+                if s > best_ls + 1e-6:
+                    best_lz, best_ls = nxt, s
+                    zt = nxt
+                    no_imp = 0
+                else:
+                    no_imp += 1
+                    if no_imp >= self._fine_no_improve_limit:
+                        break
+                    zt = nxt
+            return best_lz, best_ls
+
+        up_z, up_s = _climb(best_z, fine_step_nm)
+        down_z, down_s = _climb(best_z, -fine_step_nm)
+        local_z, local_s = (up_z, up_s) if (up_s, up_z) >= (down_s, down_z) else (down_z, down_s)
+        if local_s > best_s:
+            best_z, best_s = local_z, local_s
+
+        yield  # pause/stop point: after fine pass
+
+        if self._check_stop():
+            return
+
+        move(best_z)
+        self._set_status(
+            f"Done  Z={best_z / _NM_PER_MM:.3f} mm  score={best_s:.3f}",
+            total_coarse + 1, total_coarse + 1,
+        )
+        info(
+            f"[AutofocusDescent] Complete: "
+            f"Z={best_z / _NM_PER_MM:.3f} mm  score={best_s:.3f}  "
+            f"Δbase={(best_s - baseline):+.3f}  "
+            f"coarse={'PREVIEW' if coarse_scorer is score_preview else 'STILL'}  "
+            f"fine={scorer_name}"
+        )
+        self._set_result(success=True, z_nm=best_z, focus_score=best_s)

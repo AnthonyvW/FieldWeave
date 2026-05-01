@@ -1,0 +1,488 @@
+from __future__ import annotations
+
+import re
+import threading
+import time
+from dataclasses import dataclass, field
+from queue import Queue
+from typing import Callable
+
+import serial
+import serial.tools.list_ports
+
+from common.logger import info, error, warning, debug
+
+from motion.models import Position
+from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
+
+_NM_PER_MM = 1_000_000
+
+
+def _is_move(gc: str) -> bool:
+    """Return True if *gc* is a G-code command that produces physical motion."""
+    return gc.upper().split()[0] in ("G0", "G1", "G28")
+
+
+def _probe_port(
+    port_device: str,
+    baud: int,
+    indicators: list[str],
+    request: bytes = b"M115\r\n",
+    read_window_s: float = 10,
+    min_lines: int = 3,
+) -> tuple[serial.Serial | None, list[str]]:
+    """
+    Try to identify a Marlin-like printer on a single serial port.
+
+    Returns (serial_connection, response_lines) on success, or
+    (None, response_lines) on failure.  On success the connection is left
+    open for the caller.
+    """
+    responses: list[str] = []
+    ser: serial.Serial | None = None
+    success = False
+    try:
+        ser = serial.Serial(port_device, baudrate=baud, timeout=1, write_timeout=1)
+
+        # Some controllers reset on open due to DTR; allow them to chatter.
+        start = time.time()
+        quiet_since = start
+        while time.time() - start < 2.0:
+            while ser.in_waiting:
+                line = ser.readline().decode("utf-8", errors="ignore").strip()
+                if line:
+                    responses.append(line)
+                    quiet_since = time.time()
+            if time.time() - quiet_since > 0.25:
+                break
+            time.sleep(0.05)
+
+        ser.reset_input_buffer()
+        ser.write(request)
+
+        start = time.time()
+        while time.time() - start < read_window_s:
+            if ser.in_waiting:
+                line = ser.readline().decode("utf-8", errors="ignore").strip()
+                if line:
+                    responses.append(line)
+                    if any(ind in line for ind in indicators):
+                        success = True
+                        break
+                    if len(responses) >= min_lines and time.time() - start > 3:
+                        success = True
+                        break
+            else:
+                time.sleep(0.05)
+
+        return (ser, responses) if success else (None, responses)
+
+    except Exception:
+        return None, responses
+
+    finally:
+        if ser is not None and ser.is_open and not success:
+            try:
+                ser.close()
+            except Exception:
+                pass
+
+
+class MotionState:
+    """Current lifecycle state of the motion controller."""
+    CONNECTING = "connecting"    # Worker thread is still starting up / probing serial
+    HOMING     = "homing"        # Connected to printer, running initial homing sequence
+    READY      = "ready"         # Connected, homed, and accepting commands
+    FAULTED    = "faulted"       # Runtime fault (bad G-code response, timeout, etc.)
+    FAILED     = "failed"        # Could not connect at all during initialisation
+
+
+class MotionFault(Exception):
+    """Raised when the printer reports an unrecoverable error."""
+
+
+class MotionTimeout(Exception):
+    """Raised when the printer does not respond within the expected window."""
+
+
+@dataclass
+class _Command:
+    gcode: str
+    message: str | None = None
+    log: bool = False
+    done: threading.Event = field(default_factory=threading.Event)
+
+
+class MotionController:
+    """
+    Minimal motion controller for a Marlin-based 3D printer / motion system.
+
+    Responsibilities
+    ----------------
+    - Discover the printer port via _probe_port.
+    - Home on startup.
+    - Accept G-code move commands via a thread-safe queue.
+    - Track the current position in nanometres.
+    - Provide move_axis and move_to_position helpers.
+    - Expose a simple message-listener hook for UI feedback.
+    """
+
+    def __init__(self) -> None:
+        self._config_manager = MotionSystemSettingsManager()
+        self.config: MotionSystemSettings = self._config_manager.load()
+
+        self.position = Position(0, 0, 0)
+        self.faulted = False
+
+        self._ready = threading.Event()
+        self._homing = False
+        self._init_error: Exception | None = None
+
+        self._stop_event = threading.Event()
+
+        self._command_queue: Queue[_Command] = Queue()
+        self._message_listeners: list[Callable[[str, bool], None]] = []
+
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    # ------------------------------------------------------------------
+    # State
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> str:
+        """Return the current :class:`MotionState` of the controller."""
+        if self._init_error is not None:
+            return MotionState.FAILED
+        if self.faulted:
+            return MotionState.FAULTED
+        if not self._ready.is_set():
+            return MotionState.HOMING if self._homing else MotionState.CONNECTING
+        return MotionState.READY
+
+    def is_ready(self) -> bool:
+        """Return True once the printer has been found and homed."""
+        return self.get_state() == MotionState.READY
+
+    def wait_until_ready(self, timeout: float | None = None) -> bool:
+        """
+        Block until the controller is ready (or *timeout* seconds elapse).
+
+        Returns True if ready, False if timed out.
+        Raises the initialisation exception if connection failed.
+        """
+        ready = self._ready.wait(timeout)
+        if self._init_error is not None:
+            raise self._init_error
+        return ready
+
+    # ------------------------------------------------------------------
+    # Worker thread
+    # ------------------------------------------------------------------
+
+    def _worker(self) -> None:
+        try:
+            self._connect()
+        except Exception as exc:
+            self._init_error = exc
+            self._ready.set()
+            return
+
+        self._homing = True
+        self._home()
+        self._homing = False
+        self._ready.set()
+        self._run_loop()
+
+    def _connect(self) -> None:
+        """Probe available serial ports and open the first Marlin printer found."""
+        baud = self.config.baud_rate
+        indicators = [self.config.FIRMWARE_NAME, self.config.MACHINE_TYPE, "TF init", "echo:"]
+
+        detected = [p.device for p in serial.tools.list_ports.comports()]
+        if not detected:
+            raise RuntimeError("No serial ports found. Is the printer connected?")
+
+        info(f"Available ports: {detected}")
+
+        for dev in detected:
+            debug(f"Trying {dev} ...")
+            ser, lines = _probe_port(
+                port_device=dev,
+                baud=baud,
+                indicators=indicators,
+                request=b"M115\n",
+                read_window_s=10,
+                min_lines=3,
+            )
+            if ser is not None:
+                self._serial = ser
+                info(f"Printer found on {dev}")
+                for ln in lines[-10:]:
+                    debug(f"[{dev}] {ln}")
+                return
+            warning(f"{dev} did not respond as a compatible printer ({len(lines)} line(s))")
+
+        raise RuntimeError(f"Printer not found on any port. Tried: {detected}")
+
+    def _run_loop(self) -> None:
+        while not self._stop_event.is_set():
+            # Get command with timeout
+            if self._command_queue.empty():
+                time.sleep(0.05)
+                continue
+            try:
+                cmd = self._command_queue.get_nowait()
+            except Exception:
+                continue
+
+            try:
+                self._exec(cmd)
+                cmd.done.set()
+            except (MotionFault, MotionTimeout) as exc:
+                self.faulted = True
+                cmd.done.set()
+                self._drain_queue()
+                error(f"[FAULT] {exc}")
+                self._emit(f"[FAULT] {exc}", log=True)
+                break
+            except Exception as exc:
+                self.faulted = True
+                cmd.done.set()
+                self._drain_queue()
+                error(f"[UNHANDLED ERROR] {exc}")
+                self._emit(f"[UNHANDLED ERROR] {exc}", log=True)
+                break
+
+    # ------------------------------------------------------------------
+    # G-code execution
+    # ------------------------------------------------------------------
+
+    def _exec(self, cmd: _Command) -> None:
+        if cmd.message:
+            self._emit(cmd.message, cmd.log)
+
+        gc = cmd.gcode.strip()
+        self._track_position(gc)
+        self._serial.reset_input_buffer()
+        self._send_and_wait(gc)
+        if _is_move(gc):
+            self._send_and_wait("M400")
+
+    def _send_and_wait(self, gc: str) -> None:
+        self._serial.write(f"{gc}\n".encode())
+        self._await_ok()
+
+    def _await_ok(self, deadline_s: float = 60.0) -> None:
+        end = time.time() + deadline_s
+        while True:
+            if time.time() > end:
+                raise MotionTimeout("Timed out waiting for 'ok' from printer")
+            line = self._serial.readline().decode("utf-8", errors="ignore").strip()
+            if not line:
+                time.sleep(0.02)
+                continue
+            debug(f"[printer] {line}")
+            if line.lower().startswith("ok"):
+                return
+            if line.lower().startswith("error"):
+                raise MotionFault(f"Printer error: {line}")
+            
+
+    def _track_position(self, gc: str) -> None:
+        upper = gc.upper()
+        if upper == "G28":
+            self.position = Position(0, 0, 0)
+            return
+        cmd_code = upper.split()[0] if upper else ""
+        if cmd_code not in ("G0", "G1"):
+            return
+        updates: dict[str, int] = {}
+        for axis, pattern in [("x", r"X([\d.]+)"), ("y", r"Y([\d.]+)"), ("z", r"Z([\d.]+)")]:
+            match = re.search(pattern, gc, re.IGNORECASE)
+            if match:
+                updates[axis] = round(float(match.group(1)) * _NM_PER_MM)
+        if updates:
+            self.position = Position(
+                x=updates.get("x", self.position.x),
+                y=updates.get("y", self.position.y),
+                z=updates.get("z", self.position.z),
+            )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _home(self) -> None:
+        self._exec(_Command("G90", message="Setting absolute positioning"))
+        self._exec(_Command("G28", message="Homing..."))
+        starting_height_nm = self.config.starting_height_nm
+        if starting_height_nm > 0:
+            mm = starting_height_nm / _NM_PER_MM
+            self._exec(_Command(f"G0 Z{mm:.6f}", message=f"Moving to starting height ({mm:.3f} mm)"))
+
+    def _enqueue(self, gc: str, message: str = "", log: bool = False) -> threading.Event:
+        """Enqueue a G-code command and return its completion event.
+
+        The returned :class:`threading.Event` is set once the printer has
+        acknowledged the command with ``ok``.  If the controller is faulted
+        the event is set immediately (so callers never block forever).
+        """
+        cmd = _Command(gc, message or None, log)
+        if self.faulted:
+            warning("Ignoring command: controller is faulted")
+            cmd.done.set()
+            return cmd.done
+        self._command_queue.put(cmd)
+        return cmd.done
+
+    def _drain_queue(self) -> None:
+        """Set all pending commands' done events so waiters are unblocked."""
+        while not self._command_queue.empty():
+            try:
+                cmd = self._command_queue.get_nowait()
+                cmd.done.set()
+            except Exception:
+                break
+
+    def wait_for_idle(self, timeout: float | None = None) -> bool:
+        """Block until all currently queued commands have been executed.
+
+        Works by appending a no-op sentinel to the queue and waiting for its
+        done event, which is set only after every command ahead of it has
+        been processed.
+
+        Returns True if the queue drained within *timeout* seconds, False if
+        it timed out.  Returns True immediately if the controller is faulted
+        (the queue will never progress further).
+        """
+        if self.faulted:
+            return True
+        sentinel = _Command("M115", message=None, log=False)  # lightweight no-op
+        self._command_queue.put(sentinel)
+        return sentinel.done.wait(timeout)
+
+    def _emit(self, text: str, log: bool = False) -> None:
+        if log:
+            info(text)
+        for listener in list(self._message_listeners):
+            try:
+                listener(text, log)
+            except Exception as exc:
+                warning(f"Message listener raised: {exc}")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def add_message_listener(self, listener: Callable[[str, bool], None]) -> None:
+        """Subscribe to controller messages.  Signature: (text: str, log: bool) -> None."""
+        if not callable(listener):
+            raise TypeError("listener must be callable")
+        self._message_listeners.append(listener)
+
+    def remove_message_listener(self, listener: Callable[[str, bool], None]) -> None:
+        try:
+            self._message_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def get_position(self) -> Position:
+        """Return the current position (coordinates in nanometres)."""
+        return self.position
+
+    def get_bed_size(self) -> Position:
+        """Return the machine's maximum extents as a Position (nanometres)."""
+        return Position.from_mm(self.config.max_x, self.config.max_y, self.config.max_z)
+
+    def move_to_position(self, position: Position, *, wait: bool = True) -> None:
+        """Enqueue an absolute move to *position* (coordinates in nanometres).
+
+        If *wait* is True, blocks until the printer acknowledges the move.
+        """
+        event = self._enqueue(
+            f"G0 {position.to_gcode()}",
+            message=f"Moving to {position}",
+        )
+        if wait:
+            event.wait()
+
+    def move(self, axis: str, amount_nm: int, *, is_relative: bool = True, wait: bool = False) -> bool:
+        """
+        Move *axis* by *amount_nm* nanometres.
+
+        When *is_relative* is True (the default) *amount_nm* is treated as a
+        delta from the current position.  When False it is treated as an
+        absolute target position in nanometres.
+
+        If *wait* is True, blocks until the printer acknowledges the move.
+
+        Returns False (and does not enqueue) if the resulting position would
+        exceed the configured axis limits.
+        """
+        current_nm: int = getattr(self.position, axis)
+        new_nm = current_nm + amount_nm if is_relative else amount_nm
+
+        max_nm = getattr(self.config, f"max_{axis}") * _NM_PER_MM
+        if not 0 <= new_nm <= max_nm:
+            return False
+
+        mm = new_nm / _NM_PER_MM
+        event = self._enqueue(f"G1 {axis.upper()}{mm:.6f}")
+        if wait:
+            event.wait()
+        return True
+
+    def move_axis(self, axis: str, amount_nm: int, *, wait: bool = False) -> bool:
+        """
+        Jog *axis* by *amount_nm* nanometres (signed relative move).
+
+        If *wait* is True, blocks until the printer acknowledges the move.
+
+        Returns False (and does not enqueue) if the resulting position would
+        exceed the configured axis limits.
+        """
+        return self.move(axis, amount_nm, wait=wait)
+
+    def home(self, *, wait: bool = False) -> None:
+        """Enqueue a homing sequence (G90 + G28), then move to the configured
+        starting height if one is set.
+
+        If *wait* is True, blocks until all commands have been acknowledged
+        by the printer.
+        """
+        self._enqueue("G90", message="Set absolute positioning")
+        self._enqueue("G28", message="Homing...")
+        starting_height_nm = self.config.starting_height_nm
+        if starting_height_nm > 0:
+            mm = starting_height_nm / _NM_PER_MM
+            self._enqueue(
+                f"G0 Z{mm:.6f}",
+                message=f"Moving to starting height ({mm:.3f} mm)",
+            )
+        if wait:
+            self.wait_for_idle()
+
+    def save_settings(self) -> bool:
+        """Persist the current config to disk.
+
+        Returns True on success, False if the save fails for any reason
+        (validation error, I/O error, etc.).
+        """
+        try:
+            self._config_manager.save(self.config)
+            return True
+        except Exception as exc:
+            error(f"Failed to save motion settings: {exc}")
+            return False
+
+    def reset_fault(self) -> None:
+        """Clear a faulted state so the controller can accept commands again."""
+        self.faulted = False
+
+    def shutdown(self) -> None:
+        """Signal the worker thread to stop and wait for it to exit."""
+        self._stop_event.set()
+        self._thread.join(timeout=5)
+        if hasattr(self, "_serial") and self._serial.is_open:
+            self._serial.close()

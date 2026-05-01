@@ -1,0 +1,348 @@
+"""
+Z-stack scan automation routine.
+
+Moves the stage between two Z positions, capturing an image at each step.
+Images are saved with X / Y / Z position metadata embedded, and the file
+name is the Z position in nanometres.
+
+If a :class:`FocusStackRoutineConfig` is supplied the routine will automatically
+launch a :class:`FocusStackRoutine` via the application's
+:class:`PostProcessingManager` once all images have been captured.  The
+stacked output is written to ``<output_folder>/stacked.<ext>`` where the
+extension comes from ``focus_stack_config.output_extension``.
+
+Usage::
+
+    from common.app_context import get_app_context
+    from motion.automations.z_stack_scan import ZStackScan
+    from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
+
+    ctx = get_app_context()
+    cfg = FocusStackRoutineConfig()  # defaults match recommended preset
+
+    routine = ZStackScan(
+        motion=ctx.motion,
+        z_start_nm=0,
+        z_end_nm=5_000_000,
+        step_nm=500_000,
+        output_folder="/data/scans/run1",
+        focus_stack_config=cfg,
+    )
+    routine.start()
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Generator, TYPE_CHECKING
+
+from common.app_context import get_app_context
+from common.logger import info, warning, error
+from motion.motion_controller_manager import MotionControllerManager
+from motion.models import Position
+
+from motion.routines.automation_routine import AutomationRoutine
+
+if TYPE_CHECKING:
+    from post_processing.post_processing_manager import PostProcessingManager
+    from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
+
+_NM_PER_MM = 1_000_000
+
+
+class ZStackScan(AutomationRoutine):
+    """
+    Capture images at evenly-spaced Z positions between two Z locations.
+
+    The stage travels to whichever of *z_start_nm* / *z_end_nm* is closest
+    to the current Z position first, then steps toward the other end,
+    capturing one image per step.
+
+    If *approach_distance_nm* is non-zero, the stage will overshoot the near
+    end by that amount before returning to it. This eliminates backlash and
+    direction-change wobble at the start of the sweep.
+
+    If *focus_stack_config* is provided, a :class:`FocusStackRoutine` is
+    launched via :class:`PostProcessingManager` immediately after the scan
+    completes.  The stacked output is placed at
+    ``<output_folder>/stacked.<focus_stack_config.output_extension>``.
+
+    Parameters
+    ----------
+    motion:
+        Active :class:`MotionControllerManager`.
+    z_start_nm:
+        One end of the Z range, in nanometres.
+    z_end_nm:
+        The other end of the Z range, in nanometres.
+    step_nm:
+        Distance between capture positions, in nanometres.  Must be > 0.
+    output_folder:
+        Directory in which captured images are saved.  Created automatically
+        if it does not exist.
+    capture_timeout_ms:
+        How long (ms) to wait for each image capture to complete.
+    approach_distance_nm:
+        Before the scan begins, the stage overshoots the near end by this
+        distance (in nanometres) in the scan direction, then returns to the
+        near end. Pass 0 to skip the approach move.
+    focus_stack_config:
+        When supplied, a focus-stack post-processing job is started
+        automatically after all frames have been captured.  Pass ``None``
+        (the default) to skip post-processing.
+    """
+
+    job_name = "Z-Stack Scan"
+
+    def __init__(
+        self,
+        motion: MotionControllerManager,
+        z_start_nm: int,
+        z_end_nm: int,
+        step_nm: int,
+        output_folder: str | Path,
+        capture_timeout_ms: int = 5000,
+        approach_distance_nm: int = 0,
+        focus_stack_config: FocusStackRoutineConfig | None = None,
+    ) -> None:
+        super().__init__(motion)
+
+        if step_nm <= 0:
+            raise ValueError(f"step_nm must be positive, got {step_nm}")
+        self._z_start_nm = z_start_nm
+        self._z_end_nm = z_end_nm
+        self._step_nm = step_nm
+        self._output_folder = Path(output_folder)
+        self._capture_timeout_ms = capture_timeout_ms
+        self._approach_distance_nm = approach_distance_nm
+        self._focus_stack_config = focus_stack_config
+
+    # ------------------------------------------------------------------
+    # AutomationRoutine implementation
+    # ------------------------------------------------------------------
+
+    def steps(self) -> Generator[None, None, None]:
+        ctx = get_app_context()
+        camera = ctx.camera
+        post_processing = ctx.post_processing
+
+        self._set_activity("Initialising")
+
+        if camera is None:
+            error("[ZStackScan] No camera available — aborting")
+            return
+
+        # Ensure output directory exists
+        self._output_folder.mkdir(parents=True, exist_ok=True)
+
+        # Determine travel direction: go to closest Z first
+        current_z = self.motion.get_position().z
+        if abs(current_z - self._z_start_nm) <= abs(current_z - self._z_end_nm):
+            z_near = self._z_start_nm
+            z_far = self._z_end_nm
+        else:
+            z_near = self._z_end_nm
+            z_far = self._z_start_nm
+
+        # Build list of Z positions to visit
+        z_positions: list[int] = []
+        if z_near == z_far:
+            z_positions = [z_near]
+        else:
+            direction = 1 if z_far > z_near else -1
+            z = z_near
+            while (direction == 1 and z <= z_far) or (direction == -1 and z >= z_far):
+                z_positions.append(z)
+                z += direction * self._step_nm
+
+        total = len(z_positions)
+        info(f"[ZStackScan] {total} positions from {z_near} nm to {z_far} nm, step {self._step_nm} nm")
+        info(f"[ZStackScan] Output folder: {self._output_folder}")
+
+        # Approach move: overshoot the near end opposite to the scan direction,
+        # then return to z_near. This purges backlash before the first capture.
+        if self._approach_distance_nm > 0:
+            approach_z_nm = z_near - direction * self._approach_distance_nm
+            approach_z_mm = approach_z_nm / _NM_PER_MM
+            self._set_activity(f"Approaching  —  Z={approach_z_mm:.3f} mm")
+            info(f"[ZStackScan] Approach overshoot to Z={approach_z_mm:.6f} mm")
+            current_pos = self.motion.get_position()
+            self.motion.move_to_position(
+                Position(x=current_pos.x, y=current_pos.y, z=approach_z_nm), wait=True
+            )
+
+            yield  # pause/stop point: after overshoot
+
+            if self._check_stop():
+                return
+
+            near_z_mm = z_near / _NM_PER_MM
+            self._set_activity(f"Returning to start  —  Z={near_z_mm:.3f} mm")
+            info(f"[ZStackScan] Returning to Z={near_z_mm:.6f} mm")
+            current_pos = self.motion.get_position()
+            self.motion.move_to_position(
+                Position(x=current_pos.x, y=current_pos.y, z=z_near), wait=True
+            )
+
+            yield  # pause/stop point: after return
+
+            if self._check_stop():
+                return
+
+        self._set_progress(0, total)
+
+        total_start_time = time.monotonic()
+        scan_start_time = time.monotonic()
+        capture_times: list[float] = []
+        captured_positions: list[int] = []
+
+        for idx, target_z_nm in enumerate(z_positions):
+            if self._check_stop():
+                break
+
+            target_z_mm = target_z_nm / _NM_PER_MM
+            current_pos = self.motion.get_position()
+            target_pos = Position(
+                x=current_pos.x,
+                y=current_pos.y,
+                z=target_z_nm,
+            )
+
+            self._set_status(f"Step {idx + 1}/{total}  —  Z={target_z_mm:.3f} mm", idx, total)
+            info(f"[ZStackScan] Step {idx + 1}/{total}: moving to Z={target_z_mm:.6f} mm")
+            self.motion.move_to_position(target_pos, wait=True)
+
+            yield  # pause/stop point: after move
+
+            if self._check_stop():
+                break
+
+            # Capture image
+            actual_pos = self.motion.get_position()
+            filepath = self._output_folder / f"{actual_pos.z}.jpg"
+
+            info(f"[ZStackScan] Capturing image: {filepath}")
+
+            capture_success: bool | None = None
+            capture_error: Exception | None = None
+
+            capture_done = __import__("threading").Event()
+
+            def _on_complete(success: bool, result, _done=capture_done) -> None:
+                nonlocal capture_success, capture_error
+                capture_success = success
+                if not success:
+                    capture_error = result if isinstance(result, Exception) else Exception(str(result))
+                _done.set()
+
+            capture_start = time.monotonic()
+            camera.capture_and_save_still(
+                filepath=filepath,
+                resolution_index=0,
+                additional_metadata={
+                    "x_position_nm": actual_pos.x,
+                    "y_position_nm": actual_pos.y,
+                    "z_position_nm": actual_pos.z,
+                    "x_position_mm": actual_pos.x / _NM_PER_MM,
+                    "y_position_mm": actual_pos.y / _NM_PER_MM,
+                    "z_position_mm": actual_pos.z / _NM_PER_MM,
+                    "source": "z_stack_scan",
+                    "step_index": idx,
+                    "total_steps": total,
+                },
+                timeout_ms=self._capture_timeout_ms,
+                on_complete=_on_complete,
+                wait=True,
+            )
+
+            file_exists = filepath.exists()
+
+            if not capture_success and not file_exists:
+                warning(f"[ZStackScan] Capture failed at Z={actual_pos.z} nm: {capture_error}")
+            else:
+                if not capture_success and file_exists:
+                    warning(
+                        f"[ZStackScan] Capture callback reported failure at Z={actual_pos.z} nm "
+                        f"but file exists on disk — treating as success: {capture_error}"
+                    )
+                capture_times.append(time.monotonic() - capture_start)
+                captured_positions.append(actual_pos.z)
+                self._set_progress(idx + 1, total)
+                info(f"[ZStackScan] Saved {filepath}")
+
+            yield  # pause/stop point: after capture
+
+        total_elapsed = time.monotonic() - scan_start_time
+        n_captured = len(capture_times)
+
+        info("[ZStackScan] Scan complete")
+        info(f"[ZStackScan] Total duration:    {total_elapsed:.3f} s")
+        info(f"[ZStackScan] Images captured:   {n_captured} / {total}")
+        info(
+            f"[ZStackScan] Z range:           {z_near / _NM_PER_MM:.6f} mm"
+            f" to {z_far / _NM_PER_MM:.6f} mm"
+            f"  ({(z_far - z_near) / _NM_PER_MM:.6f} mm span)"
+        )
+        info(f"[ZStackScan] Step size:         {self._step_nm / _NM_PER_MM:.6f} mm  ({self._step_nm} nm)")
+
+        if captured_positions:
+            positions_mm = ", ".join(f"{z / _NM_PER_MM:.6f}" for z in captured_positions)
+            info(f"[ZStackScan] Captured at (mm):  [{positions_mm}]")
+
+        if capture_times:
+            info(
+                f"[ZStackScan] Capture time (s):  "
+                f"min={min(capture_times):.3f}  "
+                f"max={max(capture_times):.3f}  "
+                f"avg={sum(capture_times) / len(capture_times):.3f}"
+            )
+
+        # ------------------------------------------------------------------
+        # Optional focus stacking
+        # ------------------------------------------------------------------
+        if self._focus_stack_config is not None and n_captured > 0:
+            self._run_focus_stack(post_processing, total_start_time)
+        else:
+            info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")
+
+    def _run_focus_stack(self, post_processing: PostProcessingManager, total_start_time: float) -> None:
+        if post_processing is None:
+            error("[ZStackScan] No post_processing manager available — skipping focus stack")
+            info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")
+            return
+
+        from post_processing.routines.focus_stack_routine import FocusStackRoutine
+
+        cfg = self._focus_stack_config
+        ext = cfg.output_extension
+        output_path = str(self._output_folder / f"stacked.{ext}")
+
+        info(f"[ZStackScan] Starting focus stack — output: {output_path}")
+        focus_stack_start_time = time.monotonic()
+
+        focus_routine = FocusStackRoutine(
+            settings=post_processing.settings,
+            input_folder=str(self._output_folder),
+            output_path=output_path,
+            config=cfg,
+            progress_start=50,
+            progress_end=100,
+        )
+        post_processing.start_routine(focus_routine)
+
+        while focus_routine.is_running:
+            if self._check_stop():
+                post_processing.stop_routine()
+                return
+            self._set_status(
+                f"Focus stacking — {focus_routine.activity}",
+                focus_routine.progress_current,
+                focus_routine.progress_total,
+            )
+            time.sleep(0.25)
+
+        focus_routine.wait()
+
+        info(f"[ZStackScan] Focus stack time:  {time.monotonic() - focus_stack_start_time:.3f} s")
+        info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")
