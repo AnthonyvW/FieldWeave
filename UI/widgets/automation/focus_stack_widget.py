@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -20,6 +22,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
+
+def _open_path(path: str) -> None:
+    if sys.platform.startswith("linux"):
+        subprocess.Popen(["xdg-open", path])
+    else:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
 from common.app_context import get_app_context
 from common.logger import warning, error
@@ -684,11 +692,11 @@ class FocusStackWidget(QWidget):
 
     def _on_open_folder_clicked(self) -> None:
         if self._last_output_folder is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_output_folder))
+            _open_path(self._last_output_folder)
 
     def _on_view_image_clicked(self) -> None:
         if self._last_stacked_path is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_stacked_path))
+            _open_path(self._last_stacked_path)
 
     def _on_pause_resume_clicked(self) -> None:
         if self._routine is None:
