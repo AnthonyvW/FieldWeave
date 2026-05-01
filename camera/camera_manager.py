@@ -598,9 +598,9 @@ class CameraManager(QObject):
                 try:
                     hr = _get_amcam().Amcam.get_LastError()
                     hr_unsigned = hr & 0xFFFFFFFF
-                    description = _HRESULT_NAMES.get(hr_unsigned, f"0x{hr_unsigned:08X}")
-                except Exception:
-                    pass
+                    description = _HRESULT_NAMES.get(hr_unsigned, f"unrecognized error code 0x{hr_unsigned:08X}")
+                except Exception as e:
+                    description = f"failed to retrieve error code ({e})"
 
         error(f"Camera error occurred: {description}")
         self.camera_error.emit(description)
