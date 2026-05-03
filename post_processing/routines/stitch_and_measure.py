@@ -16,12 +16,18 @@ from __future__ import annotations
 
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Generator
+
+# When run directly, the project root (two levels up from this file) must be
+# on sys.path so that `common` and `post_processing` are importable.
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import cv2
 import numpy as np
 
-from common.app_context import get_app_context
 from common.logger import debug, warning
 from common.setting_types import FileFormat
 from common.fieldweaveConfig import FieldWeaveSettings
@@ -29,6 +35,7 @@ from post_processing.routines.post_processing_routine import PostProcessingRouti
 
 
 MM_PER_INCH = 25.4
+DEBUG = False
 
 
 # ---------------------------------------------------------------------------
@@ -233,9 +240,11 @@ def _longest_runs(matrix: np.ndarray) -> np.ndarray:
 
 
 def _find_bar_axis(binary: np.ndarray) -> tuple[str, int]:
+    h, w = binary.shape
     row_runs = _longest_runs(binary)
     col_runs = _longest_runs(binary.T)
-    if row_runs.max() >= col_runs.max():
+    long_side_is_horizontal = w >= h
+    if long_side_is_horizontal:
         return "horizontal", int(row_runs.argmax())
     return "vertical", int(col_runs.argmax())
 
@@ -343,7 +352,7 @@ def _extract_dpi(image: cv2.Mat, scale_mm: float, tick_min_length: int) -> float
 
 
 def _build_dpi_debug_overlay(
-    image: cv2.Mat, scale_mm: float, tick_min_length: int
+    image: cv2.Mat, scale_mm: float, tick_min_length: int, *, debug: bool = False
 ) -> cv2.Mat | None:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     binary = _binarize(gray)
@@ -354,6 +363,19 @@ def _build_dpi_debug_overlay(
         return None
     dpi = (pixel_length / scale_mm) * MM_PER_INCH
     vis = image.copy()
+
+    if debug:
+        detected_mask = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        detected_mask[:, :, 0] = 0
+        detected_mask[:, :, 2] = 0
+        vis = cv2.addWeighted(vis, 0.7, detected_mask, 0.3, 0)
+
+        h, w = vis.shape[:2]
+        if axis == "horizontal":
+            cv2.line(vis, (0, baseline_index), (w, baseline_index), (255, 165, 0), 1)
+        else:
+            cv2.line(vis, (baseline_index, 0), (baseline_index, h), (255, 165, 0), 1)
+
     if axis == "horizontal":
         pt1, pt2 = (start, baseline_index), (end, baseline_index)
     else:
@@ -402,9 +424,16 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
 
     job_name = "Stitch and Measure"
 
-    def __init__(self, settings: FieldWeaveSettings, input_folder: str) -> None:
+    def __init__(
+        self,
+        settings: FieldWeaveSettings,
+        input_folder: str,
+        *,
+        save_dpi: bool = True,
+    ) -> None:
         super().__init__(settings)
         self.input_folder = input_folder
+        self._save_dpi = save_dpi
 
     def steps(self) -> Generator[None, None, None]:
         sm = self.settings.post_processing.stitch_and_measure
@@ -477,15 +506,19 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         self._set_status("Measuring DPI", 3, 4)
 
         root_name = os.path.basename(self.input_folder)
-        ctx = get_app_context()
-        extension = ctx.camera.underlying_camera.settings.fformat.value
-        output_path = os.path.join(self.input_folder, f"{root_name}.{extension}")
+        if self._save_dpi:
+            from common.app_context import get_app_context
+            ctx = get_app_context()
+            extension = ctx.camera.underlying_camera.settings.fformat.value
+            output_path = os.path.join(self.input_folder, f"{root_name}.{extension}")
+        else:
+            output_path = os.path.join(self.input_folder, "stitched.jpg")
+
         cv2.imwrite(output_path, stitched)
         debug(f"StitchAndMeasureRoutine: panorama saved to {output_path}")
 
         dpi = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
-        if dpi is not None:
-            ctx = get_app_context()
+        if dpi is not None and self._save_dpi:
             mv = ctx.machine_vision
             mv.settings.dpi = dpi
             mv.save_settings()
@@ -494,7 +527,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
 
         debug_path: str | None = None
         if sm.save_debug_overlay and dpi is not None:
-            overlay = _build_dpi_debug_overlay(stitched, sm.scale_mm, sm.tick_min_length)
+            overlay = _build_dpi_debug_overlay(stitched, sm.scale_mm, sm.tick_min_length, debug=DEBUG)
             if overlay is not None:
                 stem, ext = os.path.splitext(output_path)
                 debug_path = f"{stem}_debug{ext}"
@@ -514,3 +547,58 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
 
         self._set_status("Done", 4, 4)
         yield
+
+# ---------------------------------------------------------------------------
+# Standalone entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+    import subprocess
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Stitch a folder of Y-ordered images into a panorama."
+    )
+    parser.add_argument("folder", help="Path to the folder containing the image subfolder")
+    parser.add_argument("--debug", action="store_true", help="Overlay detected points and lines on the debug image")
+    args = parser.parse_args()
+
+    DEBUG = args.debug
+
+    routine = StitchAndMeasureRoutine(
+        settings=FieldWeaveSettings(),
+        input_folder=args.folder,
+        save_dpi=False,
+    )
+    routine.start()
+    routine.wait()
+
+    result = routine.result
+    if result is None or not result.success:
+        print("Stitching failed.", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = result.get("output_path")
+    print(f"Saved: {output_path}")
+    dpi = result.get("dpi")
+    if dpi is not None:
+        print(f"DPI:   {dpi:.2f}")
+
+    if DEBUG:
+        sm = FieldWeaveSettings().post_processing.stitch_and_measure
+        stitched_bgr = cv2.cvtColor(result.get("stitched_rgb"), cv2.COLOR_RGB2BGR)
+        overlay = _build_dpi_debug_overlay(stitched_bgr, sm.scale_mm, sm.tick_min_length, debug=True)
+        if overlay is not None:
+            stem, ext = os.path.splitext(output_path)
+            debug_path = f"{stem}_debug{ext}"
+            cv2.imwrite(debug_path, overlay)
+            print(f"Debug: {debug_path}")
+        output_path = debug_path
+
+    if sys.platform == "win32":
+        os.startfile(output_path)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", output_path])
+    else:
+        subprocess.Popen(["xdg-open", output_path])
