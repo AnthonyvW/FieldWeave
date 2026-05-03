@@ -458,7 +458,83 @@ def _find_tick_intersections(
     return tick_positions[0], tick_positions[-1]
 
 
-def _extract_dpi(image: cv2.Mat, scale_mm: float, tick_min_length: int) -> float | None:
+EXPECTED_TICK_COUNT = 101
+
+
+def _find_ticks(
+    binary: np.ndarray,
+    axis: str,
+    baseline_index: int,
+    baseline_band: int = 3,
+    tick_min_length: int = 200,
+) -> list[int]:
+    """Return the center position of each distinct tick mark along the scale bar.
+
+    Positions are in the along-axis coordinate (x for horizontal, y for vertical).
+    Each contiguous run of qualifying pixel positions is collapsed to its midpoint.
+    """
+    h, w = binary.shape
+    if axis == "horizontal":
+        along_size = w
+
+        def perp_run_at(pos: int) -> int:
+            return int(np.count_nonzero(binary[:, pos]))
+
+        def baseline_hit(pos: int) -> bool:
+            y0 = max(0, baseline_index - baseline_band)
+            y1 = min(h, baseline_index + baseline_band + 1)
+            return bool(binary[y0:y1, pos].max() > 0)
+    else:
+        along_size = h
+
+        def perp_run_at(pos: int) -> int:
+            return int(np.count_nonzero(binary[pos, :]))
+
+        def baseline_hit(pos: int) -> bool:
+            x0 = max(0, baseline_index - baseline_band)
+            x1 = min(w, baseline_index + baseline_band + 1)
+            return bool(binary[pos, x0:x1].max() > 0)
+
+    tick_positions = [
+        pos for pos in range(along_size)
+        if baseline_hit(pos) and perp_run_at(pos) >= tick_min_length
+    ]
+    if not tick_positions:
+        return []
+
+    centers: list[int] = []
+    run_start = tick_positions[0]
+    run_end = tick_positions[0]
+    for i in range(1, len(tick_positions)):
+        if tick_positions[i] - tick_positions[i - 1] > 1:
+            centers.append((run_start + run_end) // 2)
+            run_start = tick_positions[i]
+        run_end = tick_positions[i]
+    centers.append((run_start + run_end) // 2)
+    return centers
+
+
+TICK_SPACING_TOLERANCE = 0.20
+
+
+def _find_outlier_gaps(tick_centers: list[int]) -> list[tuple[int, int, float]]:
+    """Return gaps between adjacent ticks that deviate from the median by more than
+    TICK_SPACING_TOLERANCE.
+
+    Each entry is (left_tick_index, right_tick_index, gap_px) for the outlying gap.
+    """
+    if len(tick_centers) < 2:
+        return []
+    gaps = [tick_centers[i + 1] - tick_centers[i] for i in range(len(tick_centers) - 1)]
+    median_gap = float(np.median(gaps))
+    return [
+        (i, i + 1, float(gap))
+        for i, gap in enumerate(gaps)
+        if abs(gap - median_gap) / median_gap > TICK_SPACING_TOLERANCE
+    ]
+
+
+def _extract_dpi(image: cv2.Mat, scale_mm: float, tick_min_length: int) -> tuple[float, int, list[tuple[int, int, float]]] | None:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     binary = _binarize(gray)
     axis, baseline_index = _find_bar_axis(binary)
@@ -467,10 +543,21 @@ def _extract_dpi(image: cv2.Mat, scale_mm: float, tick_min_length: int) -> float
     if pixel_length <= 0:
         warning("_extract_dpi: could not measure a valid scalebar span")
         return None
+
+    ticks = _find_ticks(binary, axis, baseline_index, tick_min_length=tick_min_length)
+    tick_count = len(ticks)
+    debug(f"_extract_dpi: tick count={tick_count} (expected {EXPECTED_TICK_COUNT})")
+    if tick_count != EXPECTED_TICK_COUNT:
+        warning(f"_extract_dpi: expected {EXPECTED_TICK_COUNT} ticks but found {tick_count}; DPI measurement may be unreliable")
+
+    outlier_gaps = _find_outlier_gaps(ticks)
+    if outlier_gaps:
+        warning(f"_extract_dpi: {len(outlier_gaps)} gap(s) with unusual spacing detected")
+
     dpi = (pixel_length / scale_mm) * MM_PER_INCH
     debug(f"_extract_dpi: axis={axis} baseline={baseline_index}px span={pixel_length}px ({start}->{end})")
     debug(f"_extract_dpi: physical={scale_mm}mm px/mm={pixel_length / scale_mm:.4f} DPI={dpi:.2f}")
-    return dpi
+    return dpi, tick_count, outlier_gaps
 
 
 def _build_dpi_debug_overlay(
@@ -483,6 +570,9 @@ def _build_dpi_debug_overlay(
     pixel_length = end - start
     if pixel_length <= 0:
         return None
+
+    ticks = _find_ticks(binary, axis, baseline_index, tick_min_length=tick_min_length)
+    tick_count = len(ticks)
     dpi = (pixel_length / scale_mm) * MM_PER_INCH
     vis = image.copy()
 
@@ -498,6 +588,19 @@ def _build_dpi_debug_overlay(
         else:
             cv2.line(vis, (baseline_index, 0), (baseline_index, h), (255, 165, 0), 1)
 
+    h, w = vis.shape[:2]
+    tick_color = (0, 255, 255)
+    tick_half_len = 12
+    for center in ticks:
+        if axis == "horizontal":
+            pt_top = (center, max(0, baseline_index - tick_half_len))
+            pt_bot = (center, min(h - 1, baseline_index + tick_half_len))
+            cv2.line(vis, pt_top, pt_bot, tick_color, 1)
+        else:
+            pt_left = (max(0, baseline_index - tick_half_len), center)
+            pt_right = (min(w - 1, baseline_index + tick_half_len), center)
+            cv2.line(vis, pt_left, pt_right, tick_color, 1)
+
     if axis == "horizontal":
         pt1, pt2 = (start, baseline_index), (end, baseline_index)
     else:
@@ -506,7 +609,7 @@ def _build_dpi_debug_overlay(
     cv2.circle(vis, pt1, 6, (0, 255, 0), -1)
     cv2.circle(vis, pt2, 6, (0, 255, 0), -1)
     label_pt = (max(pt1[0] - 5, 5), max(pt1[1] - 14, 20))
-    cv2.putText(vis, f"{dpi:.1f} DPI", label_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+    cv2.putText(vis, f"{dpi:.1f} DPI  ticks={tick_count}/{EXPECTED_TICK_COUNT}", label_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
     return vis
 
 
@@ -639,7 +742,12 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         cv2.imwrite(output_path, stitched)
         debug(f"StitchAndMeasureRoutine: panorama saved to {output_path}")
 
-        dpi = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
+        dpi_result = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
+        dpi: float | None = None
+        tick_count: int | None = None
+        outlier_gaps: list[tuple[int, int, float]] = []
+        if dpi_result is not None:
+            dpi, tick_count, outlier_gaps = dpi_result
         if dpi is not None and self._save_dpi:
             mv = ctx.machine_vision
             mv.settings.dpi = dpi
@@ -662,6 +770,10 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
             output_path=output_path,
             debug_path=debug_path,
             dpi=dpi,
+            tick_count=tick_count,
+            tick_count_valid=tick_count == EXPECTED_TICK_COUNT if tick_count is not None else None,
+            tick_spacing_valid=len(outlier_gaps) == 0,
+            tick_outlier_gaps=outlier_gaps,
             image_width=w,
             image_height=h,
             stitched_rgb=cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB),
@@ -721,6 +833,15 @@ if __name__ == "__main__":
         print(f"Saved:  {output_path}")
         print(f"Size:   {w}w x {h}h px")
         print(f"Masks:  {mask_debug_folder}")
+        dpi_result = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
+        if dpi_result is not None:
+            dpi, tick_count, outlier_gaps = dpi_result
+            print(f"DPI:    {dpi:.2f}")
+            status = "PASS" if tick_count == EXPECTED_TICK_COUNT else "FAIL"
+            print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
+            if outlier_gaps:
+                gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
+                print(f"Spacing FAIL: unusual gaps at {gaps_str}")
     else:
         routine = StitchAndMeasureRoutine(
             settings=settings,
@@ -741,6 +862,14 @@ if __name__ == "__main__":
         dpi = result.get("dpi")
         if dpi is not None:
             print(f"DPI:    {dpi:.2f}")
+        tick_count = result.get("tick_count")
+        if tick_count is not None:
+            status = "PASS" if result.get("tick_count_valid") else "FAIL"
+            print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
+        outlier_gaps = result.get("tick_outlier_gaps") or []
+        if outlier_gaps:
+            gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
+            print(f"Spacing FAIL: unusual gaps at {gaps_str}")
 
     if DEBUG:
         sm = FieldWeaveSettings().post_processing.stitch_and_measure
