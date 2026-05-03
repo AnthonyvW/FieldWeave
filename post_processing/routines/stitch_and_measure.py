@@ -73,118 +73,240 @@ def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str, int]]:
     return images
 
 
-def _correlation_profile(a: cv2.Mat, b: cv2.Mat, min_overlap_frac: float = 0.05) -> np.ndarray:
-    gray_a = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
-    gray_b = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
-    h_a, h_b = gray_a.shape[0], gray_b.shape[0]
-    template = gray_b[:h_b // 2, :]
-    result = cv2.matchTemplate(gray_a, template, cv2.TM_CCOEFF_NORMED)
-    profile = result.max(axis=1)
-    min_y = int(h_a * min_overlap_frac)
-    profile[:min_y] = -1.0
-    return profile
+def _mask_longest_blob(gray: np.ndarray) -> np.ndarray:
+    """Return a copy of *gray* with the blob whose bounding rect spans the most
+    image width zeroed out.
+
+    Using width fraction rather than absolute width ensures the tick bar —
+    which always runs nearly edge to edge — is selected even when the first
+    image has fewer ticks and a number label happens to be wider in pixels.
+    """
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return gray.copy()
+    img_w = gray.shape[1]
+    x, y, w, h = cv2.boundingRect(max(contours, key=lambda c: cv2.boundingRect(c)[2] / img_w))
+    masked = gray.copy()
+    masked[y:y + h, x:x + w] = 0
+    return masked
 
 
-def _first_peak(profile: np.ndarray, threshold_frac: float = 0.85) -> int | None:
-    global_max = float(profile.max())
-    if global_max <= 0:
-        return None
-    threshold = threshold_frac * global_max
-    kernel = np.ones(5) / 5
-    smoothed = np.convolve(profile, kernel, mode='same')
-    for i in range(1, len(smoothed) - 1):
-        if smoothed[i] >= threshold and smoothed[i] >= smoothed[i - 1] and smoothed[i] >= smoothed[i + 1]:
-            return i
-    return None
+def _refine_offset_with_template(
+    img_a: cv2.Mat,
+    img_b: cv2.Mat,
+    nominal_offset: int,
+    mask_debug_folder: str | None = None,
+    pair_index: int = 0,
+) -> int:
+    """Find the Y step offset between two images by matching blobs from A into B.
+
+    Blobs are found across the full processed binary of A (after removing the
+    scale bar). Each blob's tight bounding patch is matched against B using
+    normalised cross-correlation. The median Y displacement across all
+    successful matches is used as the refined offset.
+
+    Falls back to *nominal_offset* when fewer than two blobs match successfully.
+
+    If *mask_debug_folder* is set, a composite debug image is saved as
+    ``pair_<pair_index>_masks.png`` showing both source images side by side with the
+    binary masks overlaid in green and matched blob bounding boxes in red.
+    """
+    gray_a = cv2.cvtColor(img_a, cv2.COLOR_BGR2GRAY)
+    gray_b = cv2.cvtColor(img_b, cv2.COLOR_BGR2GRAY)
+
+    h_a, w_a = gray_a.shape
+    h_b, w_b = gray_b.shape
+    cy_a, cx_a = int(h_a * 0.2), int(w_a * 0.2)
+    cy_b, cx_b = int(h_b * 0.2), int(w_b * 0.2)
+    cropped_gray_a = gray_a[cy_a:h_a - cy_a, cx_a:w_a - cx_a]
+    cropped_gray_b = gray_b[cy_b:h_b - cy_b, cx_b:w_b - cx_b]
+
+    binary_a = cv2.bitwise_and(_mask_longest_blob(cropped_gray_a), _binarize(cropped_gray_a))
+    binary_b = cv2.bitwise_and(_mask_longest_blob(cropped_gray_b), _binarize(cropped_gray_b))
+
+    contours, _ = cv2.findContours(binary_a, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        debug(f"  template match: no blobs found in A, using nominal={nominal_offset}px")
+        return nominal_offset
+
+    padding = 4
+    y_displacements: list[int] = []
+    matched_blobs_a: list[tuple[int, int, int, int]] = []
+    matched_blobs_b: list[tuple[int, int, int, int]] = []
+
+    for contour in contours:
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        if bw < 5 or bh < 5:
+            continue
+
+        x0 = max(0, bx - padding)
+        y0 = max(0, by - padding)
+        x1 = min(binary_a.shape[1], bx + bw + padding)
+        y1 = min(binary_a.shape[0], by + bh + padding)
+        template = binary_a[y0:y1, x0:x1]
+
+        if template.shape[0] > binary_b.shape[0] or template.shape[1] > binary_b.shape[1]:
+            continue
+
+        result = cv2.matchTemplate(binary_b, template, cv2.TM_CCOEFF_NORMED)
+        _, score, _, max_loc = cv2.minMaxLoc(result)
+        debug(f"    blob y0={y0} size=({y1-y0}h,{x1-x0}w) score={score:.3f} max_loc={max_loc}")
+        if score < 0.5:
+            continue
+
+        # y0 is in binary_a coordinates; adding cy_a gives original image A coordinates.
+        # max_loc[1] is in binary_b coordinates; adding cy_b gives original image B coordinates.
+        # The blob appears higher up in B than in A because B starts lower, so the feature
+        # row in B is less than in A. The offset (distance from top of A to top of B) is
+        # therefore the negation of this difference.
+        match_y_in_b = max_loc[1]
+        displacement = (y0 + cy_a) - (match_y_in_b + cy_b)
+        y_displacements.append(displacement)
+        matched_blobs_a.append((x0, y0, x1 - x0, y1 - y0))
+        matched_blobs_b.append((max_loc[0], match_y_in_b, x1 - x0, y1 - y0))
+
+    debug(f"  template match: {len(y_displacements)} blob(s) matched, displacements={y_displacements}")
+
+    if mask_debug_folder is not None:
+        def _make_overlay(img_bgr: cv2.Mat, binary: np.ndarray, boxes: list[tuple[int, int, int, int]], cy: int, cx: int) -> cv2.Mat:
+            vis = img_bgr.copy()
+            h, w = vis.shape[:2]
+            green_layer = np.zeros_like(vis)
+            green_layer[cy:h - cy, cx:w - cx][binary > 0] = (0, 255, 0)
+            vis = cv2.addWeighted(vis, 0.7, green_layer, 0.3, 0)
+            for bx, by, bw, bh in boxes:
+                rx, ry = bx + cx, by + cy
+                cv2.rectangle(vis, (rx, ry), (rx + bw, ry + bh), (0, 0, 255), 2)
+            return vis
+
+        vis_a = _make_overlay(img_a, binary_a, matched_blobs_a, cy_a, cx_a)
+        vis_b = _make_overlay(img_b, binary_b, matched_blobs_b, cy_b, cx_b)
+
+        h_a_vis, w_a_vis = vis_a.shape[:2]
+        h_b_vis, w_b_vis = vis_b.shape[:2]
+        combined_h = max(h_a_vis, h_b_vis)
+        combined_w = w_a_vis + w_b_vis + 4
+        combined = np.zeros((combined_h, combined_w, 3), dtype=np.uint8)
+        combined[:h_a_vis, :w_a_vis] = vis_a
+        combined[:h_b_vis, w_a_vis + 4:] = vis_b
+        cv2.line(combined, (w_a_vis + 2, 0), (w_a_vis + 2, combined_h), (128, 128, 128), 2)
+        cv2.imwrite(os.path.join(mask_debug_folder, f"pair_{pair_index:02d}_masks.png"), combined)
+
+    if len(y_displacements) < 2:
+        debug(f"  template match: too few matches, using nominal={nominal_offset}px")
+        return nominal_offset
+
+    refined = int(np.median(y_displacements))
+    debug(f"  template match: nominal={nominal_offset}px  refined={refined}px")
+    if refined <= 0:
+        debug(f"  template match: refined offset non-positive, falling back to nominal={nominal_offset}px")
+        return nominal_offset
+    return refined
 
 
-def _find_offset_first_peak(
+def _save_overlap_debug(
+    img_a: cv2.Mat,
+    img_b: cv2.Mat,
+    offset: int,
+    pair_index: int,
+    mask_debug_folder: str,
+) -> None:
+    """Save a composite showing the overlap between img_a and img_b at the given offset.
+
+    The overlap region is rendered as a 50/50 alpha blend of A (bottom rows) and
+    B (top rows) so misalignment appears as ghosting or fringing. A horizontal red
+    line marks the seam midpoint.
+    """
+    h_a, w_a = img_a.shape[:2]
+    h_b, w_b = img_b.shape[:2]
+
+    overlap_rows = h_a - offset
+    if overlap_rows <= 0:
+        return
+
+    seam = overlap_rows // 2
+    canvas_w = max(w_a, w_b)
+    canvas = np.zeros((overlap_rows, canvas_w, 3), dtype=np.uint8)
+
+    strip_a = img_a[offset:, :]
+    strip_b = img_b[:overlap_rows, :]
+
+    rows = min(strip_a.shape[0], strip_b.shape[0], overlap_rows)
+    canvas[:rows, :w_a] = strip_a[:rows, :]
+    blend = canvas.copy()
+    blend[:rows, :w_b] = strip_b[:rows, :]
+    canvas = cv2.addWeighted(canvas, 0.5, blend, 0.5, 0)
+    cv2.line(canvas, (0, seam), (canvas_w, seam), (0, 0, 255), 1)
+
+    cv2.imwrite(os.path.join(mask_debug_folder, f"pair_{pair_index:02d}_overlap.png"), canvas)
+
+
+def _stitch_images(
     images: list[tuple[cv2.Mat, str, int]],
-    threshold_frac: float = 0.85,
-    min_overlap_frac: float = 0.05,
-) -> int | None:
-    offsets: list[int] = []
+    overlap_frac: float,
+    mask_debug_folder: str | None = None,
+) -> cv2.Mat | None:
+    debug(f"_stitch_images: stitching {len(images)} images with {overlap_frac:.1%} overlap")
+
+    h_a, w_a = images[0][0].shape[:2]
+    overlap_px = round(h_a * overlap_frac)
+    nominal_offset = h_a - overlap_px
+    debug(f"_stitch_images: image shape=({h_a}h, {w_a}w)  overlap={overlap_px}px  nominal offset={nominal_offset}px")
+
+    refined_offsets: list[int] = []
     for i in range(len(images) - 1):
         img_a, _, _ = images[i]
         img_b, _, _ = images[i + 1]
-        profile = _correlation_profile(img_a, img_b, min_overlap_frac)
-        peak = _first_peak(profile, threshold_frac)
-        if peak is not None:
-            global_max_val = float(profile.max())
-            peak_val = float(profile[peak])
-            debug(f"  Pair {i:2d}: first_peak={peak}px  peak_conf={peak_val:.3f}  global_max_conf={global_max_val:.3f}")
-            offsets.append(peak)
+        refined = _refine_offset_with_template(
+            img_a, img_b, nominal_offset,
+            mask_debug_folder=mask_debug_folder,
+            pair_index=i,
+        )
+        refined_offsets.append(refined)
+        if mask_debug_folder is not None:
+            _save_overlap_debug(img_a, img_b, refined, i, mask_debug_folder)
+
+    debug(f"_stitch_images: refined offsets={refined_offsets}")
+
+    total_h = h_a + sum(refined_offsets)
+    canvas_w = max(img.shape[1] for img, _, _ in images)
+    debug(f"_stitch_images: canvas=({total_h}h, {canvas_w}w)")
+    canvas = np.zeros((total_h, canvas_w, 3), dtype=np.uint8)
+
+    img_a, _, _ = images[0]
+    canvas[:h_a, :w_a] = img_a
+
+    cum_y = 0
+    for i, (img_b, _, _) in enumerate(images[1:]):
+        offset = refined_offsets[i]
+        prev_img, _, _ = images[i]
+        h_prev = prev_img.shape[0]
+        h_b, w_b = img_b.shape[:2]
+
+        overlap_start_canvas = cum_y + offset
+        overlap_end_canvas = cum_y + h_prev
+        overlap_rows = overlap_end_canvas - overlap_start_canvas
+
+        if overlap_rows > 0:
+            seam_canvas = overlap_start_canvas + overlap_rows // 2
+            seam_in_b = seam_canvas - (cum_y + offset)
+            b_start_canvas = cum_y + offset
+            b_end_canvas = min(cum_y + offset + h_b, total_h)
+            b_src_rows = b_end_canvas - b_start_canvas
+
+            canvas[b_start_canvas + seam_in_b:b_end_canvas, :w_b] = img_b[seam_in_b:seam_in_b + (b_src_rows - seam_in_b), :]
+            debug(f"  pair {i}: offset={offset}px overlap={overlap_rows}px seam at canvas row {seam_canvas} (b row {seam_in_b})")
         else:
-            debug(f"  Pair {i:2d}: no peak found")
-    if not offsets:
-        return None
-    return int(round(float(np.median(offsets))))
+            b_start_canvas = cum_y + offset
+            b_end_canvas = min(b_start_canvas + h_b, total_h)
+            src_rows = b_end_canvas - b_start_canvas
+            canvas[b_start_canvas:b_end_canvas, :w_b] = img_b[:src_rows, :]
+            debug(f"  pair {i}: offset={offset}px no overlap, placing directly")
 
+        cum_y += offset
 
-def _calibrate_offset(images: list[tuple[cv2.Mat, str, int]]) -> int | None:
-    offset = _find_offset_first_peak(images)
-    if offset is None:
-        warning("_calibrate_offset: no peaks found in any pair")
-        return None
-    debug(f"_calibrate_offset: step offset={offset}px")
-    return offset
-
-
-def _place_image(
-    canvas: cv2.Mat, image: cv2.Mat, y_offset: int, x_offset: int, prev_end_y: int
-) -> None:
-    h_i, w_i = image.shape[:2]
-    seam_y = (y_offset + prev_end_y) // 2
-    src_seam = seam_y - y_offset
-    x_end = x_offset + w_i
-    canvas_w = canvas.shape[1]
-    src_x_end = min(w_i, canvas_w - x_offset)
-    if x_offset >= 0:
-        canvas[seam_y:y_offset + h_i, x_offset:x_offset + src_x_end] = image[src_seam:, :src_x_end]
-    else:
-        src_x_start = -x_offset
-        canvas[seam_y:y_offset + h_i, :x_end] = image[src_seam:, src_x_start:src_x_start + x_end]
-
-
-def _stitch_images(images: list[tuple[cv2.Mat, str, int]]) -> cv2.Mat | None:
-    debug(f"_stitch_images: stitching {len(images)} images sequentially by Y position")
-
-    offset_px = _calibrate_offset(images)
-    if offset_px is None:
-        warning("_stitch_images: failed to calibrate step offset")
-        return None
-
-    h_a, w_a = images[0][0].shape[:2]
-    pair_offsets: list[tuple[int, int]] = [(offset_px, 0)] * (len(images) - 1)
-
-    y_off, x_off = pair_offsets[0]
-    h_b, w_b = images[1][0].shape[:2]
-    cum_x = x_off
-    canvas_h = max(y_off + h_b, h_a)
-    canvas_w = max(w_a, cum_x + w_b) if cum_x >= 0 else max(w_a, w_b - cum_x)
-    canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-    canvas[:h_a, :w_a] = images[0][0]
-    _place_image(canvas, images[1][0], y_off, cum_x, h_a)
-
-    cum_y = y_off
-    prev_end_y = y_off + h_b
-
-    for i in range(2, len(images)):
-        img, label, _ = images[i]
-        y_off, x_off = pair_offsets[i - 1]
-        cum_y += y_off
-        cum_x += x_off
-        h_i, w_i = img.shape[:2]
-        new_h = max(cum_y + h_i, canvas.shape[0])
-        new_w = max(cum_x + w_i, canvas.shape[1]) if cum_x >= 0 else max(canvas.shape[1], w_i - cum_x)
-        if new_h > canvas.shape[0] or new_w > canvas.shape[1]:
-            expanded = np.zeros((new_h, new_w, 3), dtype=np.uint8)
-            expanded[:canvas.shape[0], :canvas.shape[1]] = canvas
-            canvas = expanded
-        _place_image(canvas, img, cum_y, cum_x, prev_end_y)
-        prev_end_y = cum_y + h_i
-
-    debug("_stitch_images: stitching successful")
+    debug("_stitch_images: stitching complete")
     return canvas
 
 
@@ -472,11 +594,11 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         # ----------------------------------------------------------------
         self._set_status("Stitching images", 1, 4)
 
-        stitched = _stitch_images(images)
+        stitched = _stitch_images(images, sm.overlap_frac, mask_debug_folder=None)
         if stitched is None:
             raise RuntimeError(
-                "Stitching failed — ensure images have sufficient overlap (30-50%) "
-                "and that Y positions in filenames reflect the correct scan order"
+                "Stitching failed — ensure the overlap value is correct and "
+                "that Y positions in filenames reflect the correct scan order"
             )
 
         yield
@@ -561,33 +683,71 @@ if __name__ == "__main__":
         description="Stitch a folder of Y-ordered images into a panorama."
     )
     parser.add_argument("folder", help="Path to the folder containing the image subfolder")
+    parser.add_argument(
+        "--overlap",
+        type=float,
+        required=True,
+        metavar="PCT",
+        help="Percentage of image height that consecutive images overlap (e.g. 70 for 70%%)",
+    )
+    parser.add_argument("--save-masks", action="store_true", help="Save per-pair debug images to a masks/ subfolder showing binary masks overlaid on source images with matched blob bounding boxes")
     parser.add_argument("--debug", action="store_true", help="Overlay detected points and lines on the debug image")
     args = parser.parse_args()
 
     DEBUG = args.debug
 
-    routine = StitchAndMeasureRoutine(
-        settings=FieldWeaveSettings(),
-        input_folder=args.folder,
-        save_dpi=False,
-    )
-    routine.start()
-    routine.wait()
+    settings = FieldWeaveSettings()
+    settings.post_processing.stitch_and_measure.overlap_frac = args.overlap / 100.0
 
-    result = routine.result
-    if result is None or not result.success:
-        print("Stitching failed.", file=sys.stderr)
-        sys.exit(1)
+    mask_debug_folder: str | None = None
+    if args.save_masks:
+        mask_debug_folder = os.path.join(args.folder, "masks")
+        os.makedirs(mask_debug_folder, exist_ok=True)
 
-    output_path = result.get("output_path")
-    print(f"Saved: {output_path}")
-    dpi = result.get("dpi")
-    if dpi is not None:
-        print(f"DPI:   {dpi:.2f}")
+    if mask_debug_folder is not None:
+        subfolders = [e.path for e in os.scandir(args.folder) if e.is_dir() and os.path.basename(e.path) != "masks"]
+        if len(subfolders) != 1:
+            print("Expected exactly one image subfolder.", file=sys.stderr)
+            sys.exit(1)
+        images = _collect_images(subfolders[0])
+        sm = settings.post_processing.stitch_and_measure
+        stitched = _stitch_images(images, sm.overlap_frac, mask_debug_folder=mask_debug_folder)
+        if stitched is None:
+            print("Stitching failed.", file=sys.stderr)
+            sys.exit(1)
+        output_path = os.path.join(args.folder, "stitched.jpg")
+        cv2.imwrite(output_path, stitched)
+        h, w = stitched.shape[:2]
+        print(f"Saved:  {output_path}")
+        print(f"Size:   {w}w x {h}h px")
+        print(f"Masks:  {mask_debug_folder}")
+    else:
+        routine = StitchAndMeasureRoutine(
+            settings=settings,
+            input_folder=args.folder,
+            save_dpi=False,
+        )
+        routine.start()
+        routine.wait()
+
+        result = routine.result
+        if result is None or not result.success:
+            print("Stitching failed.", file=sys.stderr)
+            sys.exit(1)
+
+        output_path = result.get("output_path")
+        print(f"Saved:  {output_path}")
+        print(f"Size:   {result.get('image_width')}w x {result.get('image_height')}h px")
+        dpi = result.get("dpi")
+        if dpi is not None:
+            print(f"DPI:    {dpi:.2f}")
 
     if DEBUG:
         sm = FieldWeaveSettings().post_processing.stitch_and_measure
-        stitched_bgr = cv2.cvtColor(result.get("stitched_rgb"), cv2.COLOR_RGB2BGR)
+        if args.save_masks:
+            stitched_bgr = cv2.imread(output_path)
+        else:
+            stitched_bgr = cv2.cvtColor(result.get("stitched_rgb"), cv2.COLOR_RGB2BGR)
         overlay = _build_dpi_debug_overlay(stitched_bgr, sm.scale_mm, sm.tick_min_length, debug=True)
         if overlay is not None:
             stem, ext = os.path.splitext(output_path)
