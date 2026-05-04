@@ -384,44 +384,49 @@ def _find_bar_axis(binary: np.ndarray) -> tuple[str, int]:
     return "vertical", int(col_runs.argmax())
 
 
-def _text_mass_above_vs_below(
-    binary: np.ndarray, baseline_index: int, axis: str
-) -> tuple[float, float]:
-    band = 5
-    if axis == "horizontal":
-        mask = np.ones_like(binary)
-        mask[max(0, baseline_index - band):baseline_index + band + 1, :] = 0
-        masked = binary & mask
-        above = float(np.count_nonzero(masked[:baseline_index, :]))
-        below = float(np.count_nonzero(masked[baseline_index:, :]))
-    else:
-        mask = np.ones_like(binary)
-        mask[:, max(0, baseline_index - band):baseline_index + band + 1] = 0
-        masked = binary & mask
-        above = float(np.count_nonzero(masked[:, :baseline_index]))
-        below = float(np.count_nonzero(masked[:, baseline_index:]))
-    return above, below
-
-
 def _detect_orientation(image: cv2.Mat) -> int:
+    """Return the clockwise rotation (0, 90, 180, or 270) needed to correct orientation.
+
+    The scale bar runs along the long axis of the image.  _find_bar_axis gives
+    the axis and baseline index of the bar using longest-run detection, which is
+    robust to tilted or fragmented bars.  All pixels within a band around the
+    baseline are zeroed out, leaving only number glyphs and dust.  The centroid
+    of those remaining pixels relative to the image centre determines which side
+    the numbers are on, which directly maps to the required rotation.
+
+    For a landscape image (horizontal bar):
+      - numbers above centre  -> already upright (0°)
+      - numbers below centre  -> upside-down (180°)
+
+    For a portrait image (vertical bar):
+      - numbers left of centre  -> 270°
+      - numbers right of centre -> 90°
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    binary = _binarize(gray)
     h, w = image.shape[:2]
-    candidates = [0, 180] if w >= h else [90, 270]
-    best_rotation = candidates[0]
-    best_ratio = -1.0
-    for rot in candidates:
-        rotated = _rotate_image(image, rot)
-        gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
-        binary = _binarize(gray)
-        axis, baseline_index = _find_bar_axis(binary)
-        above, below = _text_mass_above_vs_below(binary, baseline_index, axis)
-        total = above + below
-        ratio = above / total if total > 0 else 0.0
-        debug(f"    {rot}°: axis={axis} baseline={baseline_index}px | above={above:.0f} below={below:.0f} ratio={ratio:.3f}")
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_rotation = rot
-    debug(f"_detect_orientation: selected {best_rotation}° (ratio={best_ratio:.3f})")
-    return best_rotation
+    axis, baseline_index = _find_bar_axis(binary)
+
+    bar_half_width = (h if axis == "horizontal" else w) // 10
+    numbers_only = binary.copy()
+    if axis == "horizontal":
+        y0 = max(0, baseline_index - bar_half_width)
+        y1 = min(h, baseline_index + bar_half_width + 1)
+        numbers_only[y0:y1, :] = 0
+        ys, _ = np.where(numbers_only > 0)
+        offset = float(ys.mean()) - h / 2.0 if ys.size > 0 else 0.0
+        rotation = 0 if offset < 0 else 180
+    else:
+        x0 = max(0, baseline_index - bar_half_width)
+        x1 = min(w, baseline_index + bar_half_width + 1)
+        numbers_only[:, x0:x1] = 0
+        _, xs = np.where(numbers_only > 0)
+        offset = float(xs.mean()) - w / 2.0 if xs.size > 0 else 0.0
+        rotation = 90 if offset < 0 else 270
+
+    debug(f"_detect_orientation: image=({h}h,{w}w) axis={axis} baseline={baseline_index} offset={offset:.1f}")
+    debug(f"_detect_orientation: selected {rotation}°")
+    return rotation
 
 
 def _find_tick_intersections(
@@ -727,11 +732,13 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         overlap_frac: float,
         *,
         save_dpi: bool = True,
+        standalone: bool = False,
     ) -> None:
         super().__init__(settings)
         self.input_folder = input_folder
         self._overlap_frac = overlap_frac
         self._save_dpi = save_dpi
+        self._standalone = standalone
 
     def steps(self) -> Generator[None, None, None]:
         sm = self.settings.post_processing.stitch_and_measure
@@ -781,41 +788,14 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         yield
 
         # ----------------------------------------------------------------
-        # Step 3: crop and rotate
+        # Step 3: gap correction, crop, and rotate
         # ----------------------------------------------------------------
         self._set_status("Correcting orientation", 2, 4)
 
-        if sm.crop_borders:
-            debug("StitchAndMeasureRoutine: cropping black borders")
-            stitched = _crop_black_borders(stitched)
-
-        if sm.auto_rotate:
-            rotation = _detect_orientation(stitched)
-            if rotation != 0:
-                debug(f"StitchAndMeasureRoutine: rotating {rotation}° clockwise")
-                stitched = _rotate_image(stitched, rotation)
-            else:
-                debug("StitchAndMeasureRoutine: orientation correct, no rotation needed")
-
-        yield
-
-        # ----------------------------------------------------------------
-        # Step 4: save, measure DPI, optionally write debug overlay
-        # ----------------------------------------------------------------
-        self._set_status("Measuring DPI", 3, 4)
-
-        root_name = os.path.basename(self.input_folder)
-        if self._save_dpi:
-            from common.app_context import get_app_context
-            ctx = get_app_context()
-            extension = ctx.camera.underlying_camera.settings.fformat.value
-            output_path = os.path.join(self.input_folder, f"{root_name}.{extension}")
-        else:
-            output_path = os.path.join(self.input_folder, "stitched.jpg")
-
-        cv2.imwrite(output_path, stitched)
-        debug(f"StitchAndMeasureRoutine: panorama saved to {output_path}")
-
+        # Gap correction must run on the raw stitched panorama before any
+        # crop or rotation, because _restitch_with_corrected_offsets locates
+        # seams using the same Y coordinate space as the tick positions
+        # returned by _extract_dpi. Rotating first would misalign the two.
         dpi_result = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
         dpi: float | None = None
         tick_count: int | None = None
@@ -832,7 +812,55 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
                 if corrected_result is not None:
                     stitched = corrected
                     dpi, tick_count, outlier_gaps = corrected_result
+
+        if sm.crop_borders:
+            debug("StitchAndMeasureRoutine: cropping black borders")
+            stitched = _crop_black_borders(stitched)
+
+        if sm.auto_rotate:
+            rotation = _detect_orientation(stitched)
+            if rotation != 0:
+                debug(f"StitchAndMeasureRoutine: rotating {rotation}° clockwise")
+                stitched = _rotate_image(stitched, rotation)
+            else:
+                debug("StitchAndMeasureRoutine: orientation correct, no rotation needed")
+
+        yield
+
+        # ----------------------------------------------------------------
+        # Step 4: save and write debug overlay
+        # ----------------------------------------------------------------
+        self._set_status("Measuring DPI", 3, 4)
+
+        root_name = os.path.basename(self.input_folder)
+        if self._save_dpi and not self._standalone:
+            from common.app_context import get_app_context
+            ctx = get_app_context()
+            extension = ctx.camera.underlying_camera.settings.fformat.value
+            output_path = os.path.join(self.input_folder, f"{root_name}.{extension}")
+        else:
+            output_path = os.path.join(self.input_folder, "stitched.jpg")
+
+        cv2.imwrite(output_path, stitched)
+        debug(f"StitchAndMeasureRoutine: panorama saved to {output_path}")
+
         if dpi is not None and self._save_dpi:
+            qa_pass = tick_count == EXPECTED_TICK_COUNT and len(outlier_gaps) == 0
+            lines: list[str] = [
+                f"{dpi:.2f}",
+                "PASS" if qa_pass else "FAIL",
+                f"{tick_count if tick_count is not None else 0}/{EXPECTED_TICK_COUNT} ticks",
+            ]
+            if tick_count is not None and tick_count != EXPECTED_TICK_COUNT:
+                lines.append(f"WARNING: expected {EXPECTED_TICK_COUNT} ticks but found {tick_count}")
+            for left_i, right_i, gap in outlier_gaps:
+                lines.append(f"WARNING: unusual gap between tick #{left_i} and #{right_i} ({gap:.0f}px)")
+            dpi_txt_path = os.path.join(self.input_folder, "DPI.txt")
+            with open(dpi_txt_path, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            debug(f"StitchAndMeasureRoutine: DPI written to {dpi_txt_path}")
+
+        if dpi is not None and self._save_dpi and not self._standalone:
             mv = ctx.machine_vision
             mv.settings.dpi = dpi
             mv.save_settings()
@@ -887,6 +915,7 @@ if __name__ == "__main__":
         help="Fraction of image height that consecutive images overlap (e.g. 0.7 for 70%%)",
     )
     parser.add_argument("--save-masks", action="store_true", help="Save per-pair debug images to a masks/ subfolder showing binary masks overlaid on source images with matched blob bounding boxes")
+    parser.add_argument("--save-dpi", action="store_true", help="Write DPI.txt containing the measured DPI to the output folder")
     parser.add_argument("--debug", action="store_true", help="Overlay detected points and lines on the debug image")
     args = parser.parse_args()
 
@@ -964,7 +993,8 @@ if __name__ == "__main__":
             settings=settings,
             input_folder=args.folder,
             overlap_frac=args.overlap,
-            save_dpi=False,
+            save_dpi=args.save_dpi,
+            standalone=True,
         )
         routine.start()
         routine.wait()
