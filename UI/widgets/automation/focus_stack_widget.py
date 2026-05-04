@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import math
-import subprocess
-import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -20,21 +18,14 @@ from PySide6.QtWidgets import (
     QFrame,
     QToolButton,
 )
-from PySide6.QtCore import Qt, QTimer, QUrl, QMetaObject, Slot
-from PySide6.QtGui import QDesktopServices
-
-def _open_path(path: str) -> None:
-    if sys.platform.startswith("linux"):
-        subprocess.Popen(["xdg-open", path])
-    else:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+from PySide6.QtCore import Qt, QTimer, QMetaObject, Slot
 
 from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_scan import ZStackScan
 from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig, FocusStackResult
 from post_processing.routines.post_processing_routine import RoutineResult
-from UI.widgets.automation.output_folder_widget import OutputFolderWidget
+from UI.widgets.automation.output_folder_widget import OutputFolderWidget, ViewImageWidget
 
 
 # ---------------------------------------------------------------------------
@@ -442,22 +433,7 @@ class FocusStackWidget(QWidget):
         main_layout.addWidget(self._summary_label)
 
         # ---- Post-run results row (hidden until a run completes) ---------
-        self._results_widget = QWidget()
-        results_layout = QHBoxLayout(self._results_widget)
-        results_layout.setContentsMargins(0, 0, 0, 0)
-        results_layout.setSpacing(8)
-
-        self._open_folder_btn = QPushButton("Open Folder")
-        self._open_folder_btn.setFixedHeight(30)
-        self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
-        results_layout.addWidget(self._open_folder_btn, 1)
-
-        self._view_image_btn = QPushButton("View Stacked Image")
-        self._view_image_btn.setFixedHeight(30)
-        self._view_image_btn.clicked.connect(self._on_view_image_clicked)
-        results_layout.addWidget(self._view_image_btn, 1)
-
-        self._results_widget.setVisible(False)
+        self._results_widget = ViewImageWidget("View Stacked Image")
         main_layout.addWidget(self._results_widget)
 
         # ---- Start button ------------------------------------------------
@@ -684,16 +660,8 @@ class FocusStackWidget(QWidget):
             self._last_stacked_path = str(Path(output_folder) / f"stacked.{ext}")
         else:
             self._last_stacked_path = None
-        self._results_widget.setVisible(False)
+        self._results_widget.hide_result()
         self._enter_running_state()
-
-    def _on_open_folder_clicked(self) -> None:
-        if self._last_output_folder is not None:
-            _open_path(self._last_output_folder)
-
-    def _on_view_image_clicked(self) -> None:
-        if self._last_stacked_path is not None:
-            _open_path(self._last_stacked_path)
 
     def _on_pause_resume_clicked(self) -> None:
         if self._routine is None:
@@ -739,10 +707,7 @@ class FocusStackWidget(QWidget):
         self._update_summary()
 
         if self._last_output_folder is not None:
-            self._view_image_btn.setVisible(
-                stacked_path is not None and Path(stacked_path).exists()
-            )
-            self._results_widget.setVisible(True)
+            self._results_widget.show_result(self._last_output_folder, stacked_path)
 
     def _on_routine_complete(self, result: RoutineResult) -> None:
         """Called from the routine's background thread — marshal Qt calls to main thread."""

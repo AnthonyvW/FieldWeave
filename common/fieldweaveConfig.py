@@ -13,7 +13,7 @@ class StitchAndMeasureSettings:
     """Settings for the stitch-and-measure post-processing task."""
 
     scale_mm: float = 10.0
-    tick_min_length: int = 200
+    tick_min_length: int = 150
     crop_borders: bool = True
     auto_rotate: bool = True
     save_debug_overlay: bool = False

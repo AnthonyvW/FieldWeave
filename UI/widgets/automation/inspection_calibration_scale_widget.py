@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -20,7 +21,7 @@ from common.app_context import get_app_context
 from common.logger import error, info
 from motion.models import Position
 from motion.routines.inspection_calibration_scale_routine import InspectionCalibrationScaleRoutine
-from UI.widgets.automation.output_folder_widget import OutputFolderWidget
+from UI.widgets.automation.output_folder_widget import OutputFolderWidget, ViewImageWidget
 
 _NM_PER_MM = 1_000_000
 
@@ -109,6 +110,7 @@ class InspectionCalibrationScaleWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._routine: InspectionCalibrationScaleRoutine | None = None
+        self._last_output_path: str | None = None
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -195,6 +197,10 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._output_folder = OutputFolderWidget()
         main_layout.addWidget(self._output_folder)
 
+        # ---- Post-run results row (hidden until a run completes) ---------
+        self._results_widget = ViewImageWidget("View Calibration Image")
+        main_layout.addWidget(self._results_widget)
+
         # ---- Start button ------------------------------------------------
         self._start_btn = QPushButton("Start Automation")
         self._start_btn.setFixedHeight(34)
@@ -222,12 +228,6 @@ class InspectionCalibrationScaleWidget(QWidget):
 
         self._controls_widget.setVisible(False)
         main_layout.addWidget(self._controls_widget)
-
-        # ---- Status label ------------------------------------------------
-        self._status_label = QLabel("")
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._status_label.setObjectName("CalScaleStatusLabel")
-        main_layout.addWidget(self._status_label)
 
         main_layout.addStretch(1)
 
@@ -387,6 +387,17 @@ class InspectionCalibrationScaleWidget(QWidget):
     def _resolve_output_path(self) -> str:
         return self._output_folder.resolved_path
 
+    def _find_result_image(self, output_path: str) -> str | None:
+        folder = Path(output_path)
+        ctx = get_app_context()
+        if ctx.camera is not None:
+            ext = ctx.camera.underlying_camera.settings.fformat.value
+            candidate = folder / f"{folder.name}.{ext}"
+            if candidate.exists():
+                return str(candidate)
+        fallback = folder / "stitched.jpg"
+        return str(fallback) if fallback.exists() else None
+
     # ------------------------------------------------------------------
     # Routine slots
     # ------------------------------------------------------------------
@@ -395,7 +406,6 @@ class InspectionCalibrationScaleWidget(QWidget):
         motion = self._get_motion()
         if motion is None or not motion.is_ready():
             error("InspectionCalibrationScaleWidget: motion controller not ready")
-            self._status_label.setText("Motion controller not ready.")
             return
 
         output_path = self._resolve_output_path()
@@ -442,6 +452,8 @@ class InspectionCalibrationScaleWidget(QWidget):
         )
         motion.start_routine(self._routine)
 
+        self._last_output_path = output_path
+        self._results_widget.hide_result()
         self._enter_running_state()
 
     def _on_pause_resume_clicked(self) -> None:
@@ -450,16 +462,13 @@ class InspectionCalibrationScaleWidget(QWidget):
         if self._routine.is_paused:
             self._routine.resume()
             self._pause_resume_btn.setText("Pause")
-            self._status_label.setText("Running...")
         else:
             self._routine.pause()
             self._pause_resume_btn.setText("Resume")
-            self._status_label.setText("Paused.")
 
     def _on_stop_clicked(self) -> None:
         if self._routine is not None:
             self._routine.stop()
-        self._status_label.setText("Stopping...")
 
     # ------------------------------------------------------------------
     # Routine state helpers
@@ -473,7 +482,6 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._clear_pos_btn.setEnabled(False)
         self._pause_resume_btn.setText("Pause")
         self._controls_widget.setVisible(True)
-        self._status_label.setText("Running...")
         self._poll_timer.start()
 
     def _exit_running_state(self) -> None:
@@ -482,10 +490,11 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._output_folder.setEnabled(True)
         self._set_pos_btn.setEnabled(True)
         self._controls_widget.setVisible(False)
-        self._status_label.setText("Finished.")
         self._routine = None
         self._refresh_position_display()
         self._refresh_calibration_info()
+        if self._last_output_path is not None:
+            self._results_widget.show_result(self._last_output_path, self._find_result_image(self._last_output_path))
 
     def _poll_routine_state(self) -> None:
         if self._routine is None or not self._routine.is_running:

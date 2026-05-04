@@ -62,7 +62,7 @@ import cv2
 from common.app_context import get_app_context
 from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
-from motion.models import Position
+from motion.models import Position, fraction_to_stage_delta
 from motion.routines.automation_routine import AutomationRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.autofocus.autofocus_routine import Autofocus
@@ -186,6 +186,25 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         """Report progress as a 0–100 percentage rather than a step count."""
         clamped = max(0, min(100, int(round(percent))))
         self._set_status(activity, clamped, 100)
+
+    def _compute_overlap_frac(self, mv: object, reference_frame: object) -> float:
+        """Compute the image overlap fraction from calibration and step size.
+
+        The overlap is 1 - (step_nm / frame_height_nm), where frame_height_nm
+        is derived from the camera calibration.  Falls back to the value stored
+        in motion settings when calibration is unavailable.
+        """
+        motion_settings = self.motion.settings
+        if mv.is_calibrated:
+            h, w = reference_frame.shape[:2]
+            _, frame_height_nm = fraction_to_stage_delta(mv.calibration, 1.0, "y", w, h)
+            if frame_height_nm > 0:
+                overlap = 1.0 - (self._step_nm / frame_height_nm)
+                overlap = max(0.0, min(0.99, overlap))
+                motion_settings.overlap_frac = overlap
+                self.motion._controller._config_manager.save(motion_settings)
+                return overlap
+        return motion_settings.overlap_frac
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -441,6 +460,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         stitch_routine = StitchAndMeasureRoutine(
             settings=post_processing.settings,
             input_folder=str(self._output_path),
+            overlap_frac=self._compute_overlap_frac(mv, initial_frame),
         )
         post_processing.start_routine(stitch_routine)
 

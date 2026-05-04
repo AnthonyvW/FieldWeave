@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QWidget,
-    QHBoxLayout,
-    QGroupBox,
-    QPushButton,
-    QLineEdit,
     QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
     QMessageBox,
+    QPushButton,
+    QWidget,
 )
 
 
@@ -129,3 +134,89 @@ class OutputFolderWidget(QWidget):
         )
         if folder:
             self._edit.setText(folder)
+
+
+def _open_path(path: str) -> None:
+    if sys.platform.startswith("linux"):
+        subprocess.Popen(["xdg-open", path])
+    else:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
+class ViewImageWidget(QWidget):
+    """
+    A reusable group box with an "Open Folder" button and a configurable
+    "View Image" button. Hidden by default; call :py:meth:`show_result` to
+    reveal it after a routine completes.
+
+    Parameters
+    ----------
+    view_label:
+        Text shown on the view-image button (e.g. ``"View Stacked Image"``).
+    """
+
+    def __init__(
+        self,
+        view_label: str = "View Image",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._output_folder: str | None = None
+        self._image_path: str | None = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self._open_folder_btn = QPushButton("Open Folder")
+        self._open_folder_btn.setFixedHeight(30)
+        self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
+        layout.addWidget(self._open_folder_btn, 1)
+
+        self._view_image_btn = QPushButton(view_label)
+        self._view_image_btn.setFixedHeight(30)
+        self._view_image_btn.clicked.connect(self._on_view_image_clicked)
+        layout.addWidget(self._view_image_btn, 1)
+
+        self.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def show_result(self, output_folder: str, image_path: str | None = None) -> None:
+        """
+        Reveal the widget after a routine finishes.
+
+        Parameters
+        ----------
+        output_folder:
+            Path to open when "Open Folder" is clicked.
+        image_path:
+            Path to the image file for the view button. When ``None`` or the
+            file does not exist, the view button is hidden.
+        """
+        self._output_folder = output_folder
+        self._image_path = image_path
+        self._view_image_btn.setVisible(
+            image_path is not None and Path(image_path).exists()
+        )
+        self.setVisible(True)
+
+    def hide_result(self) -> None:
+        """Hide the widget and clear stored paths."""
+        self._output_folder = None
+        self._image_path = None
+        self.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _on_open_folder_clicked(self) -> None:
+        if self._output_folder is not None:
+            _open_path(self._output_folder)
+
+    def _on_view_image_clicked(self) -> None:
+        if self._image_path is not None:
+            _open_path(self._image_path)

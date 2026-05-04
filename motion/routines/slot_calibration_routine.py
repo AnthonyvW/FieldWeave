@@ -44,7 +44,7 @@ from typing import Generator
 from common.app_context import get_app_context
 from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
-from motion.models import Position
+from motion.models import Position, fraction_to_stage_delta
 from motion.routines.automation_routine import AutomationRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.red_mark_centering_routine import RedMarkCenteringRoutine
@@ -201,22 +201,19 @@ class SlotCalibrationRoutine(AutomationRoutine):
         _advance("Searching for slot 2 mark")
 
         cal = mv.calibration
-        cal_w = float(cal.image_width)
-        cal_h = float(cal.image_height)
 
-        # Compute one full-frame stage distance along the perpendicular axis.
-        # pixel_to_world_delta gives the stage delta (ticks) to bring the
-        # supplied calibration-space pixel to image centre.  A point at the
-        # edge of the frame is half the frame away from centre, so doubling
-        # that delta gives the full-frame travel distance.  Moving a full
-        # frame ensures the first slot is no longer visible before we begin
-        # searching for the next mark.
-        if perp_axis == "x":
-            edge_delta = cal.pixel_to_world_delta(0.0, cal_h / 2.0)
-            full_frame_nm = int(round(abs(edge_delta[0]) * 10_000 * 2))
+        frame_probe = capture_still_frame(camera_manager, timeout_s=self._capture_timeout_s)
+        if frame_probe is not None:
+            ph, pw = frame_probe.shape[:2]
         else:
-            edge_delta = cal.pixel_to_world_delta(cal_w / 2.0, 0.0)
-            full_frame_nm = int(round(abs(edge_delta[1]) * 10_000 * 2))
+            ph, pw = cal.image_height, cal.image_width
+
+        if perp_axis == "x":
+            full_frame_nm, _ = fraction_to_stage_delta(cal, 1.0, "x", pw, ph)
+        else:
+            _, full_frame_nm = fraction_to_stage_delta(cal, 1.0, "y", pw, ph)
+
+        full_frame_nm = abs(full_frame_nm)
 
         if full_frame_nm == 0:
             warning("[SlotCalibration] Full-frame distance computed as zero — using 2 mm fallback")

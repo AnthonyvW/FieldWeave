@@ -68,7 +68,8 @@ def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str, int]]:
         if img is None:
             warning(f"StitchAndMeasureRoutine: could not load {img_path}, skipping")
             continue
-        debug(f"  + y={y_pos:>12}  {filename}")
+        if DEBUG:
+            debug(f"  + y={y_pos:>12}  {filename}")
         images.append((img, filename, y_pos))
     return images
 
@@ -151,7 +152,8 @@ def _refine_offset_with_template(
 
         result = cv2.matchTemplate(binary_b, template, cv2.TM_CCOEFF_NORMED)
         _, score, _, max_loc = cv2.minMaxLoc(result)
-        debug(f"    blob y0={y0} size=({y1-y0}h,{x1-x0}w) score={score:.3f} max_loc={max_loc}")
+        if DEBUG:
+            debug(f"    blob y0={y0} size=({y1-y0}h,{x1-x0}w) score={score:.3f} max_loc={max_loc}")
         if score < 0.5:
             continue
 
@@ -165,8 +167,8 @@ def _refine_offset_with_template(
         y_displacements.append(displacement)
         matched_blobs_a.append((x0, y0, x1 - x0, y1 - y0))
         matched_blobs_b.append((max_loc[0], match_y_in_b, x1 - x0, y1 - y0))
-
-    debug(f"  template match: {len(y_displacements)} blob(s) matched, displacements={y_displacements}")
+    if DEBUG:
+        debug(f"  template match: {len(y_displacements)} blob(s) matched, displacements={y_displacements}")
 
     if mask_debug_folder is not None:
         def _make_overlay(img_bgr: cv2.Mat, binary: np.ndarray, boxes: list[tuple[int, int, int, int]], cy: int, cx: int) -> cv2.Mat:
@@ -198,7 +200,8 @@ def _refine_offset_with_template(
         return nominal_offset
 
     refined = int(np.median(y_displacements))
-    debug(f"  template match: nominal={nominal_offset}px  refined={refined}px")
+    if DEBUG:
+        debug(f"  template match: nominal={nominal_offset}px  refined={refined}px")
     if refined <= 0:
         debug(f"  template match: refined offset non-positive, falling back to nominal={nominal_offset}px")
         return nominal_offset
@@ -242,36 +245,14 @@ def _save_overlap_debug(
     cv2.imwrite(os.path.join(mask_debug_folder, f"pair_{pair_index:02d}_overlap.png"), canvas)
 
 
-def _stitch_images(
+def _composite_images(
     images: list[tuple[cv2.Mat, str, int]],
-    overlap_frac: float,
-    mask_debug_folder: str | None = None,
-) -> cv2.Mat | None:
-    debug(f"_stitch_images: stitching {len(images)} images with {overlap_frac:.1%} overlap")
-
+    refined_offsets: list[int],
+) -> cv2.Mat:
     h_a, w_a = images[0][0].shape[:2]
-    overlap_px = round(h_a * overlap_frac)
-    nominal_offset = h_a - overlap_px
-    debug(f"_stitch_images: image shape=({h_a}h, {w_a}w)  overlap={overlap_px}px  nominal offset={nominal_offset}px")
-
-    refined_offsets: list[int] = []
-    for i in range(len(images) - 1):
-        img_a, _, _ = images[i]
-        img_b, _, _ = images[i + 1]
-        refined = _refine_offset_with_template(
-            img_a, img_b, nominal_offset,
-            mask_debug_folder=mask_debug_folder,
-            pair_index=i,
-        )
-        refined_offsets.append(refined)
-        if mask_debug_folder is not None:
-            _save_overlap_debug(img_a, img_b, refined, i, mask_debug_folder)
-
-    debug(f"_stitch_images: refined offsets={refined_offsets}")
-
     total_h = h_a + sum(refined_offsets)
     canvas_w = max(img.shape[1] for img, _, _ in images)
-    debug(f"_stitch_images: canvas=({total_h}h, {canvas_w}w)")
+    debug(f"_composite_images: canvas=({total_h}h, {canvas_w}w)")
     canvas = np.zeros((total_h, canvas_w, 3), dtype=np.uint8)
 
     img_a, _, _ = images[0]
@@ -296,18 +277,50 @@ def _stitch_images(
             b_src_rows = b_end_canvas - b_start_canvas
 
             canvas[b_start_canvas + seam_in_b:b_end_canvas, :w_b] = img_b[seam_in_b:seam_in_b + (b_src_rows - seam_in_b), :]
-            debug(f"  pair {i}: offset={offset}px overlap={overlap_rows}px seam at canvas row {seam_canvas} (b row {seam_in_b})")
+            if DEBUG:
+                debug(f"  pair {i}: offset={offset}px overlap={overlap_rows}px seam at canvas row {seam_canvas} (b row {seam_in_b})")
         else:
             b_start_canvas = cum_y + offset
             b_end_canvas = min(b_start_canvas + h_b, total_h)
             src_rows = b_end_canvas - b_start_canvas
             canvas[b_start_canvas:b_end_canvas, :w_b] = img_b[:src_rows, :]
-            debug(f"  pair {i}: offset={offset}px no overlap, placing directly")
+            if DEBUG:
+                debug(f"  pair {i}: offset={offset}px no overlap, placing directly")
 
         cum_y += offset
 
-    debug("_stitch_images: stitching complete")
     return canvas
+
+
+def _stitch_images(
+    images: list[tuple[cv2.Mat, str, int]],
+    overlap_frac: float,
+    mask_debug_folder: str | None = None,
+) -> tuple[cv2.Mat, list[int]] | None:
+    debug(f"_stitch_images: stitching {len(images)} images with {overlap_frac:.1%} overlap")
+
+    h_a, w_a = images[0][0].shape[:2]
+    overlap_px = round(h_a * overlap_frac)
+    nominal_offset = h_a - overlap_px
+    debug(f"_stitch_images: image shape=({h_a}h, {w_a}w)  overlap={overlap_px}px  nominal offset={nominal_offset}px")
+
+    refined_offsets: list[int] = []
+    for i in range(len(images) - 1):
+        img_a, _, _ = images[i]
+        img_b, _, _ = images[i + 1]
+        refined = _refine_offset_with_template(
+            img_a, img_b, nominal_offset,
+            mask_debug_folder=mask_debug_folder,
+            pair_index=i,
+        )
+        refined_offsets.append(refined)
+        if mask_debug_folder is not None:
+            _save_overlap_debug(img_a, img_b, refined, i, mask_debug_folder)
+
+    debug(f"_stitch_images: refined offsets={refined_offsets}")
+    canvas = _composite_images(images, refined_offsets)
+    debug("_stitch_images: stitching complete")
+    return canvas, refined_offsets
 
 
 def _crop_black_borders(image: cv2.Mat) -> cv2.Mat:
@@ -534,6 +547,64 @@ def _find_outlier_gaps(tick_centers: list[int]) -> list[tuple[int, int, float]]:
     ]
 
 
+def _restitch_with_corrected_offsets(
+    images: list[tuple[cv2.Mat, str, int]],
+    refined_offsets: list[int],
+    ticks: list[int],
+    outlier_gaps: list[tuple[int, int, float]],
+    tick_count: int,
+) -> cv2.Mat:
+    """Restitch *images* with corrected offsets to fix outlier tick spacing.
+
+    The scale bar is vertical so tick positions are Y coordinates in the panorama.
+    The visible seam between image i and image i+1 sits at the midpoint of their
+    overlap region.  For each outlier gap, the seam that falls between its two tick
+    Y positions is identified and its offset is adjusted.
+
+    When tick_count > EXPECTED_TICK_COUNT, a spuriously small gap means two ticks
+    were produced by a misaligned seam — the gap is closed entirely by absorbing the
+    full actual_gap into the offset.  Otherwise the offset is adjusted by the
+    difference between the actual gap and the median so the spacing matches.
+    """
+    gaps = [ticks[i + 1] - ticks[i] for i in range(len(ticks) - 1)]
+    median_gap = int(round(float(np.median(gaps))))
+    too_many_ticks = tick_count > EXPECTED_TICK_COUNT
+
+    seam_y_positions: list[int] = []
+    cum_y = 0
+    for i, offset in enumerate(refined_offsets):
+        h_prev = images[i][0].shape[0]
+        overlap_rows = h_prev - offset
+        seam_y = cum_y + offset + max(0, overlap_rows) // 2
+        seam_y_positions.append(seam_y)
+        cum_y += offset
+
+    corrected_offsets = list(refined_offsets)
+    for left_i, right_i, _ in outlier_gaps:
+        left_tick = ticks[left_i]
+        right_tick = ticks[right_i]
+        actual_gap = right_tick - left_tick
+        delta = actual_gap if too_many_ticks else actual_gap - median_gap
+
+        seam_idx = next(
+            (j for j, seam_y in enumerate(seam_y_positions) if left_tick <= seam_y <= right_tick),
+            None,
+        )
+        if seam_idx is None:
+            debug(f"_restitch_with_corrected_offsets: no seam found between ticks {left_i} (y={left_tick}) and {right_i} (y={right_tick}), skipping")
+            continue
+
+        corrected_offsets[seam_idx] -= delta
+        debug(
+            f"_restitch_with_corrected_offsets: gap #{left_i}-#{right_i} "
+            f"actual={actual_gap}px median={median_gap}px delta={delta}px "
+            f"({'close gap entirely' if too_many_ticks else 'adjust to median'}) "
+            f"-> offset[{seam_idx}] {refined_offsets[seam_idx]} -> {corrected_offsets[seam_idx]}"
+        )
+
+    return _composite_images(images, corrected_offsets)
+
+
 def _extract_dpi(image: cv2.Mat, scale_mm: float, tick_min_length: int) -> tuple[float, int, list[tuple[int, int, float]]] | None:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     binary = _binarize(gray)
@@ -653,11 +724,13 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         self,
         settings: FieldWeaveSettings,
         input_folder: str,
+        overlap_frac: float,
         *,
         save_dpi: bool = True,
     ) -> None:
         super().__init__(settings)
         self.input_folder = input_folder
+        self._overlap_frac = overlap_frac
         self._save_dpi = save_dpi
 
     def steps(self) -> Generator[None, None, None]:
@@ -697,12 +770,13 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         # ----------------------------------------------------------------
         self._set_status("Stitching images", 1, 4)
 
-        stitched = _stitch_images(images, sm.overlap_frac, mask_debug_folder=None)
-        if stitched is None:
+        stitch_result = _stitch_images(images, self._overlap_frac, mask_debug_folder=None)
+        if stitch_result is None:
             raise RuntimeError(
                 "Stitching failed — ensure the overlap value is correct and "
                 "that Y positions in filenames reflect the correct scan order"
             )
+        stitched, refined_offsets = stitch_result
 
         yield
 
@@ -748,6 +822,16 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         outlier_gaps: list[tuple[int, int, float]] = []
         if dpi_result is not None:
             dpi, tick_count, outlier_gaps = dpi_result
+            if outlier_gaps:
+                gray = cv2.cvtColor(stitched, cv2.COLOR_BGR2GRAY)
+                binary = _binarize(gray)
+                axis, baseline_index = _find_bar_axis(binary)
+                ticks = _find_ticks(binary, axis, baseline_index, tick_min_length=sm.tick_min_length)
+                corrected = _restitch_with_corrected_offsets(images, refined_offsets, ticks, outlier_gaps, tick_count)
+                corrected_result = _extract_dpi(corrected, sm.scale_mm, sm.tick_min_length)
+                if corrected_result is not None:
+                    stitched = corrected
+                    dpi, tick_count, outlier_gaps = corrected_result
         if dpi is not None and self._save_dpi:
             mv = ctx.machine_vision
             mv.settings.dpi = dpi
@@ -799,8 +883,8 @@ if __name__ == "__main__":
         "--overlap",
         type=float,
         required=True,
-        metavar="PCT",
-        help="Percentage of image height that consecutive images overlap (e.g. 70 for 70%%)",
+        metavar="FRAC",
+        help="Fraction of image height that consecutive images overlap (e.g. 0.7 for 70%%)",
     )
     parser.add_argument("--save-masks", action="store_true", help="Save per-pair debug images to a masks/ subfolder showing binary masks overlaid on source images with matched blob bounding boxes")
     parser.add_argument("--debug", action="store_true", help="Overlay detected points and lines on the debug image")
@@ -809,12 +893,38 @@ if __name__ == "__main__":
     DEBUG = args.debug
 
     settings = FieldWeaveSettings()
-    settings.post_processing.stitch_and_measure.overlap_frac = args.overlap / 100.0
 
     mask_debug_folder: str | None = None
     if args.save_masks:
         mask_debug_folder = os.path.join(args.folder, "masks")
         os.makedirs(mask_debug_folder, exist_ok=True)
+
+    def _apply_gap_correction(
+        images: list[tuple[cv2.Mat, str, int]],
+        refined_offsets: list[int],
+        dpi: float,
+        tick_count: int,
+        ticks: list[int],
+        outlier_gaps: list[tuple[int, int, float]],
+        base_output_path: str,
+        scale_mm: float,
+        tick_min_length: int,
+    ) -> None:
+        corrected = _restitch_with_corrected_offsets(images, refined_offsets, ticks, outlier_gaps, tick_count)
+        corrected_result = _extract_dpi(corrected, scale_mm, tick_min_length)
+        stem, ext = os.path.splitext(base_output_path)
+        corrected_path = f"{stem}_corrected{ext}"
+        cv2.imwrite(corrected_path, corrected)
+        print(f"DPI (original):  {dpi:.2f}")
+        if corrected_result is not None:
+            corrected_dpi, corrected_tick_count, corrected_outlier_gaps = corrected_result
+            print(f"DPI (corrected): {corrected_dpi:.2f}")
+            status = "PASS" if corrected_tick_count == EXPECTED_TICK_COUNT else "FAIL"
+            print(f"Ticks (corrected): {corrected_tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
+            if corrected_outlier_gaps:
+                gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in corrected_outlier_gaps)
+                print(f"Spacing FAIL (corrected): unusual gaps at {gaps_str}")
+        print(f"Corrected: {corrected_path}")
 
     if mask_debug_folder is not None:
         subfolders = [e.path for e in os.scandir(args.folder) if e.is_dir() and os.path.basename(e.path) != "masks"]
@@ -823,10 +933,11 @@ if __name__ == "__main__":
             sys.exit(1)
         images = _collect_images(subfolders[0])
         sm = settings.post_processing.stitch_and_measure
-        stitched = _stitch_images(images, sm.overlap_frac, mask_debug_folder=mask_debug_folder)
-        if stitched is None:
+        stitch_result = _stitch_images(images, args.overlap, mask_debug_folder=mask_debug_folder)
+        if stitch_result is None:
             print("Stitching failed.", file=sys.stderr)
             sys.exit(1)
+        stitched, refined_offsets = stitch_result
         output_path = os.path.join(args.folder, "stitched.jpg")
         cv2.imwrite(output_path, stitched)
         h, w = stitched.shape[:2]
@@ -836,16 +947,23 @@ if __name__ == "__main__":
         dpi_result = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
         if dpi_result is not None:
             dpi, tick_count, outlier_gaps = dpi_result
-            print(f"DPI:    {dpi:.2f}")
             status = "PASS" if tick_count == EXPECTED_TICK_COUNT else "FAIL"
             print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
             if outlier_gaps:
                 gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
                 print(f"Spacing FAIL: unusual gaps at {gaps_str}")
+                gray = cv2.cvtColor(stitched, cv2.COLOR_BGR2GRAY)
+                binary = _binarize(gray)
+                axis, baseline_index = _find_bar_axis(binary)
+                ticks = _find_ticks(binary, axis, baseline_index, tick_min_length=sm.tick_min_length)
+                _apply_gap_correction(images, refined_offsets, dpi, tick_count, ticks, outlier_gaps, output_path, sm.scale_mm, sm.tick_min_length)
+            else:
+                print(f"DPI:    {dpi:.2f}")
     else:
         routine = StitchAndMeasureRoutine(
             settings=settings,
             input_folder=args.folder,
+            overlap_frac=args.overlap,
             save_dpi=False,
         )
         routine.start()
@@ -860,8 +978,6 @@ if __name__ == "__main__":
         print(f"Saved:  {output_path}")
         print(f"Size:   {result.get('image_width')}w x {result.get('image_height')}h px")
         dpi = result.get("dpi")
-        if dpi is not None:
-            print(f"DPI:    {dpi:.2f}")
         tick_count = result.get("tick_count")
         if tick_count is not None:
             status = "PASS" if result.get("tick_count_valid") else "FAIL"
@@ -870,6 +986,8 @@ if __name__ == "__main__":
         if outlier_gaps:
             gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
             print(f"Spacing FAIL: unusual gaps at {gaps_str}")
+        if dpi is not None:
+            print(f"DPI:    {dpi:.2f}")
 
     if DEBUG:
         sm = FieldWeaveSettings().post_processing.stitch_and_measure

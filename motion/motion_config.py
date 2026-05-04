@@ -112,6 +112,11 @@ class MotionSystemSettings:
     # 0 means stay at the homed position (no post-home move).
     starting_height_nm: int = 0
 
+    # Fraction of the image height that consecutive captured frames overlap.
+    # Set by the inspection calibration routine based on the camera field of view.
+    # Used by StitchAndMeasureRoutine to compute nominal stitch offsets.
+    overlap_frac: float = 0.5
+
     # Navigation widget — jog-step presets (nanometres)
     # Four buttons shown in the navigation widget; default: 0.04, 0.4, 2.0, 10.0 mm.
     step_presets: list[int] = field(
@@ -147,6 +152,8 @@ class MotionSystemSettings:
             raise ValueError("all step_presets values must be positive")
         if self.starting_height_nm < 0:
             raise ValueError("starting_height_nm must be non-negative")
+        if not (0.0 < self.overlap_frac < 1.0):
+            raise ValueError("overlap_frac must be between 0 and 1 (exclusive)")
 
 
 class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):

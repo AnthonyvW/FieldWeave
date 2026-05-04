@@ -43,7 +43,7 @@ from typing import Generator
 from common.app_context import get_app_context
 from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
-from motion.models import Position
+from motion.models import Position, pixels_to_stage_delta
 from motion.routines.automation_routine import AutomationRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from machine_vision.algorithms.red_mark_detection import RedMarkDetectionResult
@@ -196,32 +196,25 @@ class RedMarkCenteringRoutine(AutomationRoutine):
         # the correct stage distance without any additional calibration call
         # (which would wrongly compute "bring this other pixel to centre").
         cal = mv.calibration
-        cal_w = float(cal.image_width)
-        cal_h = float(cal.image_height)
-        sensor_w = float(w)
-        sensor_h = float(h)
 
-        def _to_cal(sensor_x: float, sensor_y: float) -> tuple[float, float]:
-            return sensor_x * (cal_w / sensor_w), sensor_y * (cal_h / sensor_h)
+        def _to_stage(sensor_x: float, sensor_y: float) -> tuple[int, int]:
+            return pixels_to_stage_delta(cal, sensor_x, sensor_y, w, h)
 
         if result.line_orientation == "vertical":
-            final_cal_x, final_cal_y = _to_cal(mark_x, img_cy)
+            final_dx, final_dy = _to_stage(mark_x, img_cy)
         else:
-            final_cal_x, final_cal_y = _to_cal(img_cx, mark_y)
+            final_dx, final_dy = _to_stage(img_cx, mark_y)
 
-        final_delta = cal.pixel_to_world_delta(final_cal_x, final_cal_y)
-
-        _NM_PER_TICK = 10_000
-
-        # Scale final_delta by the fraction of pixel_offset_to_mark that the
+        # Scale final delta by the fraction of pixel_offset_to_mark that the
         # away-move covers.  This is exact regardless of axis coupling in M_inv.
         away_ratio = away_pixel / pixel_offset_to_mark if pixel_offset_to_mark != 0 else 0.0
-        away_delta = (final_delta[0] * away_ratio, final_delta[1] * away_ratio)
+        away_dx = int(round(final_dx * away_ratio))
+        away_dy = int(round(final_dy * away_ratio))
 
         info(
             f"[RedMarkCentering] pixel_offset={pixel_offset_to_mark:.1f}"
             f"  away_pixel={away_pixel:.1f}  away_ratio={away_ratio:.3f}"
-            f"  final_delta=({final_delta[0]:.2f}, {final_delta[1]:.2f}) ticks"
+            f"  final_delta=({final_dx}, {final_dy}) nm"
         )
 
         # ------------------------------------------------------------------
@@ -232,8 +225,8 @@ class RedMarkCenteringRoutine(AutomationRoutine):
 
         current = self.motion.get_position()
         away_target = Position(
-            x=current.x + int(round(away_delta[0] * _NM_PER_TICK)),
-            y=current.y + int(round(away_delta[1] * _NM_PER_TICK)),
+            x=current.x + away_dx,
+            y=current.y + away_dy,
             z=current.z,
         )
 
@@ -282,21 +275,22 @@ class RedMarkCenteringRoutine(AutomationRoutine):
             f"[RedMarkCentering] Post-away mark at ({mark_x2:.1f}, {mark_y2:.1f})"
         )
 
-        if result2.line_orientation == "vertical":
-            final_cal_x2, final_cal_y2 = _to_cal(mark_x2, img_cy2)
-        else:
-            final_cal_x2, final_cal_y2 = _to_cal(img_cx2, mark_y2)
+        def _to_stage2(sensor_x: float, sensor_y: float) -> tuple[int, int]:
+            return pixels_to_stage_delta(cal, sensor_x, sensor_y, w2, h2)
 
-        final_delta2 = cal.pixel_to_world_delta(final_cal_x2, final_cal_y2)
+        if result2.line_orientation == "vertical":
+            final_dx2, final_dy2 = _to_stage2(mark_x2, img_cy2)
+        else:
+            final_dx2, final_dy2 = _to_stage2(img_cx2, mark_y2)
 
         info(
-            f"[RedMarkCentering] Recomputed final_delta=({final_delta2[0]:.2f}, {final_delta2[1]:.2f}) ticks"
+            f"[RedMarkCentering] Recomputed final_delta=({final_dx2}, {final_dy2}) nm"
         )
 
         current2 = self.motion.get_position()
         final_target = Position(
-            x=current2.x + int(round(final_delta2[0] * _NM_PER_TICK)),
-            y=current2.y + int(round(final_delta2[1] * _NM_PER_TICK)),
+            x=current2.x + final_dx2,
+            y=current2.y + final_dy2,
             z=current2.z,
         )
 
