@@ -839,12 +839,16 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         save_dpi: bool = True,
         standalone: bool = False,
         overlap_frac: float | None = None,
+        mask_debug_folder: str | None = None,
+        steps_folder: str | None = None,
     ) -> None:
         super().__init__(settings)
         self.input_folder = input_folder
         self._save_dpi = save_dpi
         self._standalone = standalone
         self._overlap_frac = overlap_frac
+        self._mask_debug_folder = mask_debug_folder
+        self._steps_folder = steps_folder
 
     def steps(self) -> Generator[None, None, None]:
         sm = self.settings.post_processing.stitch_and_measure
@@ -893,7 +897,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         # ----------------------------------------------------------------
         self._set_status("Stitching images", 1, 4)
 
-        stitch_result = _stitch_images(images, overlap_frac, mask_debug_folder=None)
+        stitch_result = _stitch_images(images, overlap_frac, mask_debug_folder=self._mask_debug_folder, steps_folder=self._steps_folder)
         if stitch_result is None:
             raise RuntimeError(
                 "Stitching failed — ensure the overlap value is correct and "
@@ -965,9 +969,10 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
             qa_warnings.append(f"unusual gap between tick #{left_i} and #{right_i} ({gap:.0f}px)")
         qa_pass = tick_count == EXPECTED_TICK_COUNT and len(outlier_gaps) == 0 if dpi is not None else False
 
-        if dpi is not None and self._save_dpi:
+        if self._save_dpi:
             lines: list[str] = [
-                f"{dpi:.2f}",
+                f"{dpi:.2f}" if dpi is not None else "0.00",
+                f"{overlap_frac:.4f}",
                 "PASS" if qa_pass else "FAIL",
                 f"{tick_count if tick_count is not None else 0}/{EXPECTED_TICK_COUNT} ticks",
             ]
@@ -1000,6 +1005,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
             output_path=output_path,
             debug_path=debug_path,
             dpi=dpi,
+            overlap_frac=overlap_frac,
             tick_count=tick_count,
             tick_count_valid=tick_count == EXPECTED_TICK_COUNT if tick_count is not None else None,
             tick_spacing_valid=len(outlier_gaps) == 0,
@@ -1057,96 +1063,39 @@ if __name__ == "__main__":
         steps_folder = os.path.join(args.folder, "steps")
         os.makedirs(steps_folder, exist_ok=True)
 
-    def _apply_gap_correction(
-        images: list[tuple[cv2.Mat, str, int]],
-        refined_offsets: list[int],
-        dpi: float,
-        tick_count: int,
-        ticks: list[int],
-        outlier_gaps: list[tuple[int, int, float]],
-        base_output_path: str,
-        scale_mm: float,
-        tick_min_length: int,
-    ) -> None:
-        corrected = _restitch_with_corrected_offsets(images, refined_offsets, ticks, outlier_gaps, tick_count)
-        corrected_result = _extract_dpi(corrected, scale_mm, tick_min_length)
-        stem, ext = os.path.splitext(base_output_path)
-        corrected_path = f"{stem}_corrected{ext}"
-        cv2.imwrite(corrected_path, corrected)
-        print(f"DPI (original):  {dpi:.2f}")
-        if corrected_result is not None:
-            corrected_dpi, corrected_tick_count, corrected_outlier_gaps = corrected_result
-            print(f"DPI (corrected): {corrected_dpi:.2f}")
-            status = "PASS" if corrected_tick_count == EXPECTED_TICK_COUNT else "FAIL"
-            print(f"Ticks (corrected): {corrected_tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
-            if corrected_outlier_gaps:
-                gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in corrected_outlier_gaps)
-                print(f"Spacing FAIL (corrected): unusual gaps at {gaps_str}")
-        print(f"Corrected: {corrected_path}")
+    routine = StitchAndMeasureRoutine(
+        settings=settings,
+        input_folder=args.folder,
+        save_dpi=args.save_dpi,
+        standalone=True,
+        overlap_frac=args.overlap,
+        mask_debug_folder=mask_debug_folder,
+        steps_folder=steps_folder,
+    )
+    routine.start()
+    routine.wait()
 
+    result = routine.result
+    if result is None or not result.success:
+        print("Stitching failed.", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = result.get("output_path")
+    print(f"Saved:  {output_path}")
+    print(f"Size:   {result.get('image_width')}w x {result.get('image_height')}h px")
     if mask_debug_folder is not None:
-        subfolders = [e.path for e in os.scandir(args.folder) if e.is_dir() and os.path.basename(e.path) not in {"masks", "steps"}]
-        if len(subfolders) != 1:
-            print("Expected exactly one image subfolder.", file=sys.stderr)
-            sys.exit(1)
-        images = _collect_images(subfolders[0])
-        sm = settings.post_processing.stitch_and_measure
-        stitch_result = _stitch_images(images, args.overlap, mask_debug_folder=mask_debug_folder, steps_folder=steps_folder)
-        if stitch_result is None:
-            print("Stitching failed.", file=sys.stderr)
-            sys.exit(1)
-        stitched, refined_offsets = stitch_result
-        output_path = os.path.join(args.folder, "stitched.jpg")
-        cv2.imwrite(output_path, stitched)
-        h, w = stitched.shape[:2]
-        print(f"Saved:  {output_path}")
-        print(f"Size:   {w}w x {h}h px")
         print(f"Masks:  {mask_debug_folder}")
-        dpi_result = _extract_dpi(stitched, sm.scale_mm, sm.tick_min_length)
-        if dpi_result is not None:
-            dpi, tick_count, outlier_gaps = dpi_result
-            status = "PASS" if tick_count == EXPECTED_TICK_COUNT else "FAIL"
-            print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
-            if outlier_gaps:
-                gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
-                print(f"Spacing FAIL: unusual gaps at {gaps_str}")
-                gray = cv2.cvtColor(stitched, cv2.COLOR_BGR2GRAY)
-                binary = _binarize(gray)
-                axis, baseline_index = _find_bar_axis(binary)
-                ticks = _find_ticks(binary, axis, baseline_index, tick_min_length=sm.tick_min_length)
-                _apply_gap_correction(images, refined_offsets, dpi, tick_count, ticks, outlier_gaps, output_path, sm.scale_mm, sm.tick_min_length)
-            else:
-                print(f"DPI:    {dpi:.2f}")
-    else:
-        routine = StitchAndMeasureRoutine(
-            settings=settings,
-            input_folder=args.folder,
-            save_dpi=args.save_dpi,
-            standalone=True,
-            overlap_frac=args.overlap,
-        )
-        routine.start()
-        routine.wait()
-
-        result = routine.result
-        if result is None or not result.success:
-            print("Stitching failed.", file=sys.stderr)
-            sys.exit(1)
-
-        output_path = result.get("output_path")
-        print(f"Saved:  {output_path}")
-        print(f"Size:   {result.get('image_width')}w x {result.get('image_height')}h px")
-        dpi = result.get("dpi")
-        tick_count = result.get("tick_count")
-        if tick_count is not None:
-            status = "PASS" if result.get("tick_count_valid") else "FAIL"
-            print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
-        outlier_gaps = result.get("tick_outlier_gaps") or []
-        if outlier_gaps:
-            gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
-            print(f"Spacing FAIL: unusual gaps at {gaps_str}")
-        if dpi is not None:
-            print(f"DPI:    {dpi:.2f}")
+    dpi = result.get("dpi")
+    tick_count = result.get("tick_count")
+    if tick_count is not None:
+        status = "PASS" if result.get("tick_count_valid") else "FAIL"
+        print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
+    outlier_gaps = result.get("tick_outlier_gaps") or []
+    if outlier_gaps:
+        gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
+        print(f"Spacing FAIL: unusual gaps at {gaps_str}")
+    if dpi is not None:
+        print(f"DPI:    {dpi:.2f}")
 
     if DEBUG:
         sm = FieldWeaveSettings().post_processing.stitch_and_measure
