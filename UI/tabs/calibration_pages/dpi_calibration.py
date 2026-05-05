@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
@@ -544,22 +544,13 @@ class DpiCalibrationStepsWidget(QWidget):
         saved = self._get_saved_position()
         start_position = Position(x=saved[0], y=saved[1], z=saved[2]) if saved is not None else None
         output_path = str(Path("output") / datetime.now().strftime("%Y%m%d_%H%M%S"))
-        try:
-            self._routine = InspectionCalibrationScaleRoutine(
-                motion=motion,
-                output_path=output_path,
-                start_position=start_position,
-            )
-            self._routine.on_state_changed = self._on_routine_state_changed
-            motion.start_routine(self._routine)
-        except Exception as exc:
-            error(f"DpiCalibration: failed to start routine — {exc}")
-            self._set_status(f"Failed to start: {exc}")
-            return
-
+        self._routine = InspectionCalibrationScaleRoutine(
+            motion=motion,
+            output_path=output_path,
+            start_position=start_position,
+        )
+        motion.start_routine(self._routine)
         self._output_folder = output_path
-
-        self._latest_activity: str = ""
         self._start_capture_btn.setEnabled(False)
         self._stop_capture_btn.setVisible(True)
         self._prev_btn.setEnabled(False)
@@ -572,40 +563,26 @@ class DpiCalibrationStepsWidget(QWidget):
             self._routine.stop()
         self._set_status("Stopping…")
 
-    def _on_routine_state_changed(
-        self,
-        job_name: str,
-        activity: str,
-        progress_current: int,
-        progress_total: int,
-        eta_seconds: int,
-    ) -> None:
-        self._latest_activity = activity
-
     def _poll_capture_state(self) -> None:
         if self._routine is None or not self._routine.is_running:
-            final_activity = getattr(self, "_latest_activity", "")
             self._poll_timer.stop()
+            routine = self._routine
             self._routine = None
-
             self._start_capture_btn.setEnabled(True)
             self._stop_capture_btn.setVisible(False)
             self._prev_btn.setEnabled(self._current_step > 0)
-
-            succeeded = get_app_context().machine_vision.settings.dpi is not None
-
-            if succeeded:
+            result = routine.result if routine is not None else None
+            if result is not None and result.success:
                 self._capture_complete = True
-                mv = get_app_context().machine_vision
-                mv.settings.inspect_calibration.last_calibrated = datetime.now(tz=timezone.utc).isoformat()
-                mv.save_settings()
+                get_app_context().machine_vision.notify_settings_changed()
                 self._next_step()
             else:
-                if final_activity:
-                    self._set_status(final_activity)
+                activity = routine.activity if routine is not None else ""
+                if activity:
+                    self._set_status(activity)
             return
 
-        activity = getattr(self, "_latest_activity", "")
+        activity = self._routine.activity
         if activity:
             prog = self._routine.progress_current
             total = self._routine.progress_total

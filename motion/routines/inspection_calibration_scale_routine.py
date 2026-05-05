@@ -362,12 +362,29 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         # Step 4: Walk the bar
         # ------------------------------------------------------------------
 
+        _MAX_TRAVEL_NM = 10 * _NM_PER_MM
+
+        walk_origin = self.motion.get_position()
+        walk_origin_axis_nm = walk_origin.x if initial_result.axis == "horizontal" else walk_origin.y
+
         step = 0
         result = initial_result
 
         while step < self._max_steps:
             if self._check_stop():
                 return
+
+            current_pos = self.motion.get_position()
+            current_axis_nm = current_pos.x if initial_result.axis == "horizontal" else current_pos.y
+            next_axis_nm = current_axis_nm + direction * step_nm
+            travelled_nm = abs(next_axis_nm - walk_origin_axis_nm)
+
+            if travelled_nm > _MAX_TRAVEL_NM:
+                info(
+                    f"[CalibrationScale] Next move would exceed 10 mm travel limit"
+                    f" ({travelled_nm / _NM_PER_MM:.4f} mm from origin) — stopping"
+                )
+                break
 
             step += 1
             imaging_fraction = min(step / max(1, self._max_steps), 1.0)
@@ -377,19 +394,10 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
                 imaging_percent,
             )
 
-            current_pos = self.motion.get_position()
             if initial_result.axis == "horizontal":
-                target = Position(
-                    x=current_pos.x + direction * step_nm,
-                    y=current_pos.y,
-                    z=current_pos.z,
-                )
+                target = Position(x=next_axis_nm, y=current_pos.y, z=current_pos.z)
             else:
-                target = Position(
-                    x=current_pos.x,
-                    y=current_pos.y + direction * step_nm,
-                    z=current_pos.z,
-                )
+                target = Position(x=current_pos.x, y=next_axis_nm, z=current_pos.z)
 
             info(
                 f"[CalibrationScale] Step {step}: moving to"
@@ -501,7 +509,6 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
                 datetime.now(timezone.utc).isoformat()
             )
             mv.save_settings()
-            mv.notify_settings_changed()
             self._set_result(success=True, **stitch_result.data)
 
         yield
