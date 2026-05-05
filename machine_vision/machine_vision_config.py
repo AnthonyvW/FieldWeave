@@ -620,21 +620,19 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
     """
     Persistent configuration manager for machine-vision settings.
 
-    Saved to ``./config/machine_vision/default_settings.yaml`` by default.
+    Saved to ``./config/machine_vision/settings.yaml`` by default.
     """
 
     def __init__(
         self,
         *,
         root_dir: Union[str, Path] = "./config/machine_vision",
-        default_filename: str = "default_settings.yaml",
         backup_dirname: str = "backups",
         backup_keep: int = 5,
     ) -> None:
         super().__init__(
             config_type="machine_vision_settings",
             root_dir=root_dir,
-            default_filename=default_filename,
             backup_dirname=backup_dirname,
             backup_keep=backup_keep,
         )

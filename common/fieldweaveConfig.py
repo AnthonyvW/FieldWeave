@@ -71,14 +71,12 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
         self,
         *,
         root_dir: Union[str, Path] = "./config/fieldweave",
-        default_filename: str = "default_settings.yaml",
         backup_dirname: str = "backups",
         backup_keep: int = 5,
     ) -> None:
         super().__init__(
             config_type="fieldweave_settings",
             root_dir=root_dir,
-            default_filename=default_filename,
             backup_dirname=backup_dirname,
             backup_keep=backup_keep,
         )

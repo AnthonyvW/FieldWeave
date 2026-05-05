@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from typing import Any
 
-from common.generic_config import ConfigManager, DEFAULT_FILENAME
+from common.generic_config import ConfigManager
 
 # Default jog-step presets in nanometres (0.04 mm, 0.4 mm, 2.0 mm, 10.0 mm).
 _DEFAULT_STEP_PRESETS_NM: list[int] = [40_000, 400_000, 2_000_000, 10_000_000]
@@ -184,14 +184,12 @@ class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
         self,
         *,
         root_dir: str | Path = "./config/motion_system",
-        default_filename: str = DEFAULT_FILENAME,
         backup_dirname: str = "backups",
         backup_keep: int = 5,
     ) -> None:
         super().__init__(
             config_type="motion_system_settings",
             root_dir=root_dir,
-            default_filename=default_filename,
             backup_dirname=backup_dirname,
             backup_keep=backup_keep,
         )

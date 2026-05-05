@@ -13,7 +13,6 @@ from common.logger import info, debug, error, warning
 
 # File/dir names are generic—usable for ANY config
 ACTIVE_FILENAME = "settings.yaml"
-DEFAULT_FILENAME = "default_settings.yaml"
 BACKUP_DIRNAME = "backups"
 BACKUP_KEEP = 5  # keep most recent N backups
 
@@ -37,7 +36,6 @@ class ConfigManager(Generic[S], ABC):
     Directory structure:
         root_dir/
             settings.yaml          # Active settings
-            default_settings.yaml  # Factory defaults
             backups/               # Timestamped backups
                 settings.20250128-143052.yaml
                 settings.20250128-120301.yaml
@@ -78,21 +76,17 @@ class ConfigManager(Generic[S], ABC):
         config_type: str,
         *,
         root_dir: Union[str, Path] = "./config",
-        default_filename: str = DEFAULT_FILENAME,
         backup_dirname: str = BACKUP_DIRNAME,
         backup_keep: int = BACKUP_KEEP,
-        save_defaults_on_init: bool = True,
     ) -> None:
         """
         Initialize the config manager.
         
         Args:
             config_type: Identifier for this config type (e.g., "camera_settings", "fieldweave_settings")
-            root_dir: Directory for config files (settings, defaults, backups)
-            default_filename: Name for the defaults file
+            root_dir: Directory for config files (settings, backups)
             backup_dirname: Name for the backups subdirectory
             backup_keep: Number of backup files to retain (oldest are deleted)
-            save_defaults_on_init: If True, saves default settings on initialization if none exist
         
         Raises:
             ValueError: If config_type is empty
@@ -103,23 +97,10 @@ class ConfigManager(Generic[S], ABC):
         self.config_type = config_type
         self.root_dir = Path(root_dir).resolve()
         self.root_dir.mkdir(parents=True, exist_ok=True)
-        self.default_filename = default_filename
         self.backup_dirname = backup_dirname
         self.backup_keep = backup_keep
         
         debug(f"Initialized ConfigManager for '{config_type}' at {self.root_dir}")
-        
-        # Save default settings if no settings exist and save_defaults_on_init is True
-        if save_defaults_on_init:
-            dp = self.default_path()
-            ap = self.active_path()
-            if not dp.exists() and not ap.exists():
-                try:
-                    default_settings = self.from_dict({})
-                    self.write_defaults(default_settings)
-                    info(f"Saved initial default settings for '{config_type}'")
-                except Exception as e:
-                    warning(f"Failed to save initial default settings: {e}")
     
     @abstractmethod
     def from_dict(self, data: dict[str, Any]) -> S:
@@ -186,10 +167,6 @@ class ConfigManager(Generic[S], ABC):
     def active_path(self) -> Path:
         """Return path to the active settings file."""
         return self.root_dir / ACTIVE_FILENAME
-
-    def default_path(self) -> Path:
-        """Return path to the default settings file."""
-        return self.root_dir / self.default_filename
 
     def backup_dir(self) -> Path:
         """Return path to the backup directory."""
@@ -378,16 +355,15 @@ class ConfigManager(Generic[S], ABC):
     
     def load(self) -> S:
         """
-        Load settings with fallback chain: active → defaults → fresh instance.
+        Load settings with fallback chain: active → fresh instance.
         
         Returns:
             Settings instance (validated if validate() method exists)
         
         Raises:
             ConfigValidationError: If loaded settings fail validation
-            IOError: If all load attempts fail
+            IOError: If active settings exist but cannot be read
         """
-        # Try active settings first
         ap = self.active_path()
         if ap.exists():
             try:
@@ -402,24 +378,7 @@ class ConfigManager(Generic[S], ABC):
             except Exception as e:
                 error(f"Failed to load active settings from {ap}: {e}")
                 raise IOError("Failed to load active settings") from e
-        
-        # Fallback to defaults
-        dp = self.default_path()
-        if dp.exists():
-            try:
-                data_dict = self._load_dict_from_file(dp)
-                _, _, clean_data = self._extract_metadata(data_dict)
-                settings = self.from_dict(clean_data)
-                self._validate(settings, "default settings")
-                info(f"Loaded default settings from {dp.name}")
-                return settings
-            except ConfigValidationError:
-                raise
-            except Exception as e:
-                error(f"Failed to load default settings from {dp}: {e}")
-                raise IOError("Failed to load default settings") from e
-        
-        # Last resort: create fresh instance
+
         info("No existing settings found, using fresh instance")
         settings = self.from_dict({})
         self._validate(settings, "fresh instance")
@@ -501,81 +460,26 @@ class ConfigManager(Generic[S], ABC):
         info(f"Saved settings to {p.name}")
         return True
 
-    def write_defaults(self, settings: S | None = None) -> Path:
-        """
-        Write default settings file.
-        
-        Args:
-            settings: Settings to write as defaults. If None, uses from_dict({})
-        
-        Returns:
-            Path to the written defaults file
-        
-        Raises:
-            ConfigValidationError: If settings fail validation
-            IOError: If file cannot be written
-        """
-        settings_to_save = settings if settings is not None else self.from_dict({})
-        self._validate(settings_to_save, "defaults")
-        
-        data = self.to_dict(settings_to_save)
-        data_with_metadata = self._add_metadata(data)
-        
-        dp = self.default_path()
-        self._save_dict_to_file(data_with_metadata, dp)
-        info(f"Wrote default settings to {dp.name}")
-        return dp
-
     def restore_defaults(self) -> S:
         """
         Restore default settings as the active settings.
-        
+
         Creates a backup of current active settings before restoring.
-        
+
         Returns:
             The restored default settings
-        
+
         Raises:
             ConfigValidationError: If default settings fail validation
             IOError: If restore operation fails
         """
-        defaults = self.load_defaults()
+        defaults = self.from_dict({})
+        self._validate(defaults, "defaults")
         self._backup_if_exists()
         if not self.save(defaults):
             raise IOError("Failed to save restored defaults")
         info("Restored defaults as active settings")
         return defaults
-
-    def load_defaults(self) -> S:
-        """
-        Load default settings.
-        
-        Returns:
-            Default settings instance
-        
-        Raises:
-            ConfigValidationError: If default settings fail validation
-            IOError: If defaults file cannot be read
-        """
-        dp = self.default_path()
-        if not dp.exists():
-            debug("No defaults file, using fresh instance")
-            settings = self.from_dict({})
-            self._validate(settings, "fresh defaults")
-            return settings
-        
-        try:
-            data_dict = self._load_dict_from_file(dp)
-            _, _, clean_data = self._extract_metadata(data_dict)
-            settings = self.from_dict(clean_data)
-            self._validate(settings, "defaults")
-            info(f"Loaded default settings from {dp.name}")
-            return settings
-        except ConfigValidationError:
-            raise
-        except Exception as e:
-            error(f"Failed to load default settings from {dp}: {e}")
-            raise IOError("Failed to load defaults") from e
 
     def list_backups(self) -> list[Path]:
         """List all backup files, sorted by last modified."""
