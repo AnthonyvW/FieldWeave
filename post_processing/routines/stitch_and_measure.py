@@ -219,6 +219,12 @@ def _refine_offset_with_template(
         if score < 0.5:
             continue
 
+        x_tolerance = max(binary_b.shape[1] // 8, 20)
+        if abs(max_loc[0] - x0) > x_tolerance:
+            if DEBUG:
+                debug(f"    blob x0={x0} matched at x={max_loc[0]}, dx={abs(max_loc[0] - x0)} > tolerance={x_tolerance}, rejecting")
+            continue
+
         match_y_in_b = max_loc[1]
         displacement = (y0 + cy_a) - match_y_in_b
         th, tw = template.shape[:2]
