@@ -8,6 +8,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -251,8 +252,7 @@ class DpiCalibrationStepsWidget(QWidget):
         self._next_btn = QPushButton("Next")
         self._next_btn.clicked.connect(self._next_step)
         self._finish_btn = QPushButton("Finish Calibration")
-        self._finish_btn.clicked.connect(self._restore_overlay_state)
-        self._finish_btn.clicked.connect(self.finished)
+        self._finish_btn.clicked.connect(self._on_finish_clicked)
 
         nav_layout.addWidget(self._prev_btn)
         nav_layout.addWidget(self._next_btn)
@@ -360,9 +360,21 @@ class DpiCalibrationStepsWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self._dpi_label = QLabel("")
-        self._dpi_label.setObjectName("CalSavedPosLabel")
-        layout.addWidget(self._dpi_label)
+        dpi_row = QHBoxLayout()
+        dpi_row.setSpacing(6)
+
+        dpi_row.addWidget(QLabel("DPI:"))
+
+        self._dpi_spin = QDoubleSpinBox()
+        self._dpi_spin.setMinimum(1.0)
+        self._dpi_spin.setMaximum(100_000.0)
+        self._dpi_spin.setDecimals(2)
+        self._dpi_spin.setSingleStep(10.0)
+        self._dpi_spin.setFixedWidth(110)
+        self._dpi_spin.setToolTip("DPI value that will be saved when you press Finish Calibration.")
+        dpi_row.addWidget(self._dpi_spin)
+        dpi_row.addStretch()
+        layout.addLayout(dpi_row)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
@@ -483,8 +495,7 @@ class DpiCalibrationStepsWidget(QWidget):
             has_output = self._output_folder is not None
             self._view_image_btn.setEnabled(has_output)
             self._open_folder_btn.setEnabled(has_output)
-            dpi = get_app_context().machine_vision.settings.dpi
-            self._dpi_label.setText(f"DPI: {dpi:.1f}" if dpi is not None else "DPI: Unknown")
+            self._refresh_qc_dpi_display()
 
         self._apply_overlays_for_step(self._current_step)
         self._set_status("")
@@ -679,6 +690,25 @@ class DpiCalibrationStepsWidget(QWidget):
                 self._set_status(f"[{prog}/{total}]  {activity}")
             else:
                 self._set_status(activity)
+
+    # ------------------------------------------------------------------
+    # Step 5 — DPI display / finish
+    # ------------------------------------------------------------------
+
+    def _refresh_qc_dpi_display(self) -> None:
+        dpi = get_app_context().machine_vision.settings.dpi
+        self._dpi_spin.blockSignals(True)
+        self._dpi_spin.setValue(dpi if dpi is not None else self._dpi_spin.minimum())
+        self._dpi_spin.blockSignals(False)
+
+    def _on_finish_clicked(self) -> None:
+        mv = get_app_context().machine_vision
+        mv.settings.dpi = self._dpi_spin.value()
+        mv.notify_settings_changed()
+        mv.save_settings()
+        info(f"[DpiCalibration] DPI saved as {mv.settings.dpi:.2f}")
+        self._restore_overlay_state()
+        self.finished.emit()
 
     # ------------------------------------------------------------------
     # Step 5 — quality control slots
