@@ -179,7 +179,7 @@ class _SlotRow(QWidget):
 class AutomationSettingsWidget(QWidget):
     """Full settings page for all automation routines."""
 
-    _GROUP_NAMES = ["Tree Core"]
+    _GROUP_NAMES = ["General", "Tree Core"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -190,6 +190,8 @@ class AutomationSettingsWidget(QWidget):
         self._has_unsaved_changes: bool = False
         self._saved_values: dict[str, object] = {}
         self._group_boxes: dict[str, QGroupBox] = {}
+
+        self._w_general: dict[str, QDoubleSpinBox] = {}
 
         # Slot row widgets — rebuilt whenever slots are added/removed.
         self._slot_rows: list[_SlotRow] = []
@@ -301,6 +303,13 @@ class AutomationSettingsWidget(QWidget):
         title.setStyleSheet("font-size: 24px; font-weight: bold; color: #5f6368;")
         cl.addWidget(title)
 
+        general_group = self._build_general_group()
+        cl.addWidget(general_group)
+        self._group_boxes["General"] = general_group
+
+        if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
+            self.parent_dialog.register_group_box("Automation", "General", general_group)
+
         tree_core_group = self._build_tree_core_group()
         cl.addWidget(tree_core_group)
         self._group_boxes["Tree Core"] = tree_core_group
@@ -324,6 +333,27 @@ class AutomationSettingsWidget(QWidget):
 
         if self.parent_dialog and hasattr(self.parent_dialog, "save_btn"):
             self.parent_dialog.save_btn.clicked.connect(self._on_save)
+
+    def _build_general_group(self) -> QGroupBox:
+        group = QGroupBox("General")
+        form = QFormLayout(group)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        for key, label_text, tooltip in (
+            ("overlap_x_pct", "X overlap (%):", "Fraction of each frame that overlaps the next along X (0–100)."),
+            ("overlap_y_pct", "Y overlap (%):", "Fraction of each frame that overlaps the next along Y (0–100)."),
+        ):
+            spin = _NoScrollDoubleSpinBox()
+            spin.setMinimum(0.0)
+            spin.setMaximum(100.0)
+            spin.setSingleStep(0.1)
+            spin.setDecimals(1)
+            spin.setFixedWidth(130)
+            spin.setToolTip(tooltip)
+            self._w_general[key] = spin
+            form.addRow(QLabel(label_text), spin)
+
+        return group
 
     def _build_tree_core_group(self) -> QGroupBox:
         group = QGroupBox("Tree Core")
@@ -444,6 +474,10 @@ class AutomationSettingsWidget(QWidget):
             spin.valueChanged.connect(
                 lambda v, k=key: self._on_run_field_changed(k, v)
             )
+        for key, spin in self._w_general.items():
+            spin.valueChanged.connect(
+                lambda v, k=key: self._on_general_field_changed(k, v)
+            )
 
     def _connect_slot_signals(self, row: _SlotRow) -> None:
         for key, spin in row.widgets.items():
@@ -457,6 +491,11 @@ class AutomationSettingsWidget(QWidget):
 
     def _populate_from_settings(self, s: MotionSystemSettings) -> None:
         tca = s.tree_core_automation
+
+        self._block_general_signals(True)
+        self._w_general["overlap_x_pct"].setValue(s.automation.overlap_x_pct)
+        self._w_general["overlap_y_pct"].setValue(s.automation.overlap_y_pct)
+        self._block_general_signals(False)
 
         self._block_run_signals(True)
         self._w_run["mark_reference_nm"].setValue(tca.mark_reference_nm / _NM_PER_MM)
@@ -501,6 +540,8 @@ class AutomationSettingsWidget(QWidget):
     def _snapshot_saved_values(self, s: MotionSystemSettings) -> None:
         tca = s.tree_core_automation
         self._saved_values = {
+            "overlap_x_pct":       s.automation.overlap_x_pct,
+            "overlap_y_pct":       s.automation.overlap_y_pct,
             "mark_reference_nm":   tca.mark_reference_nm,
             "mark_z_nm":           tca.mark_z_nm,
             "starting_height_nm":  tca.starting_height_nm,
@@ -532,6 +573,21 @@ class AutomationSettingsWidget(QWidget):
     # ------------------------------------------------------------------
     # Change handlers
     # ------------------------------------------------------------------
+
+    def _mark_general_field(self, key: str, value: object) -> None:
+        w = self._w_general.get(key)
+        if w:
+            self._apply_orange(w, self._check_modified(key, value))
+
+    def _on_general_field_changed(self, key: str, value: float) -> None:
+        s = self._live_settings()
+        if s is None:
+            self._mark_general_field(key, value)
+            self._set_unsaved(True)
+            return
+        setattr(s.automation, key, value)
+        self._mark_general_field(key, value)
+        self._set_unsaved(True)
 
     def _on_run_field_changed(self, key: str, value_mm: float) -> None:
         value_nm = round(value_mm * _NM_PER_MM)
@@ -595,6 +651,8 @@ class AutomationSettingsWidget(QWidget):
                 ctx.toast.error(f"Save failed: {exc}", duration=3000)
 
     def _clear_all_orange(self) -> None:
+        for w in self._w_general.values():
+            self._apply_orange(w, False)
         for w in self._w_run.values():
             self._apply_orange(w, False)
         for row in self._slot_rows:
@@ -628,11 +686,16 @@ class AutomationSettingsWidget(QWidget):
     # Signal blocking helpers
     # ------------------------------------------------------------------
 
+    def _block_general_signals(self, block: bool) -> None:
+        for w in self._w_general.values():
+            w.blockSignals(block)
+
     def _block_run_signals(self, block: bool) -> None:
         for w in self._w_run.values():
             w.blockSignals(block)
 
     def _block_all_signals(self, block: bool) -> None:
+        self._block_general_signals(block)
         self._block_run_signals(block)
         for row in self._slot_rows:
             for w in row.widgets.values():

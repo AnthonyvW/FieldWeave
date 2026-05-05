@@ -24,12 +24,19 @@ Images are saved with the stage position encoded in the filename:
   x{X_nm}_y{Y_nm}_z{Z_nm}.jpg
 
 The result is available via :attr:`~AutomationRoutine.result` after the routine
-finishes.  On success, ``result.data`` contains:
+finishes.  On success, ``result.data`` contains all keys produced by
+:class:`~post_processing.post_processing_routines.StitchAndMeasureRoutine`:
 
-- ``dpi`` (:class:`float`): measured dots per inch.
+- ``dpi`` (:class:`float` | None): measured dots per inch.
 - ``image_width`` (:class:`int`): stitched image width in pixels.
 - ``image_height`` (:class:`int`): stitched image height in pixels.
 - ``output_path`` (:class:`str`): path to the stitched output image.
+- ``debug_path`` (:class:`str` | None): path to the debug overlay image, if saved.
+- ``tick_count`` (:class:`int` | None): number of ticks detected on the scale bar.
+- ``tick_count_valid`` (:class:`bool` | None): whether the tick count matches the expected value.
+- ``tick_spacing_valid`` (:class:`bool`): whether all inter-tick gaps were within tolerance.
+- ``tick_outlier_gaps`` (list): gaps flagged as outliers, each a ``(i, j, gap_px)`` tuple.
+- ``stitched_rgb`` (:class:`numpy.ndarray`): the stitched image as an RGB array.
 
 Usage::
 
@@ -70,7 +77,6 @@ from machine_vision.algorithms.calibration_bar_detection import AxisState, proce
 from post_processing.routines.stitch_and_measure import StitchAndMeasureRoutine
 
 _NM_PER_MM = 1_000_000
-_STEP_NM = int(0.4 * _NM_PER_MM)
 
 
 def _axis_move_direction(
@@ -129,8 +135,11 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
     until it completes.
 
     On success, :attr:`~AutomationRoutine.result` is populated with
-    ``success=True`` and ``data`` keys ``dpi``, ``image_width``,
-    ``image_height``, and ``output_path``.
+    ``success=True`` and all data keys from
+    :class:`~post_processing.post_processing_routines.StitchAndMeasureRoutine`:
+    ``dpi``, ``image_width``, ``image_height``, ``output_path``, ``debug_path``,
+    ``tick_count``, ``tick_count_valid``, ``tick_spacing_valid``,
+    ``tick_outlier_gaps``, and ``stitched_rgb``.
 
     Parameters
     ----------
@@ -165,7 +174,6 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         output_path: str | Path,
         *,
         start_position: Position | None = None,
-        step_mm: float = 0.4,
         settle_s: float = 0.4,
         max_steps: int = 30,
         capture_timeout_s: float = 10.0,
@@ -173,7 +181,6 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         super().__init__(motion)
         self._output_path = Path(output_path)
         self._start_position = start_position
-        self._step_nm = int(round(step_mm * _NM_PER_MM))
         self._settle_s = settle_s
         self._max_steps = max_steps
         self._capture_timeout_s = capture_timeout_s
@@ -187,24 +194,19 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         clamped = max(0, min(100, int(round(percent))))
         self._set_status(activity, clamped, 100)
 
-    def _compute_overlap_frac(self, mv: object, reference_frame: object) -> float:
-        """Compute the image overlap fraction from calibration and step size.
+    def _resolve_step_nm(self, mv: object, reference_frame: object, bar_axis: str) -> int:
+        """Return the step size in nanometres derived from overlap_y_pct and the frame size.
 
-        The overlap is 1 - (step_nm / frame_height_nm), where frame_height_nm
-        is derived from the camera calibration.  Falls back to the value stored
-        in motion settings when calibration is unavailable.
+        The stage moves along X for a horizontal bar and Y for a vertical bar,
+        so the relevant frame dimension is selected accordingly.
         """
-        motion_settings = self.motion.settings
-        if mv.is_calibrated:
-            h, w = reference_frame.shape[:2]
-            _, frame_height_nm = fraction_to_stage_delta(mv.calibration, 1.0, "y", w, h)
-            if frame_height_nm > 0:
-                overlap = 1.0 - (self._step_nm / frame_height_nm)
-                overlap = max(0.0, min(0.99, overlap))
-                motion_settings.overlap_frac = overlap
-                self.motion._controller._config_manager.save(motion_settings)
-                return overlap
-        return motion_settings.overlap_frac
+        h, w = reference_frame.shape[:2]
+        overlap_pct = self.motion.settings.automation.overlap_y_pct
+        if bar_axis == "horizontal":
+            frame_nm, _ = fraction_to_stage_delta(mv.calibration, 1.0, "x", w, h)
+        else:
+            _, frame_nm = fraction_to_stage_delta(mv.calibration, 1.0, "y", w, h)
+        return int(round(frame_nm * (1.0 - overlap_pct / 100.0)))
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -220,6 +222,11 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
 
         if not ctx.has_camera:
             error("[CalibrationScale] No camera available — aborting")
+            self._set_result(success=False)
+            return
+
+        if not mv.is_calibrated:
+            error("[CalibrationScale] Camera not calibrated — aborting")
             self._set_result(success=False)
             return
 
@@ -327,6 +334,10 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             f"  direction={'positive' if direction > 0 else 'negative'}"
         )
 
+        step_nm = self._resolve_step_nm(mv, initial_frame, initial_result.axis)
+        info(f"[CalibrationScale] Step size: {step_nm / _NM_PER_MM:.4f} mm"
+             f" (overlap_y_pct={self.motion.settings.automation.overlap_y_pct:.1f}%)")
+
         yield
 
         if self._check_stop():
@@ -368,14 +379,14 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             current_pos = self.motion.get_position()
             if initial_result.axis == "horizontal":
                 target = Position(
-                    x=current_pos.x + direction * self._step_nm,
+                    x=current_pos.x + direction * step_nm,
                     y=current_pos.y,
                     z=current_pos.z,
                 )
             else:
                 target = Position(
                     x=current_pos.x,
-                    y=current_pos.y + direction * self._step_nm,
+                    y=current_pos.y + direction * step_nm,
                     z=current_pos.z,
                 )
 
@@ -460,7 +471,6 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         stitch_routine = StitchAndMeasureRoutine(
             settings=post_processing.settings,
             input_folder=str(self._output_path),
-            overlap_frac=self._compute_overlap_frac(mv, initial_frame),
         )
         post_processing.start_routine(stitch_routine)
 
@@ -479,15 +489,11 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             warning("[CalibrationScale] Stitch-and-measure completed but produced no result")
             self._set_result(success=False)
         else:
-            dpi = stitch_result.get("dpi")
-            image_width = stitch_result.get("image_width")
-            image_height = stitch_result.get("image_height")
-            output_path = stitch_result.get("output_path")
             info(
                 f"[CalibrationScale] Stitch complete —"
-                f" DPI={dpi}"
-                f" size={image_width}x{image_height}"
-                f" output={output_path}"
+                f" DPI={stitch_result.get('dpi')}"
+                f" size={stitch_result.get('image_width')}x{stitch_result.get('image_height')}"
+                f" output={stitch_result.get('output_path')}"
             )
 
             mv.settings.inspect_calibration.last_calibrated = (
@@ -495,13 +501,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             )
             mv.save_settings()
             mv.notify_settings_changed()
-            self._set_result(
-                success=True,
-                dpi=dpi,
-                image_width=image_width,
-                image_height=image_height,
-                output_path=output_path,
-            )
+            self._set_result(success=True, **stitch_result.data)
 
         yield
 

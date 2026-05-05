@@ -74,22 +74,81 @@ def _collect_images(image_folder: str) -> list[tuple[cv2.Mat, str, int]]:
     return images
 
 
-def _mask_longest_blob(gray: np.ndarray) -> np.ndarray:
-    """Return a copy of *gray* with the blob whose bounding rect spans the most
-    image width zeroed out.
+def _mask_large_blobs(
+    binary: np.ndarray,
+    steps_folder: str | None = None,
+    steps_prefix: str = "",
+) -> np.ndarray:
+    """Return a copy of *binary* with unwanted blobs zeroed out.
 
-    Using width fraction rather than absolute width ensures the tick bar —
-    which always runs nearly edge to edge — is selected even when the first
-    image has fewer ticks and a number label happens to be wider in pixels.
+    Operates directly on a binary image so masking and binarization share the
+    same Otsu threshold and the output remains a clean 0/255 mask.
+
+    Three passes are applied in order:
+    1. Any blob whose bounding rect exceeds 20% of the image width or height
+       is removed by drawing its filled contour so nearby blobs that happen to
+       fall inside the same bounding rect are not collaterally erased.
+    2. Among the survivors, overlapping bounding rects are collapsed: only the
+       largest blob by area in each overlapping group is kept.
+    3. Any blobs beyond the top 10 by area are removed to discard noise.
+
+    If *steps_folder* is set, the binary at each stage is saved as a PNG with
+    filenames prefixed by *steps_prefix*.
     """
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return gray.copy()
-    img_w = gray.shape[1]
-    x, y, w, h = cv2.boundingRect(max(contours, key=lambda c: cv2.boundingRect(c)[2] / img_w))
-    masked = gray.copy()
-    masked[y:y + h, x:x + w] = 0
+        return binary.copy()
+
+    img_h, img_w = binary.shape
+
+    if steps_folder is not None:
+        cv2.imwrite(os.path.join(steps_folder, f"{steps_prefix}1_raw_binary.png"), binary)
+
+    # Pass 1: remove blobs that span more than 20% of width or height.
+    masked = binary.copy()
+    small: list[tuple[float, tuple[int, int, int, int]]] = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        if w / img_w > 0.2 or h / img_h > 0.2:
+            cv2.drawContours(masked, [c], -1, 0, cv2.FILLED)
+        else:
+            small.append((cv2.contourArea(c), (x, y, w, h)))
+
+    if steps_folder is not None:
+        cv2.imwrite(os.path.join(steps_folder, f"{steps_prefix}2_after_large_removal.png"), masked)
+
+    # Pass 2: re-detect contours from the masked image so the NMS works on
+    # exactly the pixels that survived pass 1, then keep only the largest blob
+    # in each group of overlapping bounding rects.
+    survivors, _ = cv2.findContours(masked, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    small: list[tuple[float, tuple[int, int, int, int]]] = [
+        (cv2.contourArea(c), cv2.boundingRect(c)) for c in survivors
+    ]
+    small.sort(key=lambda t: t[0], reverse=True)
+
+    def overlaps(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        return ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
+
+    kept: list[tuple[int, int, int, int]] = []
+    for area, rect in small:
+        if any(overlaps(rect, k) for k in kept):
+            x, y, w, h = rect
+            masked[y:y + h, x:x + w] = 0
+        else:
+            kept.append(rect)
+
+    if steps_folder is not None:
+        cv2.imwrite(os.path.join(steps_folder, f"{steps_prefix}3_after_nms.png"), masked)
+
+    # Pass 3: keep only the top 10 survivors by area.
+    for rect in kept[10:]:
+        masked[rect[1]:rect[1] + rect[3], rect[0]:rect[0] + rect[2]] = 0
+
+    if steps_folder is not None:
+        cv2.imwrite(os.path.join(steps_folder, f"{steps_prefix}4_after_top10.png"), masked)
+
     return masked
 
 
@@ -97,8 +156,10 @@ def _refine_offset_with_template(
     img_a: cv2.Mat,
     img_b: cv2.Mat,
     nominal_offset: int,
+    overlap_px: int,
     mask_debug_folder: str | None = None,
     pair_index: int = 0,
+    steps_folder: str | None = None,
 ) -> int:
     """Find the Y step offset between two images by matching blobs from A into B.
 
@@ -116,15 +177,17 @@ def _refine_offset_with_template(
     gray_a = cv2.cvtColor(img_a, cv2.COLOR_BGR2GRAY)
     gray_b = cv2.cvtColor(img_b, cv2.COLOR_BGR2GRAY)
 
-    h_a, w_a = gray_a.shape
-    h_b, w_b = gray_b.shape
-    cy_a, cx_a = int(h_a * 0.2), int(w_a * 0.2)
-    cy_b, cx_b = int(h_b * 0.2), int(w_b * 0.2)
-    cropped_gray_a = gray_a[cy_a:h_a - cy_a, cx_a:w_a - cx_a]
-    cropped_gray_b = gray_b[cy_b:h_b - cy_b, cx_b:w_b - cx_b]
+    h_a = gray_a.shape[0]
 
-    binary_a = cv2.bitwise_and(_mask_longest_blob(cropped_gray_a), _binarize(cropped_gray_a))
-    binary_b = cv2.bitwise_and(_mask_longest_blob(cropped_gray_b), _binarize(cropped_gray_b))
+    # Binarize and mask the full images so Otsu thresholding uses the full pixel
+    # distribution, then slice the overlap band for matching: bottom of A overlaps
+    # with top of B.
+    full_binary_a = _mask_large_blobs(_binarize(gray_a), steps_folder=steps_folder, steps_prefix=f"pair{pair_index:02d}_a_")
+    full_binary_b = _mask_large_blobs(_binarize(gray_b), steps_folder=steps_folder, steps_prefix=f"pair{pair_index:02d}_b_")
+
+    cy_a = max(0, h_a - overlap_px)
+    binary_a = full_binary_a[cy_a:, :]
+    binary_b = full_binary_b[:overlap_px, :]
 
     contours, _ = cv2.findContours(binary_a, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -132,9 +195,8 @@ def _refine_offset_with_template(
         return nominal_offset
 
     padding = 4
-    y_displacements: list[int] = []
-    matched_blobs_a: list[tuple[int, int, int, int]] = []
-    matched_blobs_b: list[tuple[int, int, int, int]] = []
+    # score, displacement, blob_a rect, blob_b rect (position + template size in B)
+    all_candidates: list[tuple[float, int, tuple[int, int, int, int], tuple[int, int, int, int]]] = []
 
     for contour in contours:
         bx, by, bw, bh = cv2.boundingRect(contour)
@@ -157,33 +219,68 @@ def _refine_offset_with_template(
         if score < 0.5:
             continue
 
-        # y0 is in binary_a coordinates; adding cy_a gives original image A coordinates.
-        # max_loc[1] is in binary_b coordinates; adding cy_b gives original image B coordinates.
-        # The blob appears higher up in B than in A because B starts lower, so the feature
-        # row in B is less than in A. The offset (distance from top of A to top of B) is
-        # therefore the negation of this difference.
         match_y_in_b = max_loc[1]
-        displacement = (y0 + cy_a) - (match_y_in_b + cy_b)
-        y_displacements.append(displacement)
-        matched_blobs_a.append((x0, y0, x1 - x0, y1 - y0))
-        matched_blobs_b.append((max_loc[0], match_y_in_b, x1 - x0, y1 - y0))
+        displacement = (y0 + cy_a) - match_y_in_b
+        th, tw = template.shape[:2]
+        all_candidates.append((score, displacement, (x0, y0, x1 - x0, y1 - y0), (max_loc[0], match_y_in_b, tw, th)))
+
+    # NMS on match regions in B: sort by score descending, suppress any candidate
+    # whose match rect overlaps one already accepted.
+    all_candidates.sort(key=lambda t: t[0], reverse=True)
+
+    def match_overlaps(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        return ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
+
+    accepted: list[tuple[float, int, tuple[int, int, int, int], tuple[int, int, int, int]]] = []
+    accepted_b_rects: list[tuple[int, int, int, int]] = []
+    for candidate in all_candidates:
+        if not any(match_overlaps(candidate[3], r) for r in accepted_b_rects):
+            accepted.append(candidate)
+            accepted_b_rects.append(candidate[3])
+
+    # Order-consistency filter: sort by Y in A and keep only the longest
+    # subsequence whose Y positions in B are also increasing. This rejects
+    # matches where blobs appear in a different vertical order in B than in A,
+    # which indicates a wrong match location.
+    accepted.sort(key=lambda t: t[2][1])
+    lis: list[tuple[float, int, tuple[int, int, int, int], tuple[int, int, int, int]]] = []
+    for candidate in accepted:
+        b_y = candidate[3][1]
+        if not lis or b_y > lis[-1][3][1]:
+            lis.append(candidate)
+        else:
+            for i, kept in enumerate(lis):
+                if kept[3][1] >= b_y:
+                    lis[i] = candidate
+                    break
+
+    y_displacements: list[int] = [c[1] for c in lis]
+    matched_blobs_a: list[tuple[int, int, int, int]] = [c[2] for c in lis]
+    matched_blobs_b: list[tuple[int, int, int, int]] = [c[3] for c in lis]
     if DEBUG:
         debug(f"  template match: {len(y_displacements)} blob(s) matched, displacements={y_displacements}")
 
     if mask_debug_folder is not None:
-        def _make_overlay(img_bgr: cv2.Mat, binary: np.ndarray, boxes: list[tuple[int, int, int, int]], cy: int, cx: int) -> cv2.Mat:
+        def _make_overlay(
+            img_bgr: cv2.Mat,
+            binary: np.ndarray,
+            boxes: list[tuple[int, int, int, int]],
+            row_start: int,
+            row_end: int,
+        ) -> cv2.Mat:
             vis = img_bgr.copy()
-            h, w = vis.shape[:2]
             green_layer = np.zeros_like(vis)
-            green_layer[cy:h - cy, cx:w - cx][binary > 0] = (0, 255, 0)
+            green_layer[row_start:row_end][binary > 0] = (0, 255, 0)
             vis = cv2.addWeighted(vis, 0.7, green_layer, 0.3, 0)
             for bx, by, bw, bh in boxes:
-                rx, ry = bx + cx, by + cy
-                cv2.rectangle(vis, (rx, ry), (rx + bw, ry + bh), (0, 0, 255), 2)
+                ry = by + row_start
+                cv2.rectangle(vis, (bx, ry), (bx + bw, ry + bh), (0, 0, 255), 2)
             return vis
 
-        vis_a = _make_overlay(img_a, binary_a, matched_blobs_a, cy_a, cx_a)
-        vis_b = _make_overlay(img_b, binary_b, matched_blobs_b, cy_b, cx_b)
+        vis_a = _make_overlay(img_a, binary_a, matched_blobs_a, cy_a, img_a.shape[0])
+        vis_b = _make_overlay(img_b, binary_b, matched_blobs_b, 0, overlap_px)
 
         h_a_vis, w_a_vis = vis_a.shape[:2]
         h_b_vis, w_b_vis = vis_b.shape[:2]
@@ -195,7 +292,7 @@ def _refine_offset_with_template(
         cv2.line(combined, (w_a_vis + 2, 0), (w_a_vis + 2, combined_h), (128, 128, 128), 2)
         cv2.imwrite(os.path.join(mask_debug_folder, f"pair_{pair_index:02d}_masks.png"), combined)
 
-    if len(y_displacements) < 2:
+    if len(y_displacements) < 1:
         debug(f"  template match: too few matches, using nominal={nominal_offset}px")
         return nominal_offset
 
@@ -296,6 +393,7 @@ def _stitch_images(
     images: list[tuple[cv2.Mat, str, int]],
     overlap_frac: float,
     mask_debug_folder: str | None = None,
+    steps_folder: str | None = None,
 ) -> tuple[cv2.Mat, list[int]] | None:
     debug(f"_stitch_images: stitching {len(images)} images with {overlap_frac:.1%} overlap")
 
@@ -310,8 +408,10 @@ def _stitch_images(
         img_b, _, _ = images[i + 1]
         refined = _refine_offset_with_template(
             img_a, img_b, nominal_offset,
+            overlap_px=overlap_px,
             mask_debug_folder=mask_debug_folder,
             pair_index=i,
+            steps_folder=steps_folder,
         )
         refined_offsets.append(refined)
         if mask_debug_folder is not None:
@@ -708,6 +808,12 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
     - ``output_path`` (:class:`str`): absolute path to the saved panorama.
     - ``debug_path`` (:class:`str` or ``None``): path to the DPI debug overlay, or None.
     - ``dpi`` (:class:`float` or ``None``): measured DPI, or None if detection failed.
+    - ``tick_count`` (:class:`int` or ``None``): number of ticks detected on the scale bar.
+    - ``tick_count_valid`` (:class:`bool` or ``None``): whether the detected tick count matches the expected value.
+    - ``tick_spacing_valid`` (:class:`bool`): whether all inter-tick gaps were within tolerance.
+    - ``tick_outlier_gaps`` (:class:`list`): gaps flagged as outliers, each a ``(left_i, right_i, gap_px)`` tuple.
+    - ``qa_pass`` (:class:`bool`): True if tick count and spacing both passed; False otherwise or if DPI detection failed.
+    - ``qa_warnings`` (:class:`list` of :class:`str`): human-readable warning messages for any QA failures (empty on a clean pass).
     - ``image_width`` (:class:`int`): panorama width in pixels.
     - ``image_height`` (:class:`int`): panorama height in pixels.
     - ``stitched_rgb`` (:class:`numpy.ndarray`): final panorama in RGB888 order,
@@ -729,19 +835,29 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         self,
         settings: FieldWeaveSettings,
         input_folder: str,
-        overlap_frac: float,
         *,
         save_dpi: bool = True,
         standalone: bool = False,
+        overlap_frac: float | None = None,
     ) -> None:
         super().__init__(settings)
         self.input_folder = input_folder
-        self._overlap_frac = overlap_frac
         self._save_dpi = save_dpi
         self._standalone = standalone
+        self._overlap_frac = overlap_frac
 
     def steps(self) -> Generator[None, None, None]:
         sm = self.settings.post_processing.stitch_and_measure
+
+        if self._standalone:
+            ctx = None
+            overlap_frac = self._overlap_frac
+            if overlap_frac is None:
+                raise ValueError("overlap_frac must be provided when running standalone")
+        else:
+            from common.app_context import get_app_context
+            ctx = get_app_context()
+            overlap_frac = ctx.motion.settings.automation.overlap_y_pct / 100.0
 
         # ----------------------------------------------------------------
         # Step 1: discover and load images
@@ -751,7 +867,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         subfolders = [
             entry.path
             for entry in os.scandir(self.input_folder)
-            if entry.is_dir()
+            if entry.is_dir() and os.path.basename(entry.path) not in {"masks", "steps"}
         ]
         if len(subfolders) == 0:
             raise ValueError("No subfolders found in the input folder")
@@ -777,7 +893,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         # ----------------------------------------------------------------
         self._set_status("Stitching images", 1, 4)
 
-        stitch_result = _stitch_images(images, self._overlap_frac, mask_debug_folder=None)
+        stitch_result = _stitch_images(images, overlap_frac, mask_debug_folder=None)
         if stitch_result is None:
             raise RuntimeError(
                 "Stitching failed — ensure the overlap value is correct and "
@@ -833,9 +949,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         self._set_status("Measuring DPI", 3, 4)
 
         root_name = os.path.basename(self.input_folder)
-        if self._save_dpi and not self._standalone:
-            from common.app_context import get_app_context
-            ctx = get_app_context()
+        if self._save_dpi and not self._standalone and ctx is not None:
             extension = ctx.camera.underlying_camera.settings.fformat.value
             output_path = os.path.join(self.input_folder, f"{root_name}.{extension}")
         else:
@@ -844,17 +958,21 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
         cv2.imwrite(output_path, stitched)
         debug(f"StitchAndMeasureRoutine: panorama saved to {output_path}")
 
+        qa_warnings: list[str] = []
+        if tick_count is not None and tick_count != EXPECTED_TICK_COUNT:
+            qa_warnings.append(f"expected {EXPECTED_TICK_COUNT} ticks but found {tick_count}")
+        for left_i, right_i, gap in outlier_gaps:
+            qa_warnings.append(f"unusual gap between tick #{left_i} and #{right_i} ({gap:.0f}px)")
+        qa_pass = tick_count == EXPECTED_TICK_COUNT and len(outlier_gaps) == 0 if dpi is not None else False
+
         if dpi is not None and self._save_dpi:
-            qa_pass = tick_count == EXPECTED_TICK_COUNT and len(outlier_gaps) == 0
             lines: list[str] = [
                 f"{dpi:.2f}",
                 "PASS" if qa_pass else "FAIL",
                 f"{tick_count if tick_count is not None else 0}/{EXPECTED_TICK_COUNT} ticks",
             ]
-            if tick_count is not None and tick_count != EXPECTED_TICK_COUNT:
-                lines.append(f"WARNING: expected {EXPECTED_TICK_COUNT} ticks but found {tick_count}")
-            for left_i, right_i, gap in outlier_gaps:
-                lines.append(f"WARNING: unusual gap between tick #{left_i} and #{right_i} ({gap:.0f}px)")
+            for msg in qa_warnings:
+                lines.append(f"WARNING: {msg}")
             dpi_txt_path = os.path.join(self.input_folder, "DPI.txt")
             with open(dpi_txt_path, "w") as f:
                 f.write("\n".join(lines) + "\n")
@@ -886,6 +1004,8 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
             tick_count_valid=tick_count == EXPECTED_TICK_COUNT if tick_count is not None else None,
             tick_spacing_valid=len(outlier_gaps) == 0,
             tick_outlier_gaps=outlier_gaps,
+            qa_pass=qa_pass,
+            qa_warnings=qa_warnings,
             image_width=w,
             image_height=h,
             stitched_rgb=cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB),
@@ -915,11 +1035,15 @@ if __name__ == "__main__":
         help="Fraction of image height that consecutive images overlap (e.g. 0.7 for 70%%)",
     )
     parser.add_argument("--save-masks", action="store_true", help="Save per-pair debug images to a masks/ subfolder showing binary masks overlaid on source images with matched blob bounding boxes")
+    parser.add_argument("--save-steps", action="store_true", help="Save intermediate binary mask images at each filtering stage to a steps/ subfolder for debugging blob detection")
     parser.add_argument("--save-dpi", action="store_true", help="Write DPI.txt containing the measured DPI to the output folder")
     parser.add_argument("--debug", action="store_true", help="Overlay detected points and lines on the debug image")
     args = parser.parse_args()
 
     DEBUG = args.debug
+
+    if args.overlap > 1.0:
+        args.overlap /= 100.0
 
     settings = FieldWeaveSettings()
 
@@ -927,6 +1051,11 @@ if __name__ == "__main__":
     if args.save_masks:
         mask_debug_folder = os.path.join(args.folder, "masks")
         os.makedirs(mask_debug_folder, exist_ok=True)
+
+    steps_folder: str | None = None
+    if args.save_steps:
+        steps_folder = os.path.join(args.folder, "steps")
+        os.makedirs(steps_folder, exist_ok=True)
 
     def _apply_gap_correction(
         images: list[tuple[cv2.Mat, str, int]],
@@ -956,13 +1085,13 @@ if __name__ == "__main__":
         print(f"Corrected: {corrected_path}")
 
     if mask_debug_folder is not None:
-        subfolders = [e.path for e in os.scandir(args.folder) if e.is_dir() and os.path.basename(e.path) != "masks"]
+        subfolders = [e.path for e in os.scandir(args.folder) if e.is_dir() and os.path.basename(e.path) not in {"masks", "steps"}]
         if len(subfolders) != 1:
             print("Expected exactly one image subfolder.", file=sys.stderr)
             sys.exit(1)
         images = _collect_images(subfolders[0])
         sm = settings.post_processing.stitch_and_measure
-        stitch_result = _stitch_images(images, args.overlap, mask_debug_folder=mask_debug_folder)
+        stitch_result = _stitch_images(images, args.overlap, mask_debug_folder=mask_debug_folder, steps_folder=steps_folder)
         if stitch_result is None:
             print("Stitching failed.", file=sys.stderr)
             sys.exit(1)
@@ -992,9 +1121,9 @@ if __name__ == "__main__":
         routine = StitchAndMeasureRoutine(
             settings=settings,
             input_folder=args.folder,
-            overlap_frac=args.overlap,
             save_dpi=args.save_dpi,
             standalone=True,
+            overlap_frac=args.overlap,
         )
         routine.start()
         routine.wait()

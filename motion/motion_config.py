@@ -88,6 +88,26 @@ class TreeCoreAutomationSettings:
 
 
 @dataclass
+class AutomationSettings:
+    """General settings shared across all automation routines.
+
+    Overlap percentages express what fraction of each captured frame overlaps
+    with the next frame along that axis, as a value from 0 to 100.
+    """
+
+    overlap_x_pct: float = 50.0
+    overlap_y_pct: float = 50.0
+
+    @property
+    def overlap_x(self) -> int:
+        return int(round(self.overlap_x_pct))
+
+    @property
+    def overlap_y(self) -> int:
+        return int(round(self.overlap_y_pct))
+
+
+@dataclass
 class MotionSystemSettings:
     FIRMWARE_NAME: str = "Marlin"
     MACHINE_TYPE: str = "Ender-3"
@@ -112,11 +132,6 @@ class MotionSystemSettings:
     # 0 means stay at the homed position (no post-home move).
     starting_height_nm: int = 0
 
-    # Fraction of the image height that consecutive captured frames overlap.
-    # Set by the inspection calibration routine based on the camera field of view.
-    # Used by StitchAndMeasureRoutine to compute nominal stitch offsets.
-    overlap_frac: float = 0.5
-
     # Navigation widget — jog-step presets (nanometres)
     # Four buttons shown in the navigation widget; default: 0.04, 0.4, 2.0, 10.0 mm.
     step_presets: list[int] = field(
@@ -131,6 +146,11 @@ class MotionSystemSettings:
     # Tree core slot automation settings.
     tree_core_automation: TreeCoreAutomationSettings = field(
         default_factory=TreeCoreAutomationSettings
+    )
+
+    # General automation settings shared across routines.
+    automation: AutomationSettings = field(
+        default_factory=AutomationSettings
     )
 
     def validate(self) -> None:
@@ -152,9 +172,10 @@ class MotionSystemSettings:
             raise ValueError("all step_presets values must be positive")
         if self.starting_height_nm < 0:
             raise ValueError("starting_height_nm must be non-negative")
-        if not (0.0 < self.overlap_frac < 1.0):
-            raise ValueError("overlap_frac must be between 0 and 1 (exclusive)")
-
+        if not (0.0 <= self.automation.overlap_x_pct <= 100.0):
+            raise ValueError("overlap_x_pct must be between 0 and 100")
+        if not (0.0 <= self.automation.overlap_y_pct <= 100.0):
+            raise ValueError("overlap_y_pct must be between 0 and 100")
 
 class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
     """Configuration manager for motion system settings."""
@@ -217,6 +238,16 @@ class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
             filtered_data["tree_core_automation"] = TreeCoreAutomationSettings(**tca_data)
         else:
             filtered_data.pop("tree_core_automation", None)
+
+        # Deserialise the nested AutomationSettings if present.
+        raw_automation = filtered_data.get("automation")
+        if isinstance(raw_automation, dict):
+            valid_automation_fields = {f.name for f in fields(AutomationSettings)}
+            filtered_data["automation"] = AutomationSettings(
+                **{k: v for k, v in raw_automation.items() if k in valid_automation_fields}
+            )
+        else:
+            filtered_data.pop("automation", None)
 
         return MotionSystemSettings(**filtered_data)
 

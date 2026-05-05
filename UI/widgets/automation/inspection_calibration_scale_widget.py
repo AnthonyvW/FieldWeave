@@ -99,6 +99,93 @@ class _ConfirmDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Results dialog
+# ---------------------------------------------------------------------------
+
+class _ResultsDialog(QDialog):
+    """Modal dialog showing the outcome of a completed calibration scale routine."""
+
+    def __init__(
+        self,
+        result: object,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Calibration Scale Results")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        success: bool = result.success
+        dpi: float | None = result.get("dpi")
+        qa_pass: bool = result.get("qa_pass", False)
+        qa_warnings: list[str] = result.get("qa_warnings") or []
+        tick_count: int | None = result.get("tick_count")
+        image_width: int | None = result.get("image_width")
+        image_height: int | None = result.get("image_height")
+        output_path: str | None = result.get("output_path")
+
+        if success:
+            status_text = "PASS" if qa_pass else "FAIL — QA checks failed"
+            status_name = "CalScaleStatusPass" if qa_pass else "CalScaleStatusFail"
+        else:
+            status_text = "Routine did not complete successfully"
+            status_name = "CalScaleStatusFail"
+
+        title = QLabel(status_text)
+        title.setObjectName(status_name)
+        layout.addWidget(title)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setObjectName("SampleDivider")
+        layout.addWidget(line)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        def _row(label: str, value: str) -> None:
+            lbl = QLabel(label + ":")
+            lbl.setObjectName("CalScaleRowLabel")
+            val = QLabel(value)
+            val.setObjectName("CalScaleRowValue")
+            val.setWordWrap(True)
+            form.addRow(lbl, val)
+
+        if dpi is not None:
+            _row("DPI", f"{dpi:.2f}")
+        if tick_count is not None:
+            from post_processing.routines.stitch_and_measure import EXPECTED_TICK_COUNT
+            _row("Ticks", f"{tick_count} / {EXPECTED_TICK_COUNT}")
+        if image_width is not None and image_height is not None:
+            _row("Image size", f"{image_width} \u00d7 {image_height} px")
+        if output_path is not None:
+            _row("Output", output_path)
+
+        layout.addLayout(form)
+
+        if qa_warnings:
+            warn_line = QFrame()
+            warn_line.setFrameShape(QFrame.Shape.HLine)
+            warn_line.setObjectName("SampleDivider")
+            layout.addWidget(warn_line)
+
+            for msg in qa_warnings:
+                warn_label = QLabel(f"Warning: {msg}")
+                warn_label.setObjectName("CalErrorLabel")
+                warn_label.setWordWrap(True)
+                layout.addWidget(warn_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+
+# ---------------------------------------------------------------------------
 # Main widget
 # ---------------------------------------------------------------------------
 
@@ -490,11 +577,14 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._output_folder.setEnabled(True)
         self._set_pos_btn.setEnabled(True)
         self._controls_widget.setVisible(False)
+        result = self._routine.result if self._routine is not None else None
         self._routine = None
         self._refresh_position_display()
         self._refresh_calibration_info()
         if self._last_output_path is not None:
             self._results_widget.show_result(self._last_output_path, self._find_result_image(self._last_output_path))
+        if result is not None:
+            _ResultsDialog(result, parent=self).exec()
 
     def _poll_routine_state(self) -> None:
         if self._routine is None or not self._routine.is_running:
