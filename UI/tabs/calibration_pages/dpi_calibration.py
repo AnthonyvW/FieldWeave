@@ -6,6 +6,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -59,6 +62,85 @@ _DESCRIPTION = (
     "• A 10mm micrometer calibration slide with 0.1mm tick marks.<br>"
     "• Approximately 3 minutes<br><br>"
 )
+
+
+class _ResultsDialog(QDialog):
+    """Modal dialog showing the outcome of a completed DPI calibration routine."""
+
+    def __init__(self, result: object, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("DPI Calibration Results")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        success: bool = result.success
+        dpi: float | None = result.get("dpi")
+        qa_pass: bool = result.get("qa_pass", False)
+        qa_warnings: list[str] = result.get("qa_warnings") or []
+        tick_count: int | None = result.get("tick_count")
+        image_width: int | None = result.get("image_width")
+        image_height: int | None = result.get("image_height")
+        output_path: str | None = result.get("output_path")
+
+        if success:
+            status_text = "PASS" if qa_pass else "FAIL — QA checks failed"
+            status_name = "CalScaleStatusPass" if qa_pass else "CalScaleStatusFail"
+        else:
+            status_text = "Routine did not complete successfully"
+            status_name = "CalScaleStatusFail"
+
+        title = QLabel(status_text)
+        title.setObjectName(status_name)
+        layout.addWidget(title)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setObjectName("SampleDivider")
+        layout.addWidget(line)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        def _row(label: str, value: str) -> None:
+            lbl = QLabel(label + ":")
+            lbl.setObjectName("CalScaleRowLabel")
+            val = QLabel(value)
+            val.setObjectName("CalScaleRowValue")
+            val.setWordWrap(True)
+            form.addRow(lbl, val)
+
+        if dpi is not None:
+            _row("DPI", f"{dpi:.2f}")
+        if tick_count is not None:
+            from post_processing.routines.stitch_and_measure import EXPECTED_TICK_COUNT
+            _row("Ticks", f"{tick_count} / {EXPECTED_TICK_COUNT}")
+        if image_width is not None and image_height is not None:
+            _row("Image size", f"{image_width} \u00d7 {image_height} px")
+        if output_path is not None:
+            _row("Output", output_path)
+
+        layout.addLayout(form)
+
+        if qa_warnings:
+            warn_line = QFrame()
+            warn_line.setFrameShape(QFrame.Shape.HLine)
+            warn_line.setObjectName("SampleDivider")
+            layout.addWidget(warn_line)
+
+            for msg in qa_warnings:
+                warn_label = QLabel(f"Warning: {msg}")
+                warn_label.setObjectName("CalErrorLabel")
+                warn_label.setWordWrap(True)
+                layout.addWidget(warn_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
 
 
 class DpiCalibrationWidget(QWidget):
@@ -129,6 +211,7 @@ class DpiCalibrationStepsWidget(QWidget):
         self._capture_complete: bool = False
         self._output_folder: str | None = None
         self._routine = None
+        self._last_result = None
         self._on_title_changed = on_title_changed
         self._crosshair_state_before: bool | None = None
         self._inspect_calibration_state_before: bool | None = None
@@ -424,6 +507,7 @@ class DpiCalibrationStepsWidget(QWidget):
         self._current_step = 0
         self._capture_complete = False
         self._output_folder = None
+        self._last_result = None
         self._update_step_display()
 
     # ------------------------------------------------------------------
@@ -574,12 +658,17 @@ class DpiCalibrationStepsWidget(QWidget):
             result = routine.result if routine is not None else None
             if result is not None and result.success:
                 self._capture_complete = True
+                self._last_result = result
                 get_app_context().machine_vision.notify_settings_changed()
+                _ResultsDialog(result, parent=self).exec()
                 self._next_step()
             else:
+                self._last_result = result
                 activity = routine.activity if routine is not None else ""
                 if activity:
                     self._set_status(activity)
+                if result is not None:
+                    _ResultsDialog(result, parent=self).exec()
             return
 
         activity = self._routine.activity
