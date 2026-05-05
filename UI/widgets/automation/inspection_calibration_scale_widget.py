@@ -482,8 +482,9 @@ class InspectionCalibrationScaleWidget(QWidget):
             candidate = folder / f"{folder.name}.{ext}"
             if candidate.exists():
                 return str(candidate)
-        fallback = folder / "stitched.jpg"
-        return str(fallback) if fallback.exists() else None
+            fallback = folder / f"stitched.{ext}"
+            return str(fallback) if fallback.exists() else None
+        return None
 
     # ------------------------------------------------------------------
     # Routine slots

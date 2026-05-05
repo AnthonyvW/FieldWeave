@@ -217,6 +217,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         camera_manager = ctx.camera_manager
         mv = ctx.machine_vision
         post_processing = ctx.post_processing
+        img_ext = ctx.camera.underlying_camera.settings.fformat.value
 
         self._set_percent("Initialising", 0)
 
@@ -348,7 +349,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         # ------------------------------------------------------------------
 
         pos = self.motion.get_position()
-        filename = f"x{pos.x}_y{pos.y}_z{pos.z}.jpg"
+        filename = f"x{pos.x}_y{pos.y}_z{pos.z}.{img_ext}"
         filepath = save_dir / filename
 
         try:
@@ -423,7 +424,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             )
 
             actual_pos = self.motion.get_position()
-            fname = f"x{actual_pos.x}_y{actual_pos.y}_z{actual_pos.z}.jpg"
+            fname = f"x{actual_pos.x}_y{actual_pos.y}_z{actual_pos.z}.{img_ext}"
             fpath = save_dir / fname
             try:
                 cv2.imwrite(str(fpath), bgr)
@@ -508,5 +509,5 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
         self._set_percent("Complete", 100)
         info(
             f"[CalibrationScale] Done — {step} steps taken,"
-            f" {len(list(save_dir.glob('*.jpg')))} images saved in {save_dir}"
+            f" {len(list(save_dir.glob(f'*.{img_ext}')))} images saved in {save_dir}"
         )

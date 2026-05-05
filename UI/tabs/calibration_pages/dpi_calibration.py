@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +35,10 @@ _STEPS: list[tuple[str, str]] = [
     (
         "Align the camera",
         "Use the movement controls to center the calibration slide in the camera preview. Ensure that the center of the image is either at the first, or the last tick mark in the calibration pattern.",
+    ),
+    (
+        "Calibrate tick detection",
+        "Adjust the slider until all tick marks on the calibration slide are highlighted in the camera preview. Reduce the value if marks are missing; increase it if false detections appear.",
     ),
     (
         "Calculate DPI",
@@ -96,15 +101,12 @@ class DpiCalibrationWidget(QWidget):
         self._description_label.setText(full_text)
 
     def _read_last_calibrated(self) -> str | None:
-        try:
-            ctx = get_app_context()
-            ts = ctx.machine_vision.settings.inspect_calibration.last_calibrated
-            if not ts:
-                return None
-            dt = datetime.fromisoformat(ts)
-            return dt.astimezone().strftime("%Y-%m-%d  %H:%M:%S")
-        except Exception:
+        ctx = get_app_context()
+        ts = ctx.machine_vision.settings.inspect_calibration.last_calibrated
+        if not ts:
             return None
+        dt = datetime.fromisoformat(ts)
+        return dt.astimezone().strftime("%Y-%m-%d  %H:%M:%S")
 
     def reset(self) -> None:
         self.refresh()
@@ -150,6 +152,9 @@ class DpiCalibrationStepsWidget(QWidget):
 
         self._position_widget = self._build_position_widget()
         layout.addWidget(self._position_widget)
+
+        self._tick_calibration_widget = self._build_tick_calibration_widget()
+        layout.addWidget(self._tick_calibration_widget)
 
         self._capture_widget = self._build_capture_widget()
         layout.addWidget(self._capture_widget)
@@ -220,6 +225,27 @@ class DpiCalibrationStepsWidget(QWidget):
 
         btn_row.addStretch()
         layout.addLayout(btn_row)
+        widget.hide()
+        return widget
+
+    def _build_tick_calibration_widget(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._tick_min_length_label = QLabel()
+        self._tick_min_length_label.setObjectName("CalSavedPosLabel")
+        layout.addWidget(self._tick_min_length_label)
+
+        self._tick_slider = QSlider(Qt.Orientation.Horizontal)
+        self._tick_slider.setMinimum(10)
+        self._tick_slider.setMaximum(500)
+        self._tick_slider.setSingleStep(5)
+        self._tick_slider.setPageStep(20)
+        self._tick_slider.valueChanged.connect(self._on_tick_slider_changed)
+        layout.addWidget(self._tick_slider)
+
         widget.hide()
         return widget
 
@@ -312,12 +338,29 @@ class DpiCalibrationStepsWidget(QWidget):
         if step == 1:
             overlays.crosshair = True
             overlays.inspect_calibration = False
-        elif step == 2:
+        elif step == 2 or step == 3:
             overlays.crosshair = False
             overlays.inspect_calibration = True
         else:
             overlays.crosshair = False
             overlays.inspect_calibration = False
+
+    # ------------------------------------------------------------------
+    # Step 3 — tick calibration slots
+    # ------------------------------------------------------------------
+
+    def _refresh_tick_calibration_display(self) -> None:
+        mv = get_app_context().machine_vision
+        current = mv.settings.inspect_calibration.preview.tick_min_length
+        self._tick_slider.blockSignals(True)
+        self._tick_slider.setValue(current)
+        self._tick_slider.blockSignals(False)
+        self._tick_min_length_label.setText(f"Minimum tick length: {current} px")
+
+    def _on_tick_slider_changed(self, value: int) -> None:
+        self._tick_min_length_label.setText(f"Minimum tick length: {value} px")
+        mv = get_app_context().machine_vision
+        mv.settings.inspect_calibration.preview.tick_min_length = value
 
     # ------------------------------------------------------------------
     # Navigation
@@ -342,28 +385,31 @@ class DpiCalibrationStepsWidget(QWidget):
         if self._current_step == 1:
             self._refresh_position_display()
 
-        self._capture_widget.setVisible(self._current_step == 2)
+        self._tick_calibration_widget.setVisible(self._current_step == 2)
         if self._current_step == 2:
+            self._refresh_tick_calibration_display()
+
+        self._capture_widget.setVisible(self._current_step == 3)
+        if self._current_step == 3:
             self._next_btn.setEnabled(self._capture_complete)
         else:
             self._next_btn.setEnabled(True)
 
-        self._qc_widget.setVisible(self._current_step == 3)
-        if self._current_step == 3:
+        self._qc_widget.setVisible(self._current_step == 4)
+        if self._current_step == 4:
             has_output = self._output_folder is not None
             self._view_image_btn.setEnabled(has_output)
             self._open_folder_btn.setEnabled(has_output)
-            try:
-                dpi = get_app_context().machine_vision.settings.dpi
-                self._dpi_label.setText(f"DPI: {dpi:.1f}" if dpi is not None else "DPI: Unknown")
-            except Exception:
-                self._dpi_label.setText("DPI: Unknown")
+            dpi = get_app_context().machine_vision.settings.dpi
+            self._dpi_label.setText(f"DPI: {dpi:.1f}" if dpi is not None else "DPI: Unknown")
 
         self._apply_overlays_for_step(self._current_step)
         self._set_status("")
 
     def _next_step(self) -> None:
         if self._current_step < self._total_steps - 1:
+            if self._current_step == 2:
+                get_app_context().machine_vision.save_settings()
             self._current_step += 1
             self._update_step_display()
 
@@ -481,7 +527,7 @@ class DpiCalibrationStepsWidget(QWidget):
         self._set_status("Calibration position cleared.")
 
     # ------------------------------------------------------------------
-    # Step 3 — capture slots
+    # Step 4 — capture slots
     # ------------------------------------------------------------------
 
     def _on_start_capture_clicked(self) -> None:
@@ -546,10 +592,7 @@ class DpiCalibrationStepsWidget(QWidget):
             self._stop_capture_btn.setVisible(False)
             self._prev_btn.setEnabled(self._current_step > 0)
 
-            try:
-                succeeded = get_app_context().machine_vision.settings.dpi is not None
-            except Exception:
-                succeeded = False
+            succeeded = get_app_context().machine_vision.settings.dpi is not None
 
             if succeeded:
                 self._capture_complete = True
@@ -572,14 +615,16 @@ class DpiCalibrationStepsWidget(QWidget):
                 self._set_status(activity)
 
     # ------------------------------------------------------------------
-    # Step 4 — quality control slots
+    # Step 5 — quality control slots
     # ------------------------------------------------------------------
 
     def _on_view_image_clicked(self) -> None:
         if self._output_folder is None:
             return
         folder = Path(self._output_folder)
-        image_path = folder / (folder.name + ".jpg")
+        ctx = get_app_context()
+        ext = ctx.camera.underlying_camera.settings.fformat.value if ctx.camera is not None else "jpg"
+        image_path = folder / f"{folder.name}.{ext}"
         if not image_path.exists():
             self._set_status(f"Image not found: {image_path}")
             return
@@ -623,7 +668,7 @@ class DpiCalibrationPage(CameraWithSidebarPage):
         navigation.layout_for_content().addWidget(NavigationWidget())
         content_layout.addWidget(navigation)
 
-        calibration = CollapsibleSection("DPI Calibration Step 1 / 4")
+        calibration = CollapsibleSection("DPI Calibration Step 1 / 5")
         self._steps_widget = DpiCalibrationStepsWidget(
             on_title_changed=calibration.set_title
         )
