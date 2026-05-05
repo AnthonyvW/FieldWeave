@@ -1032,7 +1032,6 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
 
 if __name__ == "__main__":
     import argparse
-    import subprocess
     import sys
 
     parser = argparse.ArgumentParser(
@@ -1042,10 +1041,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--overlap",
         type=float,
-        required=True,
+        default=None,
         metavar="FRAC",
-        help="Fraction of image height that consecutive images overlap (e.g. 0.7 for 70%%)",
+        help="Fraction of image height that consecutive images overlap (e.g. 0.7 for 70%%). "
+             "Required in single-folder mode; in --test mode, DPI.txt in each subfolder is used instead.",
     )
+    parser.add_argument("--test", action="store_true", help="Batch mode: treat folder as a parent directory of test case subfolders, each containing a DPI.txt with expected DPI and overlap on the first two lines")
     parser.add_argument("--save-masks", action="store_true", help="Save per-pair debug images to a masks/ subfolder showing binary masks overlaid on source images with matched blob bounding boxes")
     parser.add_argument("--save-steps", action="store_true", help="Save intermediate binary mask images at each filtering stage to a steps/ subfolder for debugging blob detection")
     parser.add_argument("--save-dpi", action="store_true", help="Write DPI.txt containing the measured DPI to the output folder")
@@ -1054,72 +1055,158 @@ if __name__ == "__main__":
 
     DEBUG = args.debug
 
-    if args.overlap > 1.0:
+    if not args.test and args.overlap is None:
+        parser.error("--overlap is required when not running in --test mode")
+
+    if args.overlap is not None and args.overlap > 1.0:
         args.overlap /= 100.0
 
     settings = FieldWeaveSettings()
 
-    mask_debug_folder: str | None = None
-    if args.save_masks:
-        mask_debug_folder = os.path.join(args.folder, "masks")
-        os.makedirs(mask_debug_folder, exist_ok=True)
+    def _read_dpi_txt(folder: str) -> tuple[float, float] | None:
+        dpi_path = os.path.join(folder, "DPI.txt")
+        if not os.path.isfile(dpi_path):
+            return None
+        with open(dpi_path) as f:
+            lines = [l.strip() for l in f.readlines()]
+        if len(lines) < 2:
+            return None
+        expected_dpi = float(lines[0])
+        overlap = float(lines[1])
+        if overlap > 1.0:
+            overlap /= 100.0
+        return expected_dpi, overlap
 
-    steps_folder: str | None = None
-    if args.save_steps:
-        steps_folder = os.path.join(args.folder, "steps")
-        os.makedirs(steps_folder, exist_ok=True)
-
-    routine = StitchAndMeasureRoutine(
-        settings=settings,
-        input_folder=args.folder,
-        save_dpi=args.save_dpi,
-        standalone=True,
-        overlap_frac=args.overlap,
-        mask_debug_folder=mask_debug_folder,
-        steps_folder=steps_folder,
-    )
-    routine.start()
-    routine.wait()
-
-    result = routine.result
-    if result is None or not result.success:
-        print("Stitching failed.", file=sys.stderr)
-        sys.exit(1)
-
-    output_path = result.get("output_path")
-    print(f"Saved:  {output_path}")
-    print(f"Size:   {result.get('image_width')}w x {result.get('image_height')}h px")
-    if mask_debug_folder is not None:
-        print(f"Masks:  {mask_debug_folder}")
-    dpi = result.get("dpi")
-    tick_count = result.get("tick_count")
-    if tick_count is not None:
-        status = "PASS" if result.get("tick_count_valid") else "FAIL"
-        print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
-    outlier_gaps = result.get("tick_outlier_gaps") or []
-    if outlier_gaps:
-        gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
-        print(f"Spacing FAIL: unusual gaps at {gaps_str}")
-    if dpi is not None:
-        print(f"DPI:    {dpi:.2f}")
-
-    if DEBUG:
-        sm = FieldWeaveSettings().post_processing.stitch_and_measure
+    def _run_single(folder: str, overlap: float) -> dict:
+        mask_debug_folder: str | None = None
         if args.save_masks:
-            stitched_bgr = cv2.imread(output_path)
-        else:
-            stitched_bgr = cv2.cvtColor(result.get("stitched_rgb"), cv2.COLOR_RGB2BGR)
-        overlay = _build_dpi_debug_overlay(stitched_bgr, sm.scale_mm, sm.tick_min_length, debug=True)
-        if overlay is not None:
-            stem, ext = os.path.splitext(output_path)
-            debug_path = f"{stem}_debug{ext}"
-            cv2.imwrite(debug_path, overlay)
-            print(f"Debug: {debug_path}")
-        output_path = debug_path
+            mask_debug_folder = os.path.join(folder, "masks")
+            os.makedirs(mask_debug_folder, exist_ok=True)
 
-    if sys.platform == "win32":
-        os.startfile(output_path)
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", output_path])
+        steps_folder: str | None = None
+        if args.save_steps:
+            steps_folder = os.path.join(folder, "steps")
+            os.makedirs(steps_folder, exist_ok=True)
+
+        routine = StitchAndMeasureRoutine(
+            settings=settings,
+            input_folder=folder,
+            save_dpi=args.save_dpi,
+            standalone=True,
+            overlap_frac=overlap,
+            mask_debug_folder=mask_debug_folder,
+            steps_folder=steps_folder,
+        )
+        routine.start()
+        routine.wait()
+        return routine.result
+
+    if args.test:
+        subfolders = sorted([
+            entry.path
+            for entry in os.scandir(args.folder)
+            if entry.is_dir()
+        ])
+        if not subfolders:
+            print(f"No subfolders found in {args.folder}", file=sys.stderr)
+            sys.exit(1)
+
+        DPI_TOLERANCE = 0.05
+
+        col_w = 20
+        header = (
+            f"{'Folder':<{col_w}}  {'Expected':>10}  {'Detected':>10}  {'Delta':>10}  {'Status':<8}  Errors"
+        )
+        separator = "-" * len(header)
+
+        total = len(subfolders)
+        passed = 0
+        rows: list[str] = []
+
+        for i, subfolder in enumerate(subfolders, start=1):
+            name = os.path.basename(subfolder)
+            dpi_params = _read_dpi_txt(subfolder)
+            if dpi_params is None:
+                row = f"{name:<{col_w}}  {'N/A':>10}  {'N/A':>10}  {'N/A':>10}  {'ERROR':<8}  missing or invalid DPI.txt"
+                rows.append(row)
+                print(f"[{i}/{total}] {name}: ERROR - missing or invalid DPI.txt")
+                continue
+
+            expected_dpi, overlap = dpi_params
+            result = _run_single(subfolder, overlap)
+
+            errors: list[str] = []
+
+            if result is None or not result.success:
+                row = f"{name:<{col_w}}  {expected_dpi:>10.2f}  {'N/A':>10}  {'N/A':>10}  {'ERROR':<8}  stitching failed"
+                rows.append(row)
+                print(f"[{i}/{total}] {name}: ERROR - stitching failed")
+                continue
+
+            detected_dpi: float | None = result.get("dpi")
+            qa_warnings: list[str] = result.get("qa_warnings") or []
+            errors.extend(qa_warnings)
+
+            if detected_dpi is None:
+                row = f"{name:<{col_w}}  {expected_dpi:>10.2f}  {'N/A':>10}  {'N/A':>10}  {'ERROR':<8}  DPI detection failed"
+                rows.append(row)
+                print(f"[{i}/{total}] {name}: ERROR - DPI detection failed")
+                continue
+
+            delta = detected_dpi - expected_dpi
+            within_tolerance = abs(delta) / expected_dpi <= DPI_TOLERANCE
+            status = "PASS" if within_tolerance and not errors else "FAIL"
+            if status == "PASS":
+                passed += 1
+
+            errors_str = "; ".join(errors) if errors else ""
+            row = f"{name:<{col_w}}  {expected_dpi:>10.2f}  {detected_dpi:>10.2f}  {delta:>+10.2f}  {status:<8}  {errors_str}"
+            rows.append(row)
+            progress_errors = f" - {errors_str}" if errors_str else ""
+            print(f"[{i}/{total}] {name}: {status} (expected {expected_dpi:.2f}, detected {detected_dpi:.2f}, delta {delta:+.2f}){progress_errors}")
+
+        print()
+        print(header)
+        print(separator)
+        for row in rows:
+            print(row)
+        print(separator)
+        print(f"{passed}/{total} passed")
+        sys.exit(0 if passed == total else 1)
+
     else:
-        subprocess.Popen(["xdg-open", output_path])
+        result = _run_single(args.folder, args.overlap)
+
+        if result is None or not result.success:
+            print("Stitching failed.", file=sys.stderr)
+            sys.exit(1)
+
+        output_path = result.get("output_path")
+        print(f"Saved:  {output_path}")
+        print(f"Size:   {result.get('image_width')}w x {result.get('image_height')}h px")
+        if args.save_masks:
+            print(f"Masks:  {os.path.join(args.folder, 'masks')}")
+        dpi = result.get("dpi")
+        tick_count = result.get("tick_count")
+        if tick_count is not None:
+            status = "PASS" if result.get("tick_count_valid") else "FAIL"
+            print(f"Ticks:  {tick_count}/{EXPECTED_TICK_COUNT} [{status}]")
+        outlier_gaps = result.get("tick_outlier_gaps") or []
+        if outlier_gaps:
+            gaps_str = ", ".join(f"#{i}-#{j} ({gap:.0f}px)" for i, j, gap in outlier_gaps)
+            print(f"Spacing FAIL: unusual gaps at {gaps_str}")
+        if dpi is not None:
+            print(f"DPI:    {dpi:.2f}")
+
+        if DEBUG:
+            sm = FieldWeaveSettings().post_processing.stitch_and_measure
+            if args.save_masks:
+                stitched_bgr = cv2.imread(output_path)
+            else:
+                stitched_bgr = cv2.cvtColor(result.get("stitched_rgb"), cv2.COLOR_RGB2BGR)
+            overlay = _build_dpi_debug_overlay(stitched_bgr, sm.scale_mm, sm.tick_min_length, debug=True)
+            if overlay is not None:
+                stem, ext = os.path.splitext(output_path)
+                debug_path = f"{stem}_debug{ext}"
+                cv2.imwrite(debug_path, overlay)
+                print(f"Debug: {debug_path}")
