@@ -45,8 +45,6 @@ _DEFAULT_PRESETS_MM = (0.04, 0.4, 2.0, 10.0)
 # Nanometres per millimetre conversion constant.
 _NM_PER_MM = 1_000_000
 
-_DEFAULT_STARTING_HEIGHT_MM: float = 0.0
-
 
 def _mm_to_nm(mm: float) -> int:
     return round(mm * _NM_PER_MM)
