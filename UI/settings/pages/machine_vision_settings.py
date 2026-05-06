@@ -10,7 +10,7 @@ Design
   the visible parameter group so each method has its own tunable controls.
 - A shared "Focus Region" group lets the user restrict analysis to a
   rectangular inset defined by four edge margins (% of image dimension).
-- Modified fields turn orange exactly like CameraSettingsWidget does.
+- Modified fields turn orange on their labels via LabelTrackerMixin from shared.py.
 - get_group_names() returns the top-level group names so SettingsDialog can
   add them as sidebar sub-items.
 - Changes are applied to the manager live on every widget interaction.
@@ -19,12 +19,10 @@ Design
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Slot
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -33,7 +31,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -53,41 +50,10 @@ from machine_vision.machine_vision_config import (
     FOCUS_METHOD_TENENGRAD,
     FOCUS_METHOD_LAPLACIAN,
 )
-
 from motion.models import Position
+from UI.settings.pages.shared import NM_PER_MM, NoScrollDoubleSpinBox, NoScrollSpinBox, LabelTrackerMixin
 
-_ORANGE = "#FFA500"
 _GREY = "#aaaaaa"
-_NM_PER_MM = 1_000_000
-
-
-# ---------------------------------------------------------------------------
-# Wheel-scroll guard
-# ---------------------------------------------------------------------------
-
-def _apply_no_scroll_to_panel(panel: QWidget) -> None:
-    """Apply _ignore_scroll_when_unfocused to all input children of *panel*."""
-    for child in panel.findChildren(QAbstractSpinBox):
-        _ignore_scroll_when_unfocused(child)
-    for child in panel.findChildren(QComboBox):
-        _ignore_scroll_when_unfocused(child)
-
-
-def _ignore_scroll_when_unfocused(widget: QWidget) -> None:
-    """
-    Install an event filter on *widget* that swallows wheel events unless the
-    widget already has keyboard focus.  This prevents accidentally changing
-    spinbox / combobox / slider values while scrolling the parent scroll area.
-    """
-    class _Filter(QWidget):
-        def eventFilter(self, obj: QWidget, event: QEvent) -> bool:
-            if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
-                return True
-            return False
-
-    filt = _Filter(widget)
-    widget.installEventFilter(filt)
-    widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +68,7 @@ def _make_float_row(
     decimals: int,
     step: float,
     tooltip: str,
-) -> tuple[QWidget, QDoubleSpinBox, QSlider]:
+) -> tuple[QWidget, NoScrollDoubleSpinBox, QSlider]:
     """
     Build a slider + spinbox pair.
 
@@ -119,7 +85,7 @@ def _make_float_row(
     slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     slider.setToolTip(tooltip)
 
-    spin = QDoubleSpinBox()
+    spin = NoScrollDoubleSpinBox()
     spin.setMinimum(min_val)
     spin.setMaximum(max_val)
     spin.setDecimals(decimals)
@@ -135,13 +101,8 @@ def _make_float_row(
     def _to_spin(pos: int) -> float:
         return min_val + (pos / 1000.0) * span
 
-    # Mutual sync — the change handlers supplied by the caller are connected
-    # after this function returns; these closures handle only the widget sync.
     spin.valueChanged.connect(lambda v: (slider.blockSignals(True), slider.setValue(_to_slider(v)), slider.blockSignals(False)))
     slider.valueChanged.connect(lambda p: (spin.blockSignals(True), spin.setValue(_to_spin(p)), spin.blockSignals(False)))
-
-    _ignore_scroll_when_unfocused(slider)
-    _ignore_scroll_when_unfocused(spin)
 
     row.addWidget(slider)
     row.addWidget(spin)
@@ -163,7 +124,7 @@ def _make_ceiling_row(
     row = QHBoxLayout(container)
     row.setContentsMargins(0, 0, 0, 0)
 
-    spin = QDoubleSpinBox()
+    spin = NoScrollDoubleSpinBox()
     spin.setMinimum(0.0)
     spin.setMaximum(1_000_000.0)
     spin.setDecimals(1)
@@ -183,8 +144,6 @@ def _make_ceiling_row(
         lambda s: spin.setEnabled(s != Qt.CheckState.Checked)
     )
 
-    _ignore_scroll_when_unfocused(spin)
-
     row.addWidget(spin)
     row.addWidget(auto_check)
     row.addWidget(reset_btn)
@@ -199,20 +158,19 @@ def _make_ceiling_row(
 # Method-specific parameter panels
 # ---------------------------------------------------------------------------
 
-class _TenengradPanel(QWidget):
+class _TenengradPanel(LabelTrackerMixin, QWidget):
     """Parameter controls for the Tenengrad method."""
 
     def __init__(self) -> None:
         super().__init__()
+        self._labels: dict[str, QLabel] = {}
         self._w: dict[str, QWidget] = {}
         self._build()
-        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        # kernel_size — dropdown (only valid values)
         kernel_combo = QComboBox()
         for k in (1, 3, 5, 7):
             kernel_combo.addItem(str(k), k)
@@ -221,43 +179,38 @@ class _TenengradPanel(QWidget):
             "Sobel kernel size.  Larger kernels are less sensitive to noise "
             "but reduce spatial resolution of the edge response."
         )
-        form.addRow("Kernel size:", kernel_combo)
+        form.addRow(self._register_label("kernel_size", QLabel("Kernel size:")), kernel_combo)
         self._w["kernel_size"] = kernel_combo
 
-        # radius
         container, spin, slider = _make_float_row(
             "radius", self._w, 0.0, 32.0, 1, 0.5,
             "Gaussian/box blur radius (px) applied after gradient magnitude.  0 = no blur.",
         )
-        form.addRow("Blur radius:", container)
+        form.addRow(self._register_label("radius", QLabel("Blur radius:")), container)
 
-        # threshold
         container, spin, slider = _make_float_row(
             "threshold", self._w, 0.0, 500.0, 1, 1.0,
             "Gradient values below this level are zeroed out.  0 = disabled.",
         )
-        form.addRow("Threshold:", container)
+        form.addRow(self._register_label("threshold", QLabel("Threshold:")), container)
 
-        # overlay_alpha
         container, spin, slider = _make_float_row(
             "overlay_alpha", self._w, 0.0, 1.0, 2, 0.05,
             "Heatmap blend weight over the camera image.  0 = image only; 1 = heatmap only.",
         )
-        form.addRow("Overlay alpha:", container)
+        form.addRow(self._register_label("overlay_alpha", QLabel("Overlay alpha:")), container)
 
-        # score_ceiling
         ceiling_container = _make_ceiling_row(
             self._w,
             "Fixed ceiling used to normalise the score map across frames.\n"
             "Focus sharply, note the 'raw max' value, enter it here.\n"
             "Check Auto to normalise each frame independently.",
         )
-        form.addRow("Score ceiling:", ceiling_container)
+        form.addRow(self._register_label("score_ceiling", QLabel("Score ceiling:")), ceiling_container)
 
-        # half_resolution
         half_check = QCheckBox()
         half_check.setToolTip("Process at half resolution for speed; result upscaled before display.")
-        form.addRow("Half resolution:", half_check)
+        form.addRow(self._register_label("half_resolution", QLabel("Half resolution:")), half_check)
         self._w["half_resolution"] = half_check
 
     @property
@@ -265,21 +218,20 @@ class _TenengradPanel(QWidget):
         return self._w
 
 
-class _LaplacianPanel(QWidget):
+class _LaplacianPanel(LabelTrackerMixin, QWidget):
     """Parameter controls for the Laplacian method."""
 
     def __init__(self) -> None:
         super().__init__()
+        self._labels: dict[str, QLabel] = {}
         self._w: dict[str, QWidget] = {}
         self._build()
-        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        # window_size
-        window_spin = QSpinBox()
+        window_spin = NoScrollSpinBox()
         window_spin.setMinimum(3)
         window_spin.setMaximum(101)
         window_spin.setSingleStep(2)
@@ -288,43 +240,38 @@ class _LaplacianPanel(QWidget):
             "Side length (px) of the local variance window.  Must be odd.\n"
             "Larger values integrate more context but reduce heatmap resolution."
         )
-        form.addRow("Window size:", window_spin)
+        form.addRow(self._register_label("window_size", QLabel("Window size:")), window_spin)
         self._w["window_size"] = window_spin
 
-        # radius
         container, spin, slider = _make_float_row(
             "radius", self._w, 0.0, 32.0, 1, 0.5,
             "Gaussian/box blur radius (px) applied after the variance step.  0 = no blur.",
         )
-        form.addRow("Blur radius:", container)
+        form.addRow(self._register_label("radius", QLabel("Blur radius:")), container)
 
-        # threshold
         container, spin, slider = _make_float_row(
             "threshold", self._w, 0.0, 500.0, 1, 1.0,
             "Variance values below this level are zeroed out.  0 = disabled.",
         )
-        form.addRow("Threshold:", container)
+        form.addRow(self._register_label("threshold", QLabel("Threshold:")), container)
 
-        # overlay_alpha
         container, spin, slider = _make_float_row(
             "overlay_alpha", self._w, 0.0, 1.0, 2, 0.05,
             "Heatmap blend weight over the camera image.  0 = image only; 1 = heatmap only.",
         )
-        form.addRow("Overlay alpha:", container)
+        form.addRow(self._register_label("overlay_alpha", QLabel("Overlay alpha:")), container)
 
-        # score_ceiling
         ceiling_container = _make_ceiling_row(
             self._w,
             "Fixed ceiling used to normalise the score map across frames.\n"
             "Focus sharply, note the 'raw max' value, enter it here.\n"
             "Check Auto to normalise each frame independently.",
         )
-        form.addRow("Score ceiling:", ceiling_container)
+        form.addRow(self._register_label("score_ceiling", QLabel("Score ceiling:")), ceiling_container)
 
-        # half_resolution
         half_check = QCheckBox()
         half_check.setToolTip("Process at half resolution for speed; result upscaled before display.")
-        form.addRow("Half resolution:", half_check)
+        form.addRow(self._register_label("half_resolution", QLabel("Half resolution:")), half_check)
         self._w["half_resolution"] = half_check
 
     @property
@@ -336,7 +283,7 @@ class _LaplacianPanel(QWidget):
 # Focus Region panel (shared across methods)
 # ---------------------------------------------------------------------------
 
-class _FocusRegionPanel(QWidget):
+class _FocusRegionPanel(LabelTrackerMixin, QWidget):
     """
     Controls for the focus region of interest.
 
@@ -347,9 +294,9 @@ class _FocusRegionPanel(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._labels: dict[str, QLabel] = {}
         self._w: dict[str, QWidget] = {}
         self._build()
-        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
@@ -360,7 +307,7 @@ class _FocusRegionPanel(QWidget):
             "When checked, restrict focus analysis to the rectangle defined "
             "by the four margins below.  Pixels outside are ignored."
         )
-        form.addRow("Enabled:", enabled_check)
+        form.addRow(self._register_label("enabled", QLabel("Enabled:")), enabled_check)
         self._w["enabled"] = enabled_check
 
         _MARGIN_TOOLTIP = (
@@ -378,11 +325,8 @@ class _FocusRegionPanel(QWidget):
                 key, self._w, 0.0, 50.0, 1, 0.5,
                 _MARGIN_TOOLTIP.format(edge=edge, adj=adj, axis=axis),
             )
-            form.addRow(label, container)
+            form.addRow(self._register_label(key, QLabel(label)), container)
 
-        # Disable margin controls when the region is not enabled.
-        # checkStateChanged emits Qt.CheckState (enum), not a plain int,
-        # so compare against the enum value directly — never use .value.
         def _toggle_margins(state: Qt.CheckState) -> None:
             active = state == Qt.CheckState.Checked
             for k in ("left", "right", "top", "bottom"):
@@ -392,7 +336,6 @@ class _FocusRegionPanel(QWidget):
                         w.setEnabled(active)
 
         enabled_check.checkStateChanged.connect(_toggle_margins)
-        # Initialise to disabled (enabled=False default).
         _toggle_margins(Qt.CheckState.Unchecked)
 
     @property
@@ -404,28 +347,27 @@ class _FocusRegionPanel(QWidget):
 # Inspection Calibration panel
 # ---------------------------------------------------------------------------
 
-class _InspectCalibrationModePanel(QWidget):
+class _InspectCalibrationModePanel(LabelTrackerMixin, QWidget):
     """
     Controls for one mode (preview or snap) of the inspection calibration.
     """
 
     def __init__(self, label: str) -> None:
         super().__init__()
+        self._labels: dict[str, QLabel] = {}
         self._label = label
         self._w: dict[str, QWidget] = {}
         self._build()
-        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        # downsample — spinbox with a "None" checkbox
         ds_container = QWidget()
         ds_row = QHBoxLayout(ds_container)
         ds_row.setContentsMargins(0, 0, 0, 0)
 
-        ds_spin = QSpinBox()
+        ds_spin = NoScrollSpinBox()
         ds_spin.setMinimum(1)
         ds_spin.setMaximum(16)
         ds_spin.setSingleStep(1)
@@ -449,12 +391,11 @@ class _InspectCalibrationModePanel(QWidget):
         ds_row.addWidget(ds_spin)
         ds_row.addWidget(ds_none)
         ds_row.addStretch()
-        form.addRow("Downsample:", ds_container)
+        form.addRow(self._register_label("downsample", QLabel("Downsample:")), ds_container)
         self._w["downsample"] = ds_spin
         self._w["downsample_none"] = ds_none
 
-        # tick_min_length
-        tick_spin = QSpinBox()
+        tick_spin = NoScrollSpinBox()
         tick_spin.setMinimum(1)
         tick_spin.setMaximum(2000)
         tick_spin.setSingleStep(10)
@@ -463,7 +404,7 @@ class _InspectCalibrationModePanel(QWidget):
             "Minimum perpendicular pixel run (full-resolution px) required to\n"
             "count a candidate as a tick mark. Scaled by downsample internally."
         )
-        form.addRow("Min tick length:", tick_spin)
+        form.addRow(self._register_label("tick_min_length", QLabel("Min tick length:")), tick_spin)
         self._w["tick_min_length"] = tick_spin
 
     @property
@@ -475,21 +416,20 @@ class _InspectCalibrationModePanel(QWidget):
 # Red Mark Detection panel
 # ---------------------------------------------------------------------------
 
-class _RedMarkPanel(QWidget):
+class _RedMarkPanel(LabelTrackerMixin, QWidget):
     """Parameter controls for the red registration-mark detection algorithm."""
 
     def __init__(self) -> None:
         super().__init__()
+        self._labels: dict[str, QLabel] = {}
         self._w: dict[str, QWidget] = {}
         self._build()
-        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        # scale
-        scale_spin = QSpinBox()
+        scale_spin = NoScrollSpinBox()
         scale_spin.setMinimum(1)
         scale_spin.setMaximum(16)
         scale_spin.setSingleStep(1)
@@ -499,11 +439,10 @@ class _RedMarkPanel(QWidget):
             "The image is resized to 1/scale in each dimension.\n"
             "Higher values reduce processing time at the cost of precision."
         )
-        form.addRow("Scale:", scale_spin)
+        form.addRow(self._register_label("scale", QLabel("Scale:")), scale_spin)
         self._w["scale"] = scale_spin
 
-        # open_kernel_size
-        kernel_spin = QSpinBox()
+        kernel_spin = NoScrollSpinBox()
         kernel_spin.setMinimum(1)
         kernel_spin.setMaximum(51)
         kernel_spin.setSingleStep(2)
@@ -512,42 +451,37 @@ class _RedMarkPanel(QWidget):
             "Side length of the elliptical morphological opening kernel.\n"
             "Larger values remove more noise but may break up small marks."
         )
-        form.addRow("Open kernel size:", kernel_spin)
+        form.addRow(self._register_label("open_kernel_size", QLabel("Open kernel size:")), kernel_spin)
         self._w["open_kernel_size"] = kernel_spin
 
-        # min_area
-        min_area_spin = QSpinBox()
+        min_area_spin = NoScrollSpinBox()
         min_area_spin.setMinimum(0)
         min_area_spin.setMaximum(100_000)
         min_area_spin.setSingleStep(50)
         min_area_spin.setFixedWidth(90)
         min_area_spin.setToolTip("Minimum blob area in pixels. Smaller blobs are discarded as noise.")
-        form.addRow("Min area (px):", min_area_spin)
+        form.addRow(self._register_label("min_area", QLabel("Min area (px):")), min_area_spin)
         self._w["min_area"] = min_area_spin
 
-        # max_aspect_ratio
         container, _spin, _slider = _make_float_row(
             "max_aspect_ratio", self._w, 1.0, 20.0, 1, 0.5,
             "Maximum ratio of longer to shorter side of a blob's bounding box.\n"
             "Elongated blobs (e.g. scratches) are discarded above this value.",
         )
-        form.addRow("Max aspect ratio:", container)
+        form.addRow(self._register_label("max_aspect_ratio", QLabel("Max aspect ratio:")), container)
 
-        # min_area_fraction
         container, _spin, _slider = _make_float_row(
             "min_area_fraction", self._w, 0.0, 1.0, 2, 0.05,
             "Minimum blob area as a fraction of the largest surviving blob.\n"
             "Discards small stray marks when a large registration mark is present.",
         )
-        form.addRow("Min area fraction:", container)
+        form.addRow(self._register_label("min_area_fraction", QLabel("Min area fraction:")), container)
 
-        # HSV colour range — section label
         hsv_label = QLabel("HSV Colour Range")
         hsv_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
         form.addRow(hsv_label)
 
-        # hue_low
-        hue_low_spin = QSpinBox()
+        hue_low_spin = NoScrollSpinBox()
         hue_low_spin.setMinimum(0)
         hue_low_spin.setMaximum(180)
         hue_low_spin.setSingleStep(1)
@@ -556,94 +490,83 @@ class _RedMarkPanel(QWidget):
             "Lower hue boundary for the upper red range (160–180 in OpenCV HSV).\n"
             "Red wraps around 0/180, so two ranges are combined."
         )
-        form.addRow("Hue low:", hue_low_spin)
+        form.addRow(self._register_label("hue_low", QLabel("Hue low:")), hue_low_spin)
         self._w["hue_low"] = hue_low_spin
 
-        # hue_high
-        hue_high_spin = QSpinBox()
+        hue_high_spin = NoScrollSpinBox()
         hue_high_spin.setMinimum(0)
         hue_high_spin.setMaximum(180)
         hue_high_spin.setSingleStep(1)
         hue_high_spin.setFixedWidth(90)
         hue_high_spin.setToolTip("Upper hue boundary for the lower red range (0–hue_high in OpenCV HSV).")
-        form.addRow("Hue high:", hue_high_spin)
+        form.addRow(self._register_label("hue_high", QLabel("Hue high:")), hue_high_spin)
         self._w["hue_high"] = hue_high_spin
 
-        # sat_min
-        sat_spin = QSpinBox()
+        sat_spin = NoScrollSpinBox()
         sat_spin.setMinimum(0)
         sat_spin.setMaximum(255)
         sat_spin.setSingleStep(5)
         sat_spin.setFixedWidth(90)
         sat_spin.setToolTip("Minimum HSV saturation for a pixel to count as red [0–255].")
-        form.addRow("Sat min:", sat_spin)
+        form.addRow(self._register_label("sat_min", QLabel("Sat min:")), sat_spin)
         self._w["sat_min"] = sat_spin
 
-        # val_min
-        val_spin = QSpinBox()
+        val_spin = NoScrollSpinBox()
         val_spin.setMinimum(0)
         val_spin.setMaximum(255)
         val_spin.setSingleStep(5)
-        val_spin.setFixedWidth(90)
         val_spin.setToolTip("Minimum HSV value for a pixel to count as red [0–255].")
-        form.addRow("Val min:", val_spin)
+        val_spin.setFixedWidth(90)
+        form.addRow(self._register_label("val_min", QLabel("Val min:")), val_spin)
         self._w["val_min"] = val_spin
 
-        # Smoothing / stabilisation — section label
         smooth_label = QLabel("Centroid Smoothing")
         smooth_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
         form.addRow(smooth_label)
 
-        # smoothing_alpha
         container, _spin, _slider = _make_float_row(
             "smoothing_alpha", self._w, 0.0, 1.0, 2, 0.05,
             "EMA weight for the stabilised centroid position [0.0–1.0].\n"
             "Lower values give more smoothing; higher values track faster.",
         )
-        form.addRow("Smoothing alpha:", container)
+        form.addRow(self._register_label("smoothing_alpha", QLabel("Smoothing alpha:")), container)
 
-        # deadband_px
         container, _spin, _slider = _make_float_row(
             "deadband_px", self._w, 0.0, 50.0, 1, 0.5,
             "Changes smaller than this (in pixels) are ignored to prevent jitter.",
         )
-        form.addRow("Deadband (px):", container)
+        form.addRow(self._register_label("deadband_px", QLabel("Deadband (px):")), container)
 
-        # max_step_px
         container, _spin, _slider = _make_float_row(
             "max_step_px", self._w, 0.0, 200.0, 1, 1.0,
             "Maximum centroid movement per frame in pixels (slew-rate limit).",
         )
-        form.addRow("Max step (px):", container)
+        form.addRow(self._register_label("max_step_px", QLabel("Max step (px):")), container)
 
-        # jump_threshold_px
         container, _spin, _slider = _make_float_row(
             "jump_threshold_px", self._w, 0.0, 500.0, 1, 5.0,
             "If the raw centroid moves more than this many pixels from the smoothed\n"
             "value in a single frame, the smoothed value jumps directly to the raw value.",
         )
-        form.addRow("Jump threshold (px):", container)
+        form.addRow(self._register_label("jump_threshold_px", QLabel("Jump threshold (px):")), container)
 
-        # Side cluster — section label
         cluster_label = QLabel("Side Cluster")
         cluster_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
         form.addRow(cluster_label)
 
-        # side_cluster_fraction
         container, _spin, _slider = _make_float_row(
             "side_cluster_fraction", self._w, 0.0, 1.0, 2, 0.05,
             "Fraction of marks that must be within side_cluster_margin of one\n"
             "horizontal edge before the line orientation switches to 'horizontal'.",
         )
-        form.addRow("Cluster fraction:", container)
+        form.addRow(self._register_label("side_cluster_fraction", QLabel("Cluster fraction:")), container)
 
-        # side_cluster_margin
         container, _spin, _slider = _make_float_row(
             "side_cluster_margin", self._w, 0.0, 0.45, 2, 0.01,
             "Fraction of image width defining the left/right edge zones used\n"
             "by the side-cluster test.",
         )
-        form.addRow("Cluster margin:", container)
+        form.addRow(self._register_label("side_cluster_margin", QLabel("Cluster margin:")), container)
 
     @property
     def widgets(self) -> dict[str, QWidget]:
@@ -654,20 +577,20 @@ class _RedMarkPanel(QWidget):
 # Background Detection panel
 # ---------------------------------------------------------------------------
 
-class _BackgroundPanel(QWidget):
+class _BackgroundPanel(LabelTrackerMixin, QWidget):
     """Parameter controls for the background detection algorithm."""
 
     def __init__(self) -> None:
         super().__init__()
+        self._labels: dict[str, QLabel] = {}
         self._w: dict[str, QWidget] = {}
         self._build()
-        _apply_no_scroll_to_panel(self)
 
     def _build(self) -> None:
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        val_median_spin = QSpinBox()
+        val_median_spin = NoScrollSpinBox()
         val_median_spin.setMinimum(0)
         val_median_spin.setMaximum(255)
         val_median_spin.setSingleStep(5)
@@ -676,7 +599,7 @@ class _BackgroundPanel(QWidget):
             "Maximum median HSV brightness to classify a frame as background [0–255].\n"
             "The plastic surface is dark-to-mid grey; bright surfaces like paper are rejected."
         )
-        form.addRow("Median max:", val_median_spin)
+        form.addRow(self._register_label("val_median_max", QLabel("Median max:")), val_median_spin)
         self._w["val_median_max"] = val_median_spin
 
         container, _spin, _slider = _make_float_row(
@@ -684,9 +607,9 @@ class _BackgroundPanel(QWidget):
             "Maximum standard deviation of HSV brightness to classify a frame as background [0–255].\n"
             "The plastic surface is highly uniform; textured materials are rejected.",
         )
-        form.addRow("Std max:", container)
+        form.addRow(self._register_label("val_std_max", QLabel("Std max:")), container)
 
-        scale_spin = QSpinBox()
+        scale_spin = NoScrollSpinBox()
         scale_spin.setMinimum(1)
         scale_spin.setMaximum(16)
         scale_spin.setSingleStep(1)
@@ -695,7 +618,7 @@ class _BackgroundPanel(QWidget):
             "Downsample factor applied before computing statistics.\n"
             "Higher values reduce computation with negligible effect on accuracy."
         )
-        form.addRow("Scale:", scale_spin)
+        form.addRow(self._register_label("scale", QLabel("Scale:")), scale_spin)
         self._w["scale"] = scale_spin
 
     @property
@@ -703,27 +626,24 @@ class _BackgroundPanel(QWidget):
         return self._w
 
 
-class MachineVisionSettingsWidget(QWidget):
+class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
     """
     Full settings page for all machine-vision algorithms.
 
     Embedded in the application settings dialog.
     """
 
-    # Group names exposed for SettingsDialog sidebar sub-items.
     _GROUP_NAMES = ["Focus Detection", "Camera Calibration", "Inspection Calibration", "Red Mark Detection", "Background Detection"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._labels: dict[str, QLabel] = {}
         self.parent_dialog = parent_dialog
         self._mv = get_app_context().machine_vision
 
         self._has_unsaved_changes: bool = False
-
         self._applying_settings: bool = False
-
         self._saved_values: dict[str, object] = {}
-
         self._group_boxes: dict[str, QGroupBox] = {}
 
         self._tenengrad_panel = _TenengradPanel()
@@ -821,25 +741,23 @@ class MachineVisionSettingsWidget(QWidget):
 
         # --- DPI sub-box ---
         dpi_box = QGroupBox("DPI")
-        dpi_vbox = QVBoxLayout(dpi_box)
-        dpi_vbox.setContentsMargins(6, 6, 6, 6)
-        dpi_vbox.setSpacing(6)
+        dpi_form = QFormLayout(dpi_box)
+        dpi_form.setContentsMargins(6, 6, 6, 6)
+        dpi_form.setSpacing(6)
+        dpi_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        self._dpi_label = QLabel("Current DPI: Not set")
-        self._dpi_label.setObjectName("DpiLabel")
-        dpi_vbox.addWidget(self._dpi_label)
+        dpi_input_row = QWidget()
+        dpi_input_layout = QHBoxLayout(dpi_input_row)
+        dpi_input_layout.setContentsMargins(0, 0, 0, 0)
+        dpi_input_layout.setSpacing(6)
 
-        manual_row = QHBoxLayout()
-        manual_row.setSpacing(6)
-
-        self._dpi_spin = QDoubleSpinBox()
+        self._dpi_spin = NoScrollDoubleSpinBox()
         self._dpi_spin.setMinimum(1.0)
         self._dpi_spin.setMaximum(100_000.0)
         self._dpi_spin.setDecimals(2)
         self._dpi_spin.setSingleStep(10.0)
         self._dpi_spin.setFixedWidth(110)
         self._dpi_spin.setToolTip("Enter a DPI value to store as the known optical resolution.")
-        _ignore_scroll_when_unfocused(self._dpi_spin)
 
         self._dpi_apply_btn = QPushButton("Set DPI")
         self._dpi_apply_btn.setMaximumWidth(80)
@@ -851,17 +769,22 @@ class MachineVisionSettingsWidget(QWidget):
         self._dpi_clear_btn.setToolTip("Remove the stored DPI value.")
         self._dpi_clear_btn.clicked.connect(self._on_dpi_clear_clicked)
 
-        manual_row.addWidget(self._dpi_spin)
-        manual_row.addWidget(self._dpi_apply_btn)
-        manual_row.addWidget(self._dpi_clear_btn)
-        manual_row.addStretch()
-        dpi_vbox.addLayout(manual_row)
+        dpi_input_layout.addWidget(self._dpi_spin)
+        dpi_input_layout.addWidget(self._dpi_apply_btn)
+        dpi_input_layout.addWidget(self._dpi_clear_btn)
+        dpi_input_layout.addStretch()
+
+        self._dpi_label = self._register_label("dpi", QLabel("Current DPI:"))
+        self._dpi_label.setObjectName("DpiLabel")
+        dpi_form.addRow(self._dpi_label, dpi_input_row)
+
+        self._dpi_spin.valueChanged.connect(self._on_dpi_spin_changed)
 
         self._dpi_status = QLabel("")
         self._dpi_status.setObjectName("DpiStatusLabel")
         self._dpi_status.setWordWrap(False)
         self._dpi_status.hide()
-        dpi_vbox.addWidget(self._dpi_status)
+        dpi_form.addRow(self._dpi_status)
 
         vbox.addWidget(dpi_box)
 
@@ -900,12 +823,12 @@ class MachineVisionSettingsWidget(QWidget):
     def _refresh_camera_calibration_display(self) -> None:
         settings = self._mv.settings
         dpi = settings.dpi
+        self._dpi_spin.blockSignals(True)
         if dpi is not None:
-            self._dpi_label.setText(f"Current DPI: {dpi:.2f}")
             self._dpi_spin.setValue(dpi)
         else:
-            self._dpi_label.setText("Current DPI: Not set")
             self._dpi_spin.setValue(self._dpi_spin.minimum())
+        self._dpi_spin.blockSignals(False)
 
         cal = settings.camera_calibration.calibration
         if cal is not None:
@@ -914,6 +837,14 @@ class MachineVisionSettingsWidget(QWidget):
         else:
             self._cam_space_label.setText("Calibration: Not set")
             self._cam_space_clear_btn.setEnabled(False)
+
+    def _on_dpi_spin_changed(self, value: float) -> None:
+        saved = self._saved_values.get("dpi")
+        if saved is None:
+            orange = True
+        else:
+            orange = abs(saved - value) > 1e-9
+        self.mark_label("dpi", orange)
 
     def _set_dpi_status(self, text: str) -> None:
         self._dpi_status.setText(text)
@@ -930,6 +861,8 @@ class MachineVisionSettingsWidget(QWidget):
         self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mv.save_settings()
+        self._saved_values["dpi"] = dpi
+        self.mark_label("dpi", False)
         info(f"[MachineVisionSettings] DPI set to {dpi:.2f}")
         self._refresh_camera_calibration_display()
         self._set_dpi_status(f"DPI set to {dpi:.2f}")
@@ -940,6 +873,8 @@ class MachineVisionSettingsWidget(QWidget):
         self._mv.notify_settings_changed()
         self._applying_settings = False
         self._mv.save_settings()
+        self._saved_values["dpi"] = None
+        self.mark_label("dpi", False)
         info("[MachineVisionSettings] DPI cleared")
         self._refresh_camera_calibration_display()
         self._set_dpi_status("DPI cleared.")
@@ -1112,7 +1047,7 @@ class MachineVisionSettingsWidget(QWidget):
             "Laplacian: local variance of the Laplacian — good general-purpose measure.\n"
             "Tenengrad: Sobel gradient magnitude — faster, slightly noisier."
         )
-        method_row.addRow("Method:", self._method_combo)
+        method_row.addRow(self._register_label("method", QLabel("Method:")), self._method_combo)
         vbox.addLayout(method_row)
 
         # Stacked panels — one per method
@@ -1370,7 +1305,7 @@ class MachineVisionSettingsWidget(QWidget):
     ) -> None:
         spin = w.get(key)
         slider = w.get(f"{key}_slider")
-        if isinstance(spin, QDoubleSpinBox):
+        if isinstance(spin, NoScrollDoubleSpinBox):
             spin.setValue(value)
         span = max_val - min_val
         if isinstance(slider, QSlider) and span > 0:
@@ -1427,6 +1362,7 @@ class MachineVisionSettingsWidget(QWidget):
             "background.val_median_max": settings.background.val_median_max,
             "background.val_std_max": settings.background.val_std_max,
             "background.scale": settings.background.scale,
+            "dpi": settings.dpi,
         }
 
     def _check_modified(self, key: str, current_value: object) -> bool:
@@ -1435,37 +1371,8 @@ class MachineVisionSettingsWidget(QWidget):
             return abs(saved - current_value) > 1e-9
         return saved != current_value
 
-    def _apply_orange(self, widget: QWidget, orange: bool) -> None:
-        """Apply or clear orange styling on a single leaf widget."""
-        color = _ORANGE if orange else ""
-        if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
-            widget.setStyleSheet(f"color: {color};" if orange else "")
-        elif isinstance(widget, QCheckBox):
-            widget.setStyleSheet(f"QCheckBox {{ color: {color}; }}" if orange else "")
-        elif isinstance(widget, QComboBox):
-            widget.setStyleSheet(f"QComboBox {{ color: {color}; }}" if orange else "")
-        elif isinstance(widget, QSlider) and orange:
-            widget.setStyleSheet("""
-                QSlider::handle:horizontal {
-                    background: #FFA500;
-                    border: 1px solid #FFA500;
-                    width: 18px;
-                    margin: -2px 0;
-                    border-radius: 3px;
-                }
-            """)
-        elif isinstance(widget, QSlider):
-            widget.setStyleSheet("")
-
-    def _mark_field(self, section_field: str, widget_key: str, panel_widgets: dict[str, QWidget], current_value: object) -> None:
-        """Check if field is modified and orange the relevant widget(s)."""
-        orange = self._check_modified(section_field, current_value)
-        w = panel_widgets.get(widget_key)
-        if w:
-            self._apply_orange(w, orange)
-        slider = panel_widgets.get(f"{widget_key}_slider")
-        if slider:
-            self._apply_orange(slider, orange)
+    def _mark_field(self, section_field: str, widget_key: str, panel: LabelTrackerMixin, current_value: object) -> None:
+        panel.mark_label(widget_key, self._check_modified(section_field, current_value))
 
     # ------------------------------------------------------------------
     # Change handlers
@@ -1480,7 +1387,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._mv.notify_settings_changed()
         self._applying_settings = False
         orange = self._check_modified("method", method)
-        self._apply_orange(self._method_combo, orange)
+        self.mark_label("method", orange)
         self._set_unsaved(True)
 
     def _on_window_size_changed(self, value: int) -> None:
@@ -1502,7 +1409,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._applying_settings = False
 
         panel = self._tenengrad_panel if section == "tenengrad" else self._laplacian_panel
-        self._mark_field(f"{section}.{field}", field, panel.widgets, value)
+        self._mark_field(f"{section}.{field}", field, panel, value)
         self._set_unsaved(True)
 
     def _on_red_mark_changed(self, field: str, value: object) -> None:
@@ -1511,7 +1418,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._applying_settings = True
         self._mv.notify_settings_changed()
         self._applying_settings = False
-        self._mark_field(f"red_mark.{field}", field, self._red_mark_panel.widgets, value)
+        self._mark_field(f"red_mark.{field}", field, self._red_mark_panel, value)
         self._set_unsaved(True)
 
     def _on_background_changed(self, field: str, value: object) -> None:
@@ -1520,7 +1427,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._applying_settings = True
         self._mv.notify_settings_changed()
         self._applying_settings = False
-        self._mark_field(f"background.{field}", field, self._background_panel.widgets, value)
+        self._mark_field(f"background.{field}", field, self._background_panel, value)
         self._set_unsaved(True)
 
     def _on_focus_region_changed(self, field: str, value: object) -> None:
@@ -1529,7 +1436,7 @@ class MachineVisionSettingsWidget(QWidget):
         self._applying_settings = True
         self._mv.notify_settings_changed()
         self._applying_settings = False
-        self._mark_field(f"focus_region.{field}", field, self._focus_region_panel.widgets, value)
+        self._mark_field(f"focus_region.{field}", field, self._focus_region_panel, value)
         self._set_unsaved(True)
 
     def _on_inspect_calibration_changed(self, mode: str, field: str, value: object) -> None:
@@ -1548,7 +1455,8 @@ class MachineVisionSettingsWidget(QWidget):
         saved_key = f"inspect_calibration.{mode}.{field if field != 'downsample_none' else 'downsample'}"
         panel = self._inspect_preview_panel if mode == "preview" else self._inspect_snap_panel
         current = mode_settings.downsample if field == "downsample_none" else value
-        self._mark_field(saved_key, field if field != "downsample_none" else "downsample_none", panel.widgets, current)
+        widget_key = "downsample" if field == "downsample_none" else field
+        self._mark_field(saved_key, widget_key, panel, current)
         self._set_unsaved(True)
 
     # ------------------------------------------------------------------
@@ -1559,9 +1467,9 @@ class MachineVisionSettingsWidget(QWidget):
         try:
             icp = self._mv.settings.inspection_calibration_position
             if icp.is_set:
-                x_mm = icp.x_nm / _NM_PER_MM
-                y_mm = icp.y_nm / _NM_PER_MM
-                z_mm = icp.z_nm / _NM_PER_MM
+                x_mm = icp.x_nm / NM_PER_MM
+                y_mm = icp.y_nm / NM_PER_MM
+                z_mm = icp.z_nm / NM_PER_MM
                 self._inspection_pos_label.setText(
                     f"Saved X: {x_mm:.3f}  Y: {y_mm:.3f}  Z: {z_mm:.3f} mm"
                 )
@@ -1596,11 +1504,11 @@ class MachineVisionSettingsWidget(QWidget):
         self._mv.save_settings()
         info(
             f"[MachineVisionSettings] Inspection position saved: "
-            f"X={pos.x / _NM_PER_MM:.3f} mm  Y={pos.y / _NM_PER_MM:.3f} mm  Z={pos.z / _NM_PER_MM:.3f} mm"
+            f"X={pos.x / NM_PER_MM:.3f} mm  Y={pos.y / NM_PER_MM:.3f} mm  Z={pos.z / NM_PER_MM:.3f} mm"
         )
         self._refresh_inspection_position_display()
         self._set_inspection_status(
-            f"Position saved: ({pos.x / _NM_PER_MM:.3f}, {pos.y / _NM_PER_MM:.3f}, {pos.z / _NM_PER_MM:.3f}) mm"
+            f"Position saved: ({pos.x / NM_PER_MM:.3f}, {pos.y / NM_PER_MM:.3f}, {pos.z / NM_PER_MM:.3f}) mm"
         )
 
     def _on_inspection_goto_position_clicked(self) -> None:
@@ -1623,9 +1531,9 @@ class MachineVisionSettingsWidget(QWidget):
             self._set_inspection_status("Move failed — see log.")
             return
         self._set_inspection_status(
-            f"Moving to ({icp.x_nm / _NM_PER_MM:.3f}, "
-            f"{icp.y_nm / _NM_PER_MM:.3f}, "
-            f"{icp.z_nm / _NM_PER_MM:.3f}) mm…"
+            f"Moving to ({icp.x_nm / NM_PER_MM:.3f}, "
+            f"{icp.y_nm / NM_PER_MM:.3f}, "
+            f"{icp.z_nm / NM_PER_MM:.3f}) mm…"
         )
 
     def _on_inspection_clear_position_clicked(self) -> None:
@@ -1688,9 +1596,8 @@ class MachineVisionSettingsWidget(QWidget):
             self._red_mark_panel,
             self._background_panel,
         ):
-            for w in panel.widgets.values():
-                self._apply_orange(w, False)
-        self._apply_orange(self._method_combo, False)
+            panel.clear_orange()
+        self.clear_orange()
 
     # ------------------------------------------------------------------
     # Unsaved state
