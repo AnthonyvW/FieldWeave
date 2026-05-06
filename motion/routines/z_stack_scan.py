@@ -28,6 +28,9 @@ Usage::
         output_folder="/data/scans/run1",
         focus_stack_config=cfg,
     )
+
+    # capture_timeout_ms and approach_distance_nm are read from
+    # ctx.settings.motion.z_stack_scan at the start of the routine.
     routine.start()
 """
 
@@ -81,16 +84,19 @@ class ZStackScan(AutomationRoutine):
     output_folder:
         Directory in which captured images are saved.  Created automatically
         if it does not exist.
-    capture_timeout_ms:
-        How long (ms) to wait for each image capture to complete.
-    approach_distance_nm:
-        Before the scan begins, the stage overshoots the near end by this
-        distance (in nanometres) in the scan direction, then returns to the
-        near end. Pass 0 to skip the approach move.
     focus_stack_config:
         When supplied, a focus-stack post-processing job is started
         automatically after all frames have been captured.  Pass ``None``
         (the default) to skip post-processing.
+
+    Settings read at runtime
+    ------------------------
+    ``ctx.settings.motion.automation.capture_timeout_ms``:
+        How long (ms) to wait for each image capture to complete.
+    ``ctx.settings.motion.z_stack_scan.approach_distance_nm``:
+        Before the scan begins, the stage overshoots the near end by this
+        distance in the scan direction, then returns to it.  0 disables
+        the approach move.
     """
 
     job_name = "Z-Stack Scan"
@@ -102,8 +108,6 @@ class ZStackScan(AutomationRoutine):
         z_end_nm: int,
         step_nm: int,
         output_folder: str | Path,
-        capture_timeout_ms: int = 5000,
-        approach_distance_nm: int = 0,
         focus_stack_config: FocusStackRoutineConfig | None = None,
     ) -> None:
         super().__init__(motion)
@@ -114,8 +118,6 @@ class ZStackScan(AutomationRoutine):
         self._z_end_nm = z_end_nm
         self._step_nm = step_nm
         self._output_folder = Path(output_folder)
-        self._capture_timeout_ms = capture_timeout_ms
-        self._approach_distance_nm = approach_distance_nm
         self._focus_stack_config = focus_stack_config
 
     # ------------------------------------------------------------------
@@ -126,6 +128,10 @@ class ZStackScan(AutomationRoutine):
         ctx = get_app_context()
         camera = ctx.camera
         post_processing = ctx.post_processing
+
+        motion_settings = ctx.motion.settings
+        capture_timeout_ms = motion_settings.automation.capture_timeout_ms
+        approach_distance_nm = motion_settings.z_stack_scan.approach_distance_nm
 
         self._set_activity("Initialising")
 
@@ -162,8 +168,8 @@ class ZStackScan(AutomationRoutine):
 
         # Approach move: overshoot the near end opposite to the scan direction,
         # then return to z_near. This purges backlash before the first capture.
-        if self._approach_distance_nm > 0:
-            approach_z_nm = z_near - direction * self._approach_distance_nm
+        if approach_distance_nm > 0:
+            approach_z_nm = z_near - direction * approach_distance_nm
             approach_z_mm = approach_z_nm / _NM_PER_MM
             self._set_activity(f"Approaching  —  Z={approach_z_mm:.3f} mm")
             info(f"[ZStackScan] Approach overshoot to Z={approach_z_mm:.6f} mm")
@@ -251,7 +257,7 @@ class ZStackScan(AutomationRoutine):
                     "step_index": idx,
                     "total_steps": total,
                 },
-                timeout_ms=self._capture_timeout_ms,
+                timeout_ms=capture_timeout_ms,
                 on_complete=_on_complete,
                 wait=True,
             )

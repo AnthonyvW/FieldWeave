@@ -133,6 +133,7 @@ class FocusStackWidget(QWidget):
         self._last_stacked_path: str | None = None
         self._pending_stack_result: FocusStackResult | None = None
         self._setup_ui()
+        self._load_settings()
 
         ctx = get_app_context()
         ctx.post_processing.add_routine_complete_listener(self._on_routine_complete)
@@ -476,6 +477,31 @@ class FocusStackWidget(QWidget):
     # Helpers
     # ------------------------------------------------------------------
 
+    def _get_z_stack_settings(self):
+        ctx = get_app_context()
+        if ctx.motion is not None:
+            return ctx.motion.settings.z_stack_scan
+        return None
+
+    def _load_settings(self) -> None:
+        s = self._get_z_stack_settings()
+        if s is None:
+            return
+        _NM_PER_MM = 1_000_000
+        self._step_spin.setValue(s.step_nm / _NM_PER_MM)
+        self._approach_spin.setValue(s.approach_distance_nm / _NM_PER_MM)
+        self._fs_enable_check.setChecked(s.run_focus_stack)
+        self._keep_size_check.setChecked(s.keep_size)
+        self._no_align_check.setChecked(s.no_align)
+        self._crop_check.setChecked(s.crop)
+        self._sharpness_spin.setValue(s.sharpness)
+        self._cull_check.setChecked(s.cull_enabled)
+        self._cull_threshold_spin.setValue(s.cull_threshold)
+        self._slab_check.setChecked(s.slab_enabled)
+        self._slab_size_spin.setValue(s.slab_size)
+        self._slab_overlap_spin.setValue(s.slab_overlap)
+        self._workers_spin.setValue(s.workers)
+
     @staticmethod
     def _decimals_for_step(step_mm: float) -> int:
         """
@@ -499,13 +525,9 @@ class FocusStackWidget(QWidget):
 
     def _get_printer_step_mm(self) -> float:
         """Return the printer's minimum step size in mm from settings, defaulting to 0.04 mm."""
-        try:
-            ctx = get_app_context()
-            if ctx.settings is not None:
-                step_nm: int = ctx.settings.motion.step_size
-                return step_nm / 1_000_000.0
-        except Exception:
-            pass
+        ctx = get_app_context()
+        if ctx.motion is not None:
+            return ctx.motion.settings.step_size / 1_000_000.0
         return 0.04
 
     def _get_current_z_mm(self) -> float | None:
@@ -649,7 +671,6 @@ class FocusStackWidget(QWidget):
             z_end_nm=round(self._z_end * _NM_PER_MM),
             step_nm=round(step_mm * _NM_PER_MM),
             output_folder=output_folder,
-            approach_distance_nm=round(self._approach_spin.value() * _NM_PER_MM),
             focus_stack_config=focus_stack_config,
         )
         motion.start_routine(self._routine)

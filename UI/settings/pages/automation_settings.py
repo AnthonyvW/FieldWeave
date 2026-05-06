@@ -18,8 +18,11 @@ Design
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
@@ -29,6 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +47,13 @@ _NM_PER_MM = 1_000_000
 
 class _NoScrollDoubleSpinBox(QDoubleSpinBox):
     """QDoubleSpinBox that ignores scroll-wheel events to prevent accidental edits."""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class _NoScrollSpinBox(QSpinBox):
+    """QSpinBox that ignores scroll-wheel events to prevent accidental edits."""
 
     def wheelEvent(self, event) -> None:
         event.ignore()
@@ -179,7 +190,7 @@ class _SlotRow(QWidget):
 class AutomationSettingsWidget(QWidget):
     """Full settings page for all automation routines."""
 
-    _GROUP_NAMES = ["General", "Tree Core"]
+    _GROUP_NAMES = ["General", "Z-Stack Scan", "Tree Core"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -192,6 +203,10 @@ class AutomationSettingsWidget(QWidget):
         self._group_boxes: dict[str, QGroupBox] = {}
 
         self._w_general: dict[str, QDoubleSpinBox] = {}
+        self._w_general_int: dict[str, QSpinBox] = {}
+        self._w_zstack: dict[str, QDoubleSpinBox] = {}
+        self._w_zstack_int: dict[str, QSpinBox] = {}
+        self._w_zstack_check: dict[str, QCheckBox] = {}
 
         # Slot row widgets — rebuilt whenever slots are added/removed.
         self._slot_rows: list[_SlotRow] = []
@@ -234,6 +249,13 @@ class AutomationSettingsWidget(QWidget):
 
     def _get_motion(self):
         return get_app_context().motion
+
+    def _get_printer_step_mm(self) -> float:
+        """Return the printer's minimum step size in mm from settings, defaulting to 0.04 mm."""
+        motion = get_app_context().motion
+        if motion is not None and motion.settings is not None:
+            return motion.settings.step_size / 1_000_000.0
+        return 0.04
 
     def _on_run_set(self, key: str, coord: str) -> None:
         motion = self._get_motion()
@@ -310,6 +332,13 @@ class AutomationSettingsWidget(QWidget):
         if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
             self.parent_dialog.register_group_box("Automation", "General", general_group)
 
+        z_stack_group = self._build_z_stack_group()
+        cl.addWidget(z_stack_group)
+        self._group_boxes["Z-Stack Scan"] = z_stack_group
+
+        if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
+            self.parent_dialog.register_group_box("Automation", "Z-Stack Scan", z_stack_group)
+
         tree_core_group = self._build_tree_core_group()
         cl.addWidget(tree_core_group)
         self._group_boxes["Tree Core"] = tree_core_group
@@ -353,6 +382,122 @@ class AutomationSettingsWidget(QWidget):
             self._w_general[key] = spin
             form.addRow(QLabel(label_text), spin)
 
+        timeout_spin = _NoScrollSpinBox()
+        timeout_spin.setMinimum(100)
+        timeout_spin.setMaximum(60_000)
+        timeout_spin.setSingleStep(100)
+        timeout_spin.setSuffix(" ms")
+        timeout_spin.setFixedWidth(130)
+        timeout_spin.setToolTip("How long to wait for each image capture to complete before treating it as a failure.")
+        self._w_general_int["capture_timeout_ms"] = timeout_spin
+        form.addRow(QLabel("Capture timeout:"), timeout_spin)
+
+        return group
+
+    def _build_z_stack_group(self) -> QGroupBox:
+        group = QGroupBox("Z-Stack Scan")
+        vbox = QVBoxLayout(group)
+
+        note = QLabel("These defaults will take effect the next time the program is launched.")
+        note.setWordWrap(True)
+        vbox.addWidget(note)
+
+        # -- Scan sub-group --------------------------------------------------
+        scan_box = QGroupBox("Scan")
+        scan_form = QFormLayout(scan_box)
+        scan_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        step_spin = _NoScrollDoubleSpinBox()
+        printer_step_mm = self._get_printer_step_mm()
+        step_spin.setMinimum(printer_step_mm)
+        step_spin.setMaximum(10.0)
+        step_spin.setSingleStep(printer_step_mm)
+        step_spin.setDecimals(max(2, -int(math.floor(math.log10(printer_step_mm)))))
+        step_spin.setSuffix(" mm")
+        step_spin.setFixedWidth(130)
+        step_spin.setToolTip("Distance between capture positions.")
+        self._w_zstack["step_nm"] = step_spin
+        scan_form.addRow(QLabel("Step size:"), step_spin)
+
+        approach_spin = _NoScrollDoubleSpinBox()
+        approach_spin.setMinimum(0.0)
+        approach_spin.setMaximum(10.0)
+        approach_spin.setSingleStep(0.1)
+        approach_spin.setDecimals(3)
+        approach_spin.setSuffix(" mm")
+        approach_spin.setFixedWidth(130)
+        approach_spin.setToolTip(
+            "Before starting the scan, the stage overshoots the near end by this "
+            "distance then returns to it, eliminating backlash. 0 disables."
+        )
+        self._w_zstack["approach_distance_nm"] = approach_spin
+        scan_form.addRow(QLabel("Approach distance:"), approach_spin)
+
+        vbox.addWidget(scan_box)
+
+        # -- Focus stack sub-group -------------------------------------------
+        fs_box = QGroupBox("Focus Stack")
+        fs_form = QFormLayout(fs_box)
+        fs_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        for key, label_text, tooltip in (
+            ("run_focus_stack", "Run after capture:", "Automatically run focus stacking after all frames are captured."),
+            ("keep_size",       "Keep original size:", "Keep the output image the same size as the inputs. Warps are applied in-place rather than expanding the canvas."),
+            ("no_align",        "Skip alignment:", "Skip ECC alignment. Use when images are already registered."),
+            ("crop",            "Crop to intersection:", "Crop output to the largest rectangle covered by every frame after alignment."),
+            ("cull_enabled",    "Cull out-of-focus frames:", "Discard frames whose focus score falls below the threshold fraction of the sharpest frame."),
+            ("slab_enabled",    "Enable slabbing:", "Split the image set into overlapping sub-stacks, stack each independently, then fuse. Reduces peak RAM."),
+        ):
+            check = QCheckBox()
+            check.setToolTip(tooltip)
+            self._w_zstack_check[key] = check
+            fs_form.addRow(QLabel(label_text), check)
+
+        sharpness_spin = _NoScrollDoubleSpinBox()
+        sharpness_spin.setMinimum(1.0)
+        sharpness_spin.setMaximum(8.0)
+        sharpness_spin.setSingleStep(0.5)
+        sharpness_spin.setDecimals(1)
+        sharpness_spin.setFixedWidth(130)
+        sharpness_spin.setToolTip("Weight sharpness exponent. Higher values favour the sharpest pixel more aggressively. Useful range: 1.0 (soft) to 8.0 (near-hard).")
+        self._w_zstack["sharpness"] = sharpness_spin
+        fs_form.addRow(QLabel("Sharpness:"), sharpness_spin)
+
+        cull_spin = _NoScrollDoubleSpinBox()
+        cull_spin.setMinimum(0.0)
+        cull_spin.setMaximum(1.0)
+        cull_spin.setSingleStep(0.05)
+        cull_spin.setDecimals(2)
+        cull_spin.setFixedWidth(130)
+        cull_spin.setToolTip("Frames scoring below this fraction of the peak score are culled. Raise toward 1.0 to cull more aggressively.")
+        self._w_zstack["cull_threshold"] = cull_spin
+        fs_form.addRow(QLabel("Cull threshold:"), cull_spin)
+
+        slab_size_spin = _NoScrollSpinBox()
+        slab_size_spin.setMinimum(2)
+        slab_size_spin.setMaximum(500)
+        slab_size_spin.setFixedWidth(130)
+        slab_size_spin.setToolTip("Number of images per sub-stack.")
+        self._w_zstack_int["slab_size"] = slab_size_spin
+        fs_form.addRow(QLabel("Slab size:"), slab_size_spin)
+
+        slab_overlap_spin = _NoScrollSpinBox()
+        slab_overlap_spin.setMinimum(0)
+        slab_overlap_spin.setMaximum(499)
+        slab_overlap_spin.setFixedWidth(130)
+        slab_overlap_spin.setToolTip("Number of images shared between adjacent slabs. Must be less than slab size.")
+        self._w_zstack_int["slab_overlap"] = slab_overlap_spin
+        fs_form.addRow(QLabel("Slab overlap:"), slab_overlap_spin)
+
+        workers_spin = _NoScrollSpinBox()
+        workers_spin.setMinimum(1)
+        workers_spin.setMaximum(16)
+        workers_spin.setFixedWidth(130)
+        workers_spin.setToolTip("Number of parallel workers for stacking. Higher values are faster but increase peak RAM by ~100 MiB per additional worker.")
+        self._w_zstack_int["workers"] = workers_spin
+        fs_form.addRow(QLabel("Workers:"), workers_spin)
+
+        vbox.addWidget(fs_box)
         return group
 
     def _build_tree_core_group(self) -> QGroupBox:
@@ -478,6 +623,22 @@ class AutomationSettingsWidget(QWidget):
             spin.valueChanged.connect(
                 lambda v, k=key: self._on_general_field_changed(k, v)
             )
+        for key, spin in self._w_general_int.items():
+            spin.valueChanged.connect(
+                lambda v, k=key: self._on_general_int_field_changed(k, v)
+            )
+        for key, spin in self._w_zstack.items():
+            spin.valueChanged.connect(
+                lambda v, k=key: self._on_zstack_field_changed(k, v)
+            )
+        for key, spin in self._w_zstack_int.items():
+            spin.valueChanged.connect(
+                lambda v, k=key: self._on_zstack_int_field_changed(k, v)
+            )
+        for key, check in self._w_zstack_check.items():
+            check.stateChanged.connect(
+                lambda v, k=key: self._on_zstack_check_changed(k, v)
+            )
 
     def _connect_slot_signals(self, row: _SlotRow) -> None:
         for key, spin in row.widgets.items():
@@ -495,7 +656,25 @@ class AutomationSettingsWidget(QWidget):
         self._block_general_signals(True)
         self._w_general["overlap_x_pct"].setValue(s.automation.overlap_x_pct)
         self._w_general["overlap_y_pct"].setValue(s.automation.overlap_y_pct)
+        self._w_general_int["capture_timeout_ms"].setValue(s.automation.capture_timeout_ms)
         self._block_general_signals(False)
+
+        self._block_zstack_signals(True)
+        zs = s.z_stack_scan
+        self._w_zstack["step_nm"].setValue(zs.step_nm / _NM_PER_MM)
+        self._w_zstack["approach_distance_nm"].setValue(zs.approach_distance_nm / _NM_PER_MM)
+        self._w_zstack["sharpness"].setValue(zs.sharpness)
+        self._w_zstack["cull_threshold"].setValue(zs.cull_threshold)
+        self._w_zstack_int["slab_size"].setValue(zs.slab_size)
+        self._w_zstack_int["slab_overlap"].setValue(zs.slab_overlap)
+        self._w_zstack_int["workers"].setValue(zs.workers)
+        self._w_zstack_check["run_focus_stack"].setChecked(zs.run_focus_stack)
+        self._w_zstack_check["keep_size"].setChecked(zs.keep_size)
+        self._w_zstack_check["no_align"].setChecked(zs.no_align)
+        self._w_zstack_check["crop"].setChecked(zs.crop)
+        self._w_zstack_check["cull_enabled"].setChecked(zs.cull_enabled)
+        self._w_zstack_check["slab_enabled"].setChecked(zs.slab_enabled)
+        self._block_zstack_signals(False)
 
         self._block_run_signals(True)
         self._w_run["mark_reference_nm"].setValue(tca.mark_reference_nm / _NM_PER_MM)
@@ -539,15 +718,30 @@ class AutomationSettingsWidget(QWidget):
 
     def _snapshot_saved_values(self, s: MotionSystemSettings) -> None:
         tca = s.tree_core_automation
+        zs = s.z_stack_scan
         self._saved_values = {
-            "overlap_x_pct":       s.automation.overlap_x_pct,
-            "overlap_y_pct":       s.automation.overlap_y_pct,
-            "mark_reference_nm":   tca.mark_reference_nm,
-            "mark_z_nm":           tca.mark_z_nm,
-            "starting_height_nm":  tca.starting_height_nm,
-            "starting_offset_nm":  tca.starting_offset_nm,
-            "slot_separation_nm":  tca.slot_separation_nm,
-            "num_slots":           tca.num_slots,
+            "overlap_x_pct":        s.automation.overlap_x_pct,
+            "overlap_y_pct":        s.automation.overlap_y_pct,
+            "capture_timeout_ms":   s.automation.capture_timeout_ms,
+            "zs.step_nm":           zs.step_nm,
+            "zs.approach_distance_nm": zs.approach_distance_nm,
+            "zs.run_focus_stack":   zs.run_focus_stack,
+            "zs.keep_size":         zs.keep_size,
+            "zs.no_align":          zs.no_align,
+            "zs.crop":              zs.crop,
+            "zs.sharpness":         zs.sharpness,
+            "zs.cull_enabled":      zs.cull_enabled,
+            "zs.cull_threshold":    zs.cull_threshold,
+            "zs.slab_enabled":      zs.slab_enabled,
+            "zs.slab_size":         zs.slab_size,
+            "zs.slab_overlap":      zs.slab_overlap,
+            "zs.workers":           zs.workers,
+            "mark_reference_nm":    tca.mark_reference_nm,
+            "mark_z_nm":            tca.mark_z_nm,
+            "starting_height_nm":   tca.starting_height_nm,
+            "starting_offset_nm":   tca.starting_offset_nm,
+            "slot_separation_nm":   tca.slot_separation_nm,
+            "num_slots":            tca.num_slots,
         }
         for i, slot in enumerate(tca.slots):
             self._saved_values[f"slot.{i}.position_nm"] = slot.position_nm
@@ -579,6 +773,11 @@ class AutomationSettingsWidget(QWidget):
         if w:
             self._apply_orange(w, self._check_modified(key, value))
 
+    def _mark_general_int_field(self, key: str, value: object) -> None:
+        w = self._w_general_int.get(key)
+        if w:
+            self._apply_orange(w, self._check_modified(key, value))
+
     def _on_general_field_changed(self, key: str, value: float) -> None:
         s = self._live_settings()
         if s is None:
@@ -587,6 +786,48 @@ class AutomationSettingsWidget(QWidget):
             return
         setattr(s.automation, key, value)
         self._mark_general_field(key, value)
+        self._set_unsaved(True)
+
+    def _on_general_int_field_changed(self, key: str, value: int) -> None:
+        s = self._live_settings()
+        if s is None:
+            self._mark_general_int_field(key, value)
+            self._set_unsaved(True)
+            return
+        setattr(s.automation, key, value)
+        self._mark_general_int_field(key, value)
+        self._set_unsaved(True)
+
+    def _mark_zstack_field(self, key: str, value: object) -> None:
+        w = self._w_zstack.get(key) or self._w_zstack_int.get(key) or self._w_zstack_check.get(key)
+        if w:
+            self._apply_orange(w, self._check_modified(f"zs.{key}", value))
+
+    def _on_zstack_field_changed(self, key: str, value: float) -> None:
+        s = self._live_settings()
+        nm_keys = {"step_nm", "approach_distance_nm"}
+        stored = round(value * _NM_PER_MM) if key in nm_keys else value
+        if s is not None:
+            if key in nm_keys:
+                setattr(s.z_stack_scan, key, round(value * _NM_PER_MM))
+            else:
+                setattr(s.z_stack_scan, key, value)
+        self._mark_zstack_field(key, stored)
+        self._set_unsaved(True)
+
+    def _on_zstack_int_field_changed(self, key: str, value: int) -> None:
+        s = self._live_settings()
+        if s is not None:
+            setattr(s.z_stack_scan, key, value)
+        self._mark_zstack_field(key, value)
+        self._set_unsaved(True)
+
+    def _on_zstack_check_changed(self, key: str, value: int) -> None:
+        checked = value != 0
+        s = self._live_settings()
+        if s is not None:
+            setattr(s.z_stack_scan, key, checked)
+        self._mark_zstack_field(key, checked)
         self._set_unsaved(True)
 
     def _on_run_field_changed(self, key: str, value_mm: float) -> None:
@@ -653,6 +894,14 @@ class AutomationSettingsWidget(QWidget):
     def _clear_all_orange(self) -> None:
         for w in self._w_general.values():
             self._apply_orange(w, False)
+        for w in self._w_general_int.values():
+            self._apply_orange(w, False)
+        for w in self._w_zstack.values():
+            self._apply_orange(w, False)
+        for w in self._w_zstack_int.values():
+            self._apply_orange(w, False)
+        for w in self._w_zstack_check.values():
+            self._apply_orange(w, False)
         for w in self._w_run.values():
             self._apply_orange(w, False)
         for row in self._slot_rows:
@@ -689,6 +938,16 @@ class AutomationSettingsWidget(QWidget):
     def _block_general_signals(self, block: bool) -> None:
         for w in self._w_general.values():
             w.blockSignals(block)
+        for w in self._w_general_int.values():
+            w.blockSignals(block)
+
+    def _block_zstack_signals(self, block: bool) -> None:
+        for w in self._w_zstack.values():
+            w.blockSignals(block)
+        for w in self._w_zstack_int.values():
+            w.blockSignals(block)
+        for w in self._w_zstack_check.values():
+            w.blockSignals(block)
 
     def _block_run_signals(self, block: bool) -> None:
         for w in self._w_run.values():
@@ -696,6 +955,7 @@ class AutomationSettingsWidget(QWidget):
 
     def _block_all_signals(self, block: bool) -> None:
         self._block_general_signals(block)
+        self._block_zstack_signals(block)
         self._block_run_signals(block)
         for row in self._slot_rows:
             for w in row.widgets.values():

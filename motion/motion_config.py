@@ -88,6 +88,44 @@ class TreeCoreAutomationSettings:
 
 
 @dataclass
+class ZStackScanSettings:
+    """Persisted defaults for the Z-stack scan and focus stack routine.
+
+    Scan parameters
+    ---------------
+    step_nm:
+        Distance between capture positions in nanometres.
+    approach_distance_nm:
+        Overshoot distance before the scan begins to eliminate backlash.
+        0 disables the approach move.
+
+    Focus stack parameters
+    ----------------------
+    All fields correspond directly to the controls in FocusStackWidget and
+    are forwarded to FocusStackRoutineConfig when a scan is started.
+    """
+
+    # Scan
+    step_nm: int = 200_000
+    approach_distance_nm: int = 400_000
+
+    # Focus stack — top-level toggles
+    run_focus_stack: bool = True
+    keep_size: bool = True
+
+    # Focus stack — advanced
+    no_align: bool = False
+    crop: bool = False
+    sharpness: float = 4.0
+    cull_enabled: bool = False
+    cull_threshold: float = 0.6
+    slab_enabled: bool = False
+    slab_size: int = 20
+    slab_overlap: int = 5
+    workers: int = 3
+
+
+@dataclass
 class AutomationSettings:
     """General settings shared across all automation routines.
 
@@ -97,6 +135,7 @@ class AutomationSettings:
 
     overlap_x_pct: float = 50.0
     overlap_y_pct: float = 50.0
+    capture_timeout_ms: int = 5000
 
     @property
     def overlap_x(self) -> int:
@@ -153,6 +192,11 @@ class MotionSystemSettings:
         default_factory=AutomationSettings
     )
 
+    # Z-stack scan and focus stack defaults.
+    z_stack_scan: ZStackScanSettings = field(
+        default_factory=ZStackScanSettings
+    )
+
     def validate(self) -> None:
         """
         Validate motion system settings.
@@ -176,6 +220,22 @@ class MotionSystemSettings:
             raise ValueError("overlap_x_pct must be between 0 and 100")
         if not (0.0 <= self.automation.overlap_y_pct <= 100.0):
             raise ValueError("overlap_y_pct must be between 0 and 100")
+        if self.automation.capture_timeout_ms <= 0:
+            raise ValueError("capture_timeout_ms must be positive")
+        if self.z_stack_scan.step_nm <= 0:
+            raise ValueError("z_stack_scan.step_nm must be positive")
+        if self.z_stack_scan.approach_distance_nm < 0:
+            raise ValueError("z_stack_scan.approach_distance_nm must be non-negative")
+        if not (1.0 <= self.z_stack_scan.sharpness <= 8.0):
+            raise ValueError("z_stack_scan.sharpness must be between 1.0 and 8.0")
+        if not (0.0 <= self.z_stack_scan.cull_threshold <= 1.0):
+            raise ValueError("z_stack_scan.cull_threshold must be between 0.0 and 1.0")
+        if self.z_stack_scan.slab_size < 2:
+            raise ValueError("z_stack_scan.slab_size must be at least 2")
+        if self.z_stack_scan.slab_overlap >= self.z_stack_scan.slab_size:
+            raise ValueError("z_stack_scan.slab_overlap must be less than slab_size")
+        if not (1 <= self.z_stack_scan.workers <= 16):
+            raise ValueError("z_stack_scan.workers must be between 1 and 16")
 
 class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
     """Configuration manager for motion system settings."""
@@ -246,6 +306,16 @@ class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
             )
         else:
             filtered_data.pop("automation", None)
+
+        # Deserialise the nested ZStackScanSettings if present.
+        raw_z_stack = filtered_data.get("z_stack_scan")
+        if isinstance(raw_z_stack, dict):
+            valid_z_stack_fields = {f.name for f in fields(ZStackScanSettings)}
+            filtered_data["z_stack_scan"] = ZStackScanSettings(
+                **{k: v for k, v in raw_z_stack.items() if k in valid_z_stack_fields}
+            )
+        else:
+            filtered_data.pop("z_stack_scan", None)
 
         return MotionSystemSettings(**filtered_data)
 
