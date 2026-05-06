@@ -1,20 +1,17 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFormLayout,
-    QGroupBox,
     QLabel,
-    QSpinBox,
     QWidget,
 )
 
 from common.app_context import get_app_context
 from motion.motion_config import MotionSystemSettings
-from UI.settings.pages.shared import ORANGE, NoScrollDoubleSpinBox, NoScrollSpinBox
+from UI.settings.pages.shared import NoScrollDoubleSpinBox, NoScrollSpinBox, SettingsGroupBase
 
 
-class GeneralSettingsWidget(QGroupBox):
+class GeneralSettingsWidget(SettingsGroupBase):
     """General automation settings group (overlap percentages, capture timeout)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -40,7 +37,7 @@ class GeneralSettingsWidget(QGroupBox):
             spin.setFixedWidth(130)
             spin.setToolTip(tooltip)
             self._w[key] = spin
-            form.addRow(QLabel(label_text), spin)
+            form.addRow(self._register_label(key, QLabel(label_text)), spin)
 
         timeout_spin = NoScrollSpinBox()
         timeout_spin.setMinimum(100)
@@ -50,7 +47,7 @@ class GeneralSettingsWidget(QGroupBox):
         timeout_spin.setFixedWidth(130)
         timeout_spin.setToolTip("How long to wait for each image capture to complete before treating it as a failure.")
         self._w_int["capture_timeout_ms"] = timeout_spin
-        form.addRow(QLabel("Capture timeout:"), timeout_spin)
+        form.addRow(self._register_label("capture_timeout_ms", QLabel("Capture timeout:")), timeout_spin)
 
     def connect_signals(self, on_changed) -> None:
         for key, spin in self._w.items():
@@ -93,14 +90,5 @@ class GeneralSettingsWidget(QGroupBox):
             or self._saved.get("capture_timeout_ms") != self._w_int["capture_timeout_ms"].value()
         )
 
-    def clear_orange(self) -> None:
-        for w in self._w.values():
-            w.setStyleSheet("")
-        for w in self._w_int.values():
-            w.setStyleSheet("")
-
     def mark_field(self, key: str, value: object) -> None:
-        w = self._w.get(key) or self._w_int.get(key)
-        if w:
-            modified = self._saved.get(key) != value
-            w.setStyleSheet(f"color: {ORANGE};" if modified else "")
+        self.mark_label(key, self._saved.get(key) != value)

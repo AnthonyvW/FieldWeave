@@ -12,12 +12,11 @@ from PySide6.QtWidgets import (
 )
 
 from common.app_context import get_app_context
-from common.logger import error
 from motion.motion_config import MotionSystemSettings, TreeCoreSlot
-from UI.settings.pages.shared import ORANGE, NM_PER_MM, NoScrollDoubleSpinBox
+from UI.settings.pages.shared import LabelTrackerMixin, NM_PER_MM, NoScrollDoubleSpinBox, SettingsGroupBase
 
 
-class _SlotRow(QWidget):
+class _SlotRow(LabelTrackerMixin, QWidget):
     """A single row in the slots list showing position and offset spinboxes."""
 
     def __init__(
@@ -34,6 +33,7 @@ class _SlotRow(QWidget):
         self._get_motion = get_motion_fn
         self._axis_max_mm = axis_max_mm
         self._w: dict[str, NoScrollDoubleSpinBox] = {}
+        self._labels: dict[str, QLabel] = {}
         self._build(slot)
 
     def _build(self, slot: TreeCoreSlot) -> None:
@@ -41,9 +41,9 @@ class _SlotRow(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
 
-        label = QLabel(f"Slot {self._index + 1}:")
-        label.setFixedWidth(50)
-        row.addWidget(label)
+        slot_label = QLabel(f"Slot {self._index + 1}:")
+        slot_label.setFixedWidth(50)
+        row.addWidget(slot_label)
 
         for key, value_nm, pos_label, tooltip in (
             ("position_nm", slot.position_nm, "Pos (mm):", "Position along the automation axis (mm)."),
@@ -52,6 +52,7 @@ class _SlotRow(QWidget):
             lbl = QLabel(pos_label)
             lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             row.addWidget(lbl)
+            self._labels[key] = lbl
 
             spin = NoScrollDoubleSpinBox()
             spin.setMinimum(0.0)
@@ -130,7 +131,7 @@ class _SlotRow(QWidget):
         )
 
 
-class TreeCoreSettingsWidget(QGroupBox):
+class TreeCoreSettingsWidget(SettingsGroupBase):
     """Tree Core automation settings group (run settings and per-slot positions)."""
 
     _BUTTON_FIELDS: dict[str, str] = {
@@ -241,7 +242,7 @@ class TreeCoreSettingsWidget(QGroupBox):
             spin.setToolTip(tooltip)
             self._w_run[key] = spin
 
-            row_label = QLabel(label_text)
+            row_label = self._register_label(key, QLabel(label_text))
             if key in ("mark_reference_nm", "starting_offset_nm"):
                 self._axis_labels[key] = row_label
 
@@ -409,24 +410,16 @@ class TreeCoreSettingsWidget(QGroupBox):
         return False
 
     def clear_orange(self) -> None:
-        for w in self._w_run.values():
-            w.setStyleSheet("")
+        super().clear_orange()
         for row in self._slot_rows:
-            for w in row.widgets.values():
-                w.setStyleSheet("")
+            row.clear_orange()
 
     def mark_run_field(self, key: str, value_nm: int) -> None:
-        w = self._w_run.get(key)
-        if w:
-            modified = self._saved.get(key) != value_nm
-            w.setStyleSheet(f"color: {ORANGE};" if modified else "")
+        self.mark_label(key, self._saved.get(key) != value_nm)
 
     def mark_slot_field(self, index: int, key: str, value_nm: int) -> None:
         if index < len(self._slot_rows):
-            w = self._slot_rows[index].widgets.get(key)
-            if w:
-                modified = self._saved.get(f"slot.{index}.{key}") != value_nm
-                w.setStyleSheet(f"color: {ORANGE};" if modified else "")
+            self._slot_rows[index].mark_label(key, self._saved.get(f"slot.{index}.{key}") != value_nm)
 
     def block_run_signals(self, block: bool) -> None:
         for w in self._w_run.values():

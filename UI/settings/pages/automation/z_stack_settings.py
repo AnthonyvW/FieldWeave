@@ -13,10 +13,10 @@ from PySide6.QtWidgets import (
 
 from common.app_context import get_app_context
 from motion.motion_config import MotionSystemSettings
-from UI.settings.pages.shared import ORANGE, NM_PER_MM, NoScrollDoubleSpinBox, NoScrollSpinBox
+from UI.settings.pages.shared import NM_PER_MM, NoScrollDoubleSpinBox, NoScrollSpinBox, SettingsGroupBase
 
 
-class ZStackSettingsWidget(QGroupBox):
+class ZStackSettingsWidget(SettingsGroupBase):
     """Z-Stack Scan settings group (scan params and focus stack options)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -54,7 +54,7 @@ class ZStackSettingsWidget(QGroupBox):
         step_spin.setFixedWidth(130)
         step_spin.setToolTip("Distance between capture positions.")
         self._w["step_nm"] = step_spin
-        scan_form.addRow(QLabel("Step size:"), step_spin)
+        scan_form.addRow(self._register_label("step_nm", QLabel("Step size:")), step_spin)
 
         approach_spin = NoScrollDoubleSpinBox()
         approach_spin.setMinimum(0.0)
@@ -68,7 +68,7 @@ class ZStackSettingsWidget(QGroupBox):
             "distance then returns to it, eliminating backlash. 0 disables."
         )
         self._w["approach_distance_nm"] = approach_spin
-        scan_form.addRow(QLabel("Approach distance:"), approach_spin)
+        scan_form.addRow(self._register_label("approach_distance_nm", QLabel("Approach distance:")), approach_spin)
 
         vbox.addWidget(scan_box)
 
@@ -87,7 +87,7 @@ class ZStackSettingsWidget(QGroupBox):
             check = QCheckBox()
             check.setToolTip(tooltip)
             self._w_check[key] = check
-            fs_form.addRow(QLabel(label_text), check)
+            fs_form.addRow(self._register_label(key, QLabel(label_text)), check)
 
         sharpness_spin = NoScrollDoubleSpinBox()
         sharpness_spin.setMinimum(1.0)
@@ -97,7 +97,7 @@ class ZStackSettingsWidget(QGroupBox):
         sharpness_spin.setFixedWidth(130)
         sharpness_spin.setToolTip("Weight sharpness exponent. Higher values favour the sharpest pixel more aggressively. Useful range: 1.0 (soft) to 8.0 (near-hard).")
         self._w["sharpness"] = sharpness_spin
-        fs_form.addRow(QLabel("Sharpness:"), sharpness_spin)
+        fs_form.addRow(self._register_label("sharpness", QLabel("Sharpness:")), sharpness_spin)
 
         cull_spin = NoScrollDoubleSpinBox()
         cull_spin.setMinimum(0.0)
@@ -107,7 +107,7 @@ class ZStackSettingsWidget(QGroupBox):
         cull_spin.setFixedWidth(130)
         cull_spin.setToolTip("Frames scoring below this fraction of the peak score are culled.")
         self._w["cull_threshold"] = cull_spin
-        fs_form.addRow(QLabel("Cull threshold:"), cull_spin)
+        fs_form.addRow(self._register_label("cull_threshold", QLabel("Cull threshold:")), cull_spin)
 
         slab_size_spin = NoScrollSpinBox()
         slab_size_spin.setMinimum(2)
@@ -115,7 +115,7 @@ class ZStackSettingsWidget(QGroupBox):
         slab_size_spin.setFixedWidth(130)
         slab_size_spin.setToolTip("Number of images per sub-stack.")
         self._w_int["slab_size"] = slab_size_spin
-        fs_form.addRow(QLabel("Slab size:"), slab_size_spin)
+        fs_form.addRow(self._register_label("slab_size", QLabel("Slab size:")), slab_size_spin)
 
         slab_overlap_spin = NoScrollSpinBox()
         slab_overlap_spin.setMinimum(0)
@@ -123,7 +123,7 @@ class ZStackSettingsWidget(QGroupBox):
         slab_overlap_spin.setFixedWidth(130)
         slab_overlap_spin.setToolTip("Number of images shared between adjacent slabs. Must be less than slab size.")
         self._w_int["slab_overlap"] = slab_overlap_spin
-        fs_form.addRow(QLabel("Slab overlap:"), slab_overlap_spin)
+        fs_form.addRow(self._register_label("slab_overlap", QLabel("Slab overlap:")), slab_overlap_spin)
 
         workers_spin = NoScrollSpinBox()
         workers_spin.setMinimum(1)
@@ -131,7 +131,7 @@ class ZStackSettingsWidget(QGroupBox):
         workers_spin.setFixedWidth(130)
         workers_spin.setToolTip("Number of parallel workers for stacking.")
         self._w_int["workers"] = workers_spin
-        fs_form.addRow(QLabel("Workers:"), workers_spin)
+        fs_form.addRow(self._register_label("workers", QLabel("Workers:")), workers_spin)
 
         vbox.addWidget(fs_box)
 
@@ -196,7 +196,6 @@ class ZStackSettingsWidget(QGroupBox):
         if motion is None or motion.settings is None:
             return
         nm_keys = {"step_nm", "approach_distance_nm"}
-        stored = round(value * NM_PER_MM) if key in nm_keys else value
         if key in nm_keys:
             setattr(motion.settings.z_stack_scan, key, round(value * NM_PER_MM))
         else:
@@ -229,16 +228,5 @@ class ZStackSettingsWidget(QGroupBox):
             self._saved.get(f"zs.{k}") != v.value() for k, v in self._w_int.items()
         )
 
-    def clear_orange(self) -> None:
-        for w in self._w.values():
-            w.setStyleSheet("")
-        for w in self._w_int.values():
-            w.setStyleSheet("")
-        for w in self._w_check.values():
-            w.setStyleSheet("")
-
     def mark_field(self, key: str, stored_value: object) -> None:
-        w = self._w.get(key) or self._w_int.get(key) or self._w_check.get(key)
-        if w:
-            modified = self._saved.get(f"zs.{key}") != stored_value
-            w.setStyleSheet(f"color: {ORANGE};" if modified else "")
+        self.mark_label(key, self._saved.get(f"zs.{key}") != stored_value)
