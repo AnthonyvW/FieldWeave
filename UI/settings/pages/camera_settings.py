@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -41,7 +42,6 @@ class CameraSettingsWidget(QWidget):
         super().__init__(parent)
         
         self.parent_dialog = parent_dialog
-        self.ctx = get_app_context()
         self._settings_widgets: dict[str, QWidget] = {}
         self._updating_from_camera = False
         self._modified_settings: set[str] = set()  # Track which settings have been modified
@@ -148,11 +148,12 @@ class CameraSettingsWidget(QWidget):
                 self.parent_dialog.save_camera_settings.connect(self._save_settings)
         
         # Connect to camera manager signals
-        if self.ctx.camera_manager:
-            self.ctx.camera_manager.camera_list_changed.connect(
+        ctx = get_app_context()
+        if ctx.camera_manager:
+            ctx.camera_manager.camera_list_changed.connect(
                 self._on_camera_list_changed
             )
-            self.ctx.camera_manager.active_camera_changed.connect(
+            ctx.camera_manager.active_camera_changed.connect(
                 self._on_active_camera_changed
             )
     
@@ -164,8 +165,9 @@ class CameraSettingsWidget(QWidget):
         """
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
-        
-        if not self.ctx.camera_manager:
+
+        ctx = get_app_context()
+        if not ctx.camera_manager:
             self.camera_combo.addItem("No camera manager available")
             self.camera_combo.setEnabled(False)
             self.camera_combo.blockSignals(False)
@@ -173,12 +175,12 @@ class CameraSettingsWidget(QWidget):
         
         # Use cached list unless forced to enumerate
         if force_enumerate:
-            cameras = self.ctx.camera_manager.enumerate_cameras()
+            cameras = ctx.camera_manager.enumerate_cameras()
         else:
-            cameras = self.ctx.camera_manager.available_cameras
+            cameras = ctx.camera_manager.available_cameras
             # If no cached cameras, enumerate once
             if not cameras:
-                cameras = self.ctx.camera_manager.enumerate_cameras()
+                cameras = ctx.camera_manager.enumerate_cameras()
         
         if not cameras:
             self.camera_combo.addItem("No cameras detected")
@@ -192,7 +194,7 @@ class CameraSettingsWidget(QWidget):
                 self.camera_combo.addItem(display_text, camera_info)
             
             # Select the active camera if any
-            active_info = self.ctx.camera_manager.active_camera_info
+            active_info = ctx.camera_manager.active_camera_info
             if active_info:
                 for i in range(self.camera_combo.count()):
                     info_at_index = self.camera_combo.itemData(i)
@@ -203,7 +205,8 @@ class CameraSettingsWidget(QWidget):
         self.camera_combo.blockSignals(False)
         
         # Only refresh settings if we have an active camera
-        if self.ctx.camera and self.ctx.camera.underlying_camera.is_open:
+        ctx = get_app_context()
+        if ctx.camera and ctx.camera.underlying_camera.is_open:
             self._refresh_settings_display()
     
     @Slot(int)
@@ -218,7 +221,7 @@ class CameraSettingsWidget(QWidget):
         
         # Switch to the selected camera
         info(f"Switching to camera: {camera_info.display_name}")
-        success = self.ctx.camera_manager.switch_camera(camera_info)
+        success = get_app_context().camera_manager.switch_camera(camera_info)
         
         if success:
             self._refresh_settings_display()
@@ -254,7 +257,7 @@ class CameraSettingsWidget(QWidget):
         # Clear existing settings widgets
         self._clear_settings_display()
         
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             self._show_no_camera_message()
             return
@@ -265,74 +268,69 @@ class CameraSettingsWidget(QWidget):
             return
         
         # Get settings metadata
-        try:
-            settings = camera.settings
-            metadata_list = settings.get_metadata()
-            
-            # Store current values as "saved" baseline and also as defaults
-            self._saved_values.clear()
-            self._default_values.clear()
-            self._modified_settings.clear()
-            for meta in metadata_list:
-                current_value = getattr(settings, meta.name, None)
-                self._saved_values[meta.name] = current_value
-                # Only set default values if not already set (preserve first load)
-                if meta.name not in self._default_values:
-                    self._default_values[meta.name] = current_value
+        settings = camera.settings
+        metadata_list = settings.get_metadata()
+        
+        # Store current values as "saved" baseline and also as defaults
+        self._saved_values.clear()
+        self._default_values.clear()
+        self._modified_settings.clear()
+        for meta in metadata_list:
+            current_value = getattr(settings, meta.name, None)
+            self._saved_values[meta.name] = current_value
+            # Only set default values if not already set (preserve first load)
+            if meta.name not in self._default_values:
+                self._default_values[meta.name] = current_value
 
-            # Build controlled-field index from metadata
-            for meta in metadata_list:
-                if meta.controlled_by:
-                    controlled_when = getattr(meta, 'controlled_when', True)
-                    self._controlled_fields[meta.name] = (meta.controlled_by, controlled_when)
+        # Build controlled-field index from metadata
+        for meta in metadata_list:
+            if meta.controlled_by:
+                controlled_when = getattr(meta, 'controlled_when', True)
+                self._controlled_fields[meta.name] = (meta.controlled_by, controlled_when)
+        
+        # Group settings by category
+        grouped_settings = self._group_settings(metadata_list)
+        
+        # Clear and rebuild group tracking
+        self._group_names.clear()
+        self._group_widgets.clear()
+        
+        # Create UI for each group
+        for group_name, settings_in_group in grouped_settings.items():
+            group_box = self._create_settings_group(group_name, settings_in_group)
+            self.settings_layout.addWidget(group_box)
             
-            # Group settings by category
-            grouped_settings = self._group_settings(metadata_list)
+            # Track the group
+            self._group_names.append(group_name)
+            self._group_widgets[group_name] = group_box
             
-            # Clear and rebuild group tracking
-            self._group_names.clear()
-            self._group_widgets.clear()
-            
-            # Create UI for each group
-            for group_name, settings_in_group in grouped_settings.items():
-                group_box = self._create_settings_group(group_name, settings_in_group)
-                self.settings_layout.addWidget(group_box)
-                
-                # Track the group
-                self._group_names.append(group_name)
-                self._group_widgets[group_name] = group_box
-                
-                # Register with parent dialog for scrolling
-                if self.parent_dialog and hasattr(self.parent_dialog, 'register_group_box'):
-                    self.parent_dialog.register_group_box("Camera", group_name, group_box)
-            
-            # Apply initial controlled-field state (greyed-out / locked if controller is on)
-            self._apply_all_controlled_states(settings)
-            
-            # Register callback for external setting changes (e.g., async DFC completion)
-            if hasattr(settings, '_ui_update_callback'):
-                settings._ui_update_callback = self._on_external_setting_change
-                debug("Registered UI update callback for external setting changes")
-            else:
-                debug("Settings object does not support _ui_update_callback")
+            # Register with parent dialog for scrolling
+            if self.parent_dialog and hasattr(self.parent_dialog, 'register_group_box'):
+                self.parent_dialog.register_group_box("Camera", group_name, group_box)
+        
+        # Apply initial controlled-field state (greyed-out / locked if controller is on)
+        self._apply_all_controlled_states(settings)
+        
+        # Register callback for external setting changes (e.g., async DFC completion)
+        if hasattr(settings, '_ui_update_callback'):
+            settings._ui_update_callback = self._on_external_setting_change
+            debug("Registered UI update callback for external setting changes")
+        else:
+            debug("Settings object does not support _ui_update_callback")
 
-            # Start live polling if any controller is currently active
-            if self._any_controller_active(settings):
-                self._live_poll_timer.start()
+        # Start live polling if any controller is currently active
+        if self._any_controller_active(settings):
+            self._live_poll_timer.start()
 
-            # Update tree items in parent dialog
-            if self.parent_dialog and hasattr(self.parent_dialog, '_update_camera_groups'):
-                self.parent_dialog._update_camera_groups(self._group_names)
-            
-            # Enable buttons
-            if self.parent_dialog and hasattr(self.parent_dialog, 'save_btn'):
-                self.parent_dialog.save_btn.setEnabled(True)
-            self.reset_btn.setEnabled(True)
-            self.load_btn.setEnabled(True)
-            
-        except Exception as e:
-            error(f"Error loading camera settings: {e}")
-            self._show_error_message(str(e))
+        # Update tree items in parent dialog
+        if self.parent_dialog and hasattr(self.parent_dialog, '_update_camera_groups'):
+            self.parent_dialog._update_camera_groups(self._group_names)
+        
+        # Enable buttons
+        if self.parent_dialog and hasattr(self.parent_dialog, 'save_btn'):
+            self.parent_dialog.save_btn.setEnabled(True)
+        self.reset_btn.setEnabled(True)
+        self.load_btn.setEnabled(True)
     
     def _clear_settings_display(self) -> None:
         """Clear all settings widgets"""
@@ -410,7 +408,7 @@ class CameraSettingsWidget(QWidget):
     
     def _create_setting_widget(self, meta: SettingMetadata) -> QWidget | None:
         """Create appropriate widget for a setting based on its metadata"""
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return None
         
@@ -620,27 +618,22 @@ class CameraSettingsWidget(QWidget):
             if self._updating_from_camera:
                 return
             
-            # Import RGBALevel here to avoid circular imports
-            try:
-                from camera.settings.camera_settings import RGBALevel
-                
-                new_value = RGBALevel(
-                    r=spinboxes['r'].value(),
-                    g=spinboxes['g'].value(),
-                    b=spinboxes['b'].value(),
-                    a=spinboxes['a'].value()
-                )
-                
-                setter = getattr(settings, setter_name)
-                setter(new_value)
-                
-                # Mark as modified
-                setting_name = setter_name.replace("set_", "")
-                self._mark_setting_modified(setting_name, new_value)
-                
-                debug(f"Set {setter_name} to {new_value}")
-            except Exception as e:
-                error(f"Error setting {setter_name}: {e}")
+            # Local import to avoid circular imports
+            from camera.settings.camera_settings import RGBALevel
+
+            new_value = RGBALevel(
+                r=spinboxes['r'].value(),
+                g=spinboxes['g'].value(),
+                b=spinboxes['b'].value(),
+                a=spinboxes['a'].value()
+            )
+            
+            setter = getattr(settings, setter_name)
+            setter(new_value)
+            
+            setting_name = setter_name.removeprefix("set_")
+            self._mark_setting_modified(setting_name, new_value)
+            debug(f"Set {setter_name} to {new_value}")
         
         # Connect all spinboxes to the same handler
         for spinbox in spinboxes.values():
@@ -667,22 +660,18 @@ class CameraSettingsWidget(QWidget):
             if self._updating_from_camera:
                 return
             
-            camera = self.ctx.camera
+            camera = get_app_context().camera
             if not camera:
                 return
             
-            try:
-                setter = getattr(camera.settings, setter_name)
-                setter()
-                debug(f"Called {setter_name}")
-                
-                # Refresh controlled states in case this button enabled other controls
-                self._apply_all_controlled_states(camera.settings)
-                
-                self.ctx.toast.success(f"{meta.display_name} completed", duration=2000)
-            except Exception as e:
-                error(f"Error calling {setter_name}: {e}")
-                self.ctx.toast.error(f"Error: {e}", duration=3000)
+            setter = getattr(camera.settings, setter_name)
+            setter()
+            debug(f"Called {setter_name}")
+            
+            # Refresh controlled states in case this button enabled other controls
+            self._apply_all_controlled_states(camera.settings)
+            
+            get_app_context().toast.success(f"{meta.display_name} completed", duration=2000)
         
         button.clicked.connect(on_button_clicked)
         return button
@@ -708,7 +697,7 @@ class CameraSettingsWidget(QWidget):
             if self._updating_from_camera:
                 return
             
-            camera = self.ctx.camera
+            camera = get_app_context().camera
             if not camera:
                 return
             
@@ -720,8 +709,6 @@ class CameraSettingsWidget(QWidget):
                 file_ext = 'dat'
             
             # Get default directory and filename
-            # Try to use stored filepath if available, otherwise use config directory
-            from pathlib import Path
             default_path = ""
             
             # Look for a filepath field (e.g., dfc_filepath for dfc_import/dfc_export)
@@ -736,12 +723,9 @@ class CameraSettingsWidget(QWidget):
                 config_dir = Path("./config/cameras") / camera.underlying_camera.model
                 config_dir.mkdir(parents=True, exist_ok=True)
                 if is_export:
-                    # Suggest a timestamped filename for exports
-                    from datetime import datetime
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     default_path = str(config_dir / f"{file_ext}_{timestamp}.{file_ext}")
                 else:
-                    # Just use the directory for imports
                     default_path = str(config_dir)
             
             # Open file dialog
@@ -763,19 +747,15 @@ class CameraSettingsWidget(QWidget):
             if not file_path:
                 return
             
-            try:
-                setter = getattr(camera.settings, setter_name)
-                setter(file_path)
-                debug(f"Called {setter_name} with {file_path}")
-                
-                # Refresh controlled states in case this button enabled other controls
-                self._apply_all_controlled_states(camera.settings)
-                
-                action = "exported to" if is_export else "imported from"
-                self.ctx.toast.success(f"Successfully {action} {file_path}", duration=2000)
-            except Exception as e:
-                error(f"Error calling {setter_name}: {e}")
-                self.ctx.toast.error(f"Error: {e}", duration=3000)
+            setter = getattr(camera.settings, setter_name)
+            setter(file_path)
+            debug(f"Called {setter_name} with {file_path}")
+            
+            # Refresh controlled states in case this button enabled other controls
+            self._apply_all_controlled_states(camera.settings)
+            
+            action = "exported to" if is_export else "imported from"
+            get_app_context().toast.success(f"Successfully {action} {file_path}", duration=2000)
         
         button.clicked.connect(on_button_clicked)
         return button
@@ -808,21 +788,16 @@ class CameraSettingsWidget(QWidget):
             if self._updating_from_camera:
                 return
             
-            camera = self.ctx.camera
+            camera = get_app_context().camera
             if not camera:
                 return
             
-            try:
-                setter = getattr(camera.settings, setter_name)
-                setter(value)
-                
-                # Extract setting name from setter name (remove "set_" prefix)
-                setting_name = setter_name.replace("set_", "")
-                self._mark_setting_modified(setting_name, value)
-                
-                debug(f"Set {setter_name} to {value}")
-            except Exception as e:
-                error(f"Error setting {setter_name}: {e}")
+            setter = getattr(camera.settings, setter_name)
+            setter(value)
+            
+            setting_name = setter_name.removeprefix("set_")
+            self._mark_setting_modified(setting_name, value)
+            debug(f"Set {setter_name} to {value}")
         
         spinbox.valueChanged.connect(on_value_changed)
         return spinbox
@@ -888,41 +863,36 @@ class CameraSettingsWidget(QWidget):
             return
 
         self._updating_from_camera = True
-        try:
-            # Range widgets: container holds a slider and a spinbox
-            spinboxes = control.findChildren(QSpinBox)
-            dbl_spinboxes = control.findChildren(QDoubleSpinBox)
-            sliders = control.findChildren(QSlider)
 
-            for sb in spinboxes:
-                sb.blockSignals(True)
-                sb.setValue(int(value))
-                sb.blockSignals(False)
-            for sb in dbl_spinboxes:
-                sb.blockSignals(True)
-                sb.setValue(float(value))
-                sb.blockSignals(False)
-            for sl in sliders:
-                sl.blockSignals(True)
-                sl.setValue(int(value))
-                sl.blockSignals(False)
-        finally:
-            self._updating_from_camera = False
+        spinboxes = control.findChildren(QSpinBox)
+        dbl_spinboxes = control.findChildren(QDoubleSpinBox)
+        sliders = control.findChildren(QSlider)
+
+        for sb in spinboxes:
+            sb.blockSignals(True)
+            sb.setValue(int(value))
+            sb.blockSignals(False)
+        for sb in dbl_spinboxes:
+            sb.blockSignals(True)
+            sb.setValue(float(value))
+            sb.blockSignals(False)
+        for sl in sliders:
+            sl.blockSignals(True)
+            sl.setValue(int(value))
+            sl.blockSignals(False)
+
+        self._updating_from_camera = False
 
     @Slot()
     def _poll_live_values(self) -> None:
         """Timer slot: read live hardware values and update display widgets."""
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             self._live_poll_timer.stop()
             return
 
         settings = camera.settings
-        try:
-            live = settings.get_live_values()
-        except Exception as e:
-            error(f"Error polling live values: {e}")
-            return
+        live = settings.get_live_values()
 
         if not live:
             # No controlled fields are active; stop polling.
@@ -947,7 +917,7 @@ class CameraSettingsWidget(QWidget):
         
         This runs on the UI thread after the signal is emitted from the camera thread.
         """
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             debug(f"External setting change for '{field_name}': no camera")
             return
@@ -958,24 +928,20 @@ class CameraSettingsWidget(QWidget):
             control = container.property("control")
             if control and isinstance(control, QCheckBox):
                 self._updating_from_camera = True
-                try:
-                    control.blockSignals(True)
-                    control.setChecked(value)
-                    control.blockSignals(False)
-                    debug(f"Updated checkbox widget for '{field_name}' to {value}")
-                finally:
-                    self._updating_from_camera = False
+                control.blockSignals(True)
+                control.setChecked(value)
+                control.blockSignals(False)
+                self._updating_from_camera = False
+                debug(f"Updated checkbox widget for '{field_name}' to {value}")
             elif control and isinstance(control, QComboBox):
                 self._updating_from_camera = True
-                try:
-                    index = control.findData(value)
-                    if index >= 0:
-                        control.blockSignals(True)
-                        control.setCurrentIndex(index)
-                        control.blockSignals(False)
-                        debug(f"Updated combo widget for '{field_name}' to {value}")
-                finally:
-                    self._updating_from_camera = False
+                index = control.findData(value)
+                if index >= 0:
+                    control.blockSignals(True)
+                    control.setCurrentIndex(index)
+                    control.blockSignals(False)
+                    debug(f"Updated combo widget for '{field_name}' to {value}")
+                self._updating_from_camera = False
         else:
             debug(f"No widget found for '{field_name}' (this is normal for controller-only fields)")
         
@@ -1018,7 +984,7 @@ class CameraSettingsWidget(QWidget):
         entry = self._controlled_fields.get(setting_name)
         if entry:
             controller_name, controlled_when = entry
-            camera = self.ctx.camera
+            camera = get_app_context().camera
             if camera:
                 controller_value = bool(getattr(camera.settings, controller_name, False))
                 if controller_value == controlled_when:
@@ -1089,7 +1055,7 @@ class CameraSettingsWidget(QWidget):
     
     def _clear_all_modifications(self) -> None:
         """Clear all modification markers and update saved values"""
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return
         
@@ -1123,7 +1089,7 @@ class CameraSettingsWidget(QWidget):
         if self._updating_from_camera:
             return
         
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return
 
@@ -1138,19 +1104,12 @@ class CameraSettingsWidget(QWidget):
 
         # If we are turning the controller OFF, flush live-value fields (controlled_when=True).
         if not value and controlled_by_this:
-            try:
-                camera.settings.on_controller_disabled(field_name)
-            except Exception as e:
-                error(f"Error flushing controlled values for {field_name}: {e}")
+            camera.settings.on_controller_disabled(field_name)
 
-        try:
-            setter = getattr(camera.settings, setter_name)
-            setter(value)
-            self._mark_setting_modified(field_name, value)
-            debug(f"Set {setter_name} to {value}")
-        except Exception as e:
-            error(f"Error setting {setter_name}: {e}")
-            return
+        setter = getattr(camera.settings, setter_name)
+        setter(value)
+        self._mark_setting_modified(field_name, value)
+        debug(f"Set {setter_name} to {value}")
 
         # Update controlled field state and live polling
         if controlled_by_this:
@@ -1181,21 +1140,16 @@ class CameraSettingsWidget(QWidget):
         slider.setValue(value)
         slider.blockSignals(False)
         
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return
         
-        try:
-            setter = getattr(camera.settings, setter_name)
-            setter(value)
-            
-            # Extract setting name from setter name (remove "set_" prefix)
-            setting_name = setter_name.replace("set_", "")
-            self._mark_setting_modified(setting_name, value)
-            
-            debug(f"Set {setter_name} to {value}")
-        except Exception as e:
-            error(f"Error setting {setter_name}: {e}")
+        setter = getattr(camera.settings, setter_name)
+        setter(value)
+        
+        setting_name = setter_name.removeprefix("set_")
+        self._mark_setting_modified(setting_name, value)
+        debug(f"Set {setter_name} to {value}")
     
     def _on_float_changed(self, setter_name: str, value: float, slider: QSlider, meta) -> None:
         """Handle float setting change from spinbox"""
@@ -1208,21 +1162,16 @@ class CameraSettingsWidget(QWidget):
         slider.setValue(slider_val)
         slider.blockSignals(False)
         
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return
         
-        try:
-            setter = getattr(camera.settings, setter_name)
-            setter(value)
-            
-            # Extract setting name from setter name (remove "set_" prefix)
-            setting_name = setter_name.replace("set_", "")
-            self._mark_setting_modified(setting_name, value)
-            
-            debug(f"Set {setter_name} to {value}")
-        except Exception as e:
-            error(f"Error setting {setter_name}: {e}")
+        setter = getattr(camera.settings, setter_name)
+        setter(value)
+        
+        setting_name = setter_name.removeprefix("set_")
+        self._mark_setting_modified(setting_name, value)
+        debug(f"Set {setter_name} to {value}")
     
     def _on_slider_changed_int(self, setter_name: str, value: int, spinbox: QSpinBox) -> None:
         """Handle integer setting change from slider"""
@@ -1234,21 +1183,16 @@ class CameraSettingsWidget(QWidget):
         spinbox.setValue(value)
         spinbox.blockSignals(False)
         
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return
         
-        try:
-            setter = getattr(camera.settings, setter_name)
-            setter(value)
-            
-            # Extract setting name from setter name (remove "set_" prefix)
-            setting_name = setter_name.replace("set_", "")
-            self._mark_setting_modified(setting_name, value)
-            
-            debug(f"Set {setter_name} to {value}")
-        except Exception as e:
-            error(f"Error setting {setter_name}: {e}")
+        setter = getattr(camera.settings, setter_name)
+        setter(value)
+        
+        setting_name = setter_name.removeprefix("set_")
+        self._mark_setting_modified(setting_name, value)
+        debug(f"Set {setter_name} to {value}")
     
     def _on_slider_changed_float(self, setter_name: str, slider_val: int, 
                                   spinbox: QDoubleSpinBox, meta) -> None:
@@ -1264,21 +1208,16 @@ class CameraSettingsWidget(QWidget):
         spinbox.setValue(value)
         spinbox.blockSignals(False)
         
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return
         
-        try:
-            setter = getattr(camera.settings, setter_name)
-            setter(value)
-            
-            # Extract setting name from setter name (remove "set_" prefix)
-            setting_name = setter_name.replace("set_", "")
-            self._mark_setting_modified(setting_name, value)
-            
-            debug(f"Set {setter_name} to {value}")
-        except Exception as e:
-            error(f"Error setting {setter_name}: {e}")
+        setter = getattr(camera.settings, setter_name)
+        setter(value)
+        
+        setting_name = setter_name.removeprefix("set_")
+        self._mark_setting_modified(setting_name, value)
+        debug(f"Set {setter_name} to {value}")
     
     def _on_dropdown_changed(self, setter_name: str, index: int, value) -> None:
         """Handle dropdown setting change
@@ -1291,47 +1230,36 @@ class CameraSettingsWidget(QWidget):
         if self._updating_from_camera:
             return
         
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             return
         
-        try:
-            setter = getattr(camera.settings, setter_name)
-            # Pass both index and value to the setter
-            setter(index=index, value=value)
-            
-            # Extract setting name from setter name (remove "set_" prefix)
-            setting_name = setter_name.replace("set_", "")
-            self._mark_setting_modified(setting_name, value)
-            
-            debug(f"Set {setter_name} to index={index}, value={value}")
-        except Exception as e:
-            error(f"Error setting {setter_name}: {e}")
+        setter = getattr(camera.settings, setter_name)
+        setter(index=index, value=value)
+        
+        setting_name = setter_name.removeprefix("set_")
+        self._mark_setting_modified(setting_name, value)
+        debug(f"Set {setter_name} to index={index}, value={value}")
     
     @Slot()
     def _save_settings(self) -> None:
         """Save current camera settings"""
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             warning("No camera to save settings from")
             return
         
-        try:
-            camera.save_settings()
-            info("Camera settings saved successfully")
-            
-            # Clear modification markers
-            self._clear_all_modifications()
-            
-            self.ctx.toast.success("Camera settings saved successfully", duration=2000)
-        except Exception as e:
-            error(f"Error saving camera settings: {e}")
-            self.ctx.toast.error(f"Error saving settings: {e}", duration=3000)
+        camera.save_settings()
+        info("Camera settings saved successfully")
+        
+        self._clear_all_modifications()
+        
+        get_app_context().toast.success("Camera settings saved successfully", duration=2000)
     
     @Slot()
     def _load_settings(self) -> None:
         """Load camera settings from file"""
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             warning("No camera to load settings to")
             return
@@ -1369,15 +1297,15 @@ class CameraSettingsWidget(QWidget):
             # Refresh the display to show loaded values
             self._refresh_settings_display()
             
-            self.ctx.toast.success("Settings loaded successfully", duration=2000)
+            get_app_context().toast.success("Settings loaded successfully", duration=2000)
         else:
             error(f"Error loading camera settings from {file_path}: {result}")
-            self.ctx.toast.error(f"Error loading settings: {result}", duration=3000)
+            get_app_context().toast.error(f"Error loading settings: {result}", duration=3000)
     
     @Slot()
     def _reset_settings(self) -> None:
         """Reset camera settings to defaults"""
-        camera = self.ctx.camera
+        camera = get_app_context().camera
         if not camera:
             warning("No camera to reset settings on")
             return
@@ -1385,7 +1313,7 @@ class CameraSettingsWidget(QWidget):
         # Check if we have default values stored
         if not self._default_values:
             warning("No default values stored - cannot reset")
-            self.ctx.toast.warning("No default values available to reset to", duration=3000)
+            get_app_context().toast.warning("No default values available to reset to", duration=3000)
             return
         
         # Confirm reset with user
@@ -1400,56 +1328,42 @@ class CameraSettingsWidget(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
         
-        try:
-            settings = camera.settings
-            metadata_list = settings.get_metadata()
-            
-            # Create a lookup dict for metadata
-            meta_dict = {meta.name: meta for meta in metadata_list}
-            
-            # Reset each setting to its default value
-            for field_name, default_value in self._default_values.items():
-                if default_value is None:
-                    continue
-                    
-                meta = meta_dict.get(field_name)
-                if not meta:
-                    continue
+        settings = camera.settings
+        metadata_list = settings.get_metadata()
+        
+        meta_dict = {meta.name: meta for meta in metadata_list}
+        
+        for field_name, default_value in self._default_values.items():
+            if default_value is None:
+                continue
                 
+            meta = meta_dict.get(field_name)
+            if not meta:
+                continue
+            
+            setter_name = f"set_{field_name}"
+            if not hasattr(settings, setter_name):
+                continue
+
+            setter = getattr(settings, setter_name)
+            type_str = meta.setting_type.value if hasattr(meta.setting_type, 'value') else str(meta.setting_type)
+            
+            if type_str == "dropdown" and hasattr(meta, 'choices') and meta.choices:
                 try:
-                    setter_name = f"set_{field_name}"
-                    if hasattr(settings, setter_name):
-                        setter = getattr(settings, setter_name)
-                        
-                        # Convert enum to string value if needed
-                        type_str = meta.setting_type.value if hasattr(meta.setting_type, 'value') else str(meta.setting_type)
-                        
-                        # Handle dropdown settings that need index and value
-                        if type_str == "dropdown" and hasattr(meta, 'choices') and meta.choices:
-                            # Find the index of the default value
-                            try:
-                                default_index = meta.choices.index(default_value)
-                                setter(index=default_index, value=default_value)
-                            except (ValueError, AttributeError):
-                                setter(default_value)
-                        else:
-                            setter(default_value)
-                        debug(f"Reset {field_name} to default: {default_value}")
-                except Exception as e:
-                    warning(f"Could not reset {field_name}: {e}")
-            
-            info("Camera settings reset to defaults")
-            
-            # Clear modification markers
-            self._clear_all_modifications()
-            
-            # Refresh the display
-            self._refresh_settings_display()
-            
-            self.ctx.toast.info("Settings reset to defaults", duration=2000)
-        except Exception as e:
-            error(f"Error resetting camera settings: {e}")
-            self.ctx.toast.error(f"Error resetting settings: {e}", duration=3000)
+                    default_index = meta.choices.index(default_value)
+                    setter(index=default_index, value=default_value)
+                except (ValueError, AttributeError):
+                    setter(default_value)
+            else:
+                setter(default_value)
+            debug(f"Reset {field_name} to default: {default_value}")
+        
+        info("Camera settings reset to defaults")
+        
+        self._clear_all_modifications()
+        self._refresh_settings_display()
+        
+        get_app_context().toast.info("Settings reset to defaults", duration=2000)
 
 
 def camera_page(parent_dialog=None) -> QWidget:
