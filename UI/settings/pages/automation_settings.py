@@ -100,7 +100,7 @@ class AutomationSettingsWidget(QWidget):
 
         self._tree_core = TreeCoreSettingsWidget()
         self._tree_core.connect_signals(self._on_run_changed, self._on_slot_changed)
-        self._tree_core.set_slot_mutation_callback(lambda: self._set_unsaved(True))
+        self._tree_core.set_slot_mutation_callback(self._recheck_unsaved)
         cl.addWidget(self._tree_core)
         self._group_boxes["Tree Core"] = self._tree_core
 
@@ -129,54 +129,62 @@ class AutomationSettingsWidget(QWidget):
         self._general.populate(s)
         self._zstack.populate(s)
         self._tree_core.populate(s)
-        self._general.snapshot(s)
-        self._zstack.snapshot(s)
-        self._tree_core.snapshot(s)
+        self._general.snapshot()
+        self._zstack.snapshot()
+        self._tree_core.snapshot()
         self._set_unsaved(False)
 
     def _on_general_changed(self, key: str, value: object, type_: type) -> None:
         self._general.apply_to_live(key, value, type_)
         self._general.mark_field(key, type_(value))
-        self._set_unsaved(True)
+        self._recheck_unsaved()
 
     def _on_zstack_float(self, key: str, value: float) -> None:
         nm_keys = {"step_nm", "approach_distance_nm"}
         stored = round(value * NM_PER_MM) if key in nm_keys else value
         self._zstack.apply_float_to_live(key, value)
         self._zstack.mark_field(key, stored)
-        self._set_unsaved(True)
+        self._recheck_unsaved()
 
     def _on_zstack_int(self, key: str, value: int) -> None:
         self._zstack.apply_int_to_live(key, value)
         self._zstack.mark_field(key, value)
-        self._set_unsaved(True)
+        self._recheck_unsaved()
 
     def _on_zstack_check(self, key: str, value: int) -> None:
         checked = value != 0
         self._zstack.apply_check_to_live(key, value)
         self._zstack.mark_field(key, checked)
-        self._set_unsaved(True)
+        self._recheck_unsaved()
 
     def _on_run_changed(self, key: str, value_mm: float) -> None:
         value_nm = round(value_mm * NM_PER_MM)
         self._tree_core.apply_run_to_live(key, value_mm)
         self._tree_core.mark_run_field(key, value_nm)
-        self._set_unsaved(True)
+        self._recheck_unsaved()
 
     def _on_slot_changed(self, index: int, key: str, value_mm: float) -> None:
         value_nm = round(value_mm * NM_PER_MM)
         self._tree_core.apply_slot_to_live(index, key, value_mm)
         self._tree_core.mark_slot_field(index, key, value_nm)
-        self._set_unsaved(True)
+        self._recheck_unsaved()
+
+    def _recheck_unsaved(self) -> None:
+        has_changes = (
+            self._general.has_changes()
+            or self._zstack.has_changes()
+            or self._tree_core.has_changes()
+        )
+        self._set_unsaved(has_changes)
 
     @Slot()
     def _on_save(self) -> None:
         ctx = get_app_context()
         s = self._current_settings()
         self._settings_manager.save(s)
-        self._general.snapshot(s)
-        self._zstack.snapshot(s)
-        self._tree_core.snapshot(s)
+        self._general.snapshot()
+        self._zstack.snapshot()
+        self._tree_core.snapshot()
         self._general.clear_orange()
         self._zstack.clear_orange()
         self._tree_core.clear_orange()

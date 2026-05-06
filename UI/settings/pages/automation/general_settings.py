@@ -70,11 +70,11 @@ class GeneralSettingsWidget(SettingsGroupBase):
         for w in self._w_int.values():
             w.blockSignals(False)
 
-    def snapshot(self, s: MotionSystemSettings) -> None:
+    def snapshot(self) -> None:
         self._saved = {
-            "overlap_x_pct":      s.automation.overlap_x_pct,
-            "overlap_y_pct":      s.automation.overlap_y_pct,
-            "capture_timeout_ms": s.automation.capture_timeout_ms,
+            "overlap_x_pct":      self._w["overlap_x_pct"].value(),
+            "overlap_y_pct":      self._w["overlap_y_pct"].value(),
+            "capture_timeout_ms": self._w_int["capture_timeout_ms"].value(),
         }
 
     def apply_to_live(self, key: str, value: object, type_: type) -> None:

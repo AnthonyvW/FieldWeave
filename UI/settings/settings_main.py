@@ -19,11 +19,11 @@ from PySide6.QtWidgets import (
     QScrollArea,
 )
 
-from .pages.camera_settings import camera_page
-from .pages.automation_settings import automation_page
-from .pages.machine_vision_settings import machine_vision_page
-from .pages.navigation_settings import navigation_page
-from .pages.about_settings import about_page
+from UI.settings.pages.camera_settings import camera_page
+from UI.settings.pages.automation_settings import automation_page
+from UI.settings.pages.machine_vision_settings import machine_vision_page
+from UI.settings.pages.navigation_settings import navigation_page
+from UI.settings.pages.about_settings import about_page
 
 class SettingsButton(QToolButton):
     def __init__(self, tooltip: str = "Settings", text: str = "⚙", parent: QWidget | None = None) -> None:
@@ -109,7 +109,7 @@ class SettingsDialog(QDialog):
 
         self._add_page("Camera", camera_page(self))
         self._add_page("Navigation", navigation_page())
-        self._add_page("Automation", automation_page())
+        self._add_page("Automation", automation_page(self))
         self._add_page("Machine Vision", machine_vision_page())
         self._add_page("About FieldWeave", about_page())
 

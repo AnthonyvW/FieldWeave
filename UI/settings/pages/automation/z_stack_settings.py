@@ -173,22 +173,21 @@ class ZStackSettingsWidget(SettingsGroupBase):
         for w in self._w_check.values():
             w.blockSignals(False)
 
-    def snapshot(self, s: MotionSystemSettings) -> None:
-        zs = s.z_stack_scan
+    def snapshot(self) -> None:
         self._saved = {
-            "zs.step_nm":              zs.step_nm,
-            "zs.approach_distance_nm": zs.approach_distance_nm,
-            "zs.run_focus_stack":      zs.run_focus_stack,
-            "zs.keep_size":            zs.keep_size,
-            "zs.no_align":             zs.no_align,
-            "zs.crop":                 zs.crop,
-            "zs.sharpness":            zs.sharpness,
-            "zs.cull_enabled":         zs.cull_enabled,
-            "zs.cull_threshold":       zs.cull_threshold,
-            "zs.slab_enabled":         zs.slab_enabled,
-            "zs.slab_size":            zs.slab_size,
-            "zs.slab_overlap":         zs.slab_overlap,
-            "zs.workers":              zs.workers,
+            "zs.step_nm":              round(self._w["step_nm"].value() * NM_PER_MM),
+            "zs.approach_distance_nm": round(self._w["approach_distance_nm"].value() * NM_PER_MM),
+            "zs.run_focus_stack":      self._w_check["run_focus_stack"].isChecked(),
+            "zs.keep_size":            self._w_check["keep_size"].isChecked(),
+            "zs.no_align":             self._w_check["no_align"].isChecked(),
+            "zs.crop":                 self._w_check["crop"].isChecked(),
+            "zs.sharpness":            self._w["sharpness"].value(),
+            "zs.cull_enabled":         self._w_check["cull_enabled"].isChecked(),
+            "zs.cull_threshold":       self._w["cull_threshold"].value(),
+            "zs.slab_enabled":         self._w_check["slab_enabled"].isChecked(),
+            "zs.slab_size":            self._w_int["slab_size"].value(),
+            "zs.slab_overlap":         self._w_int["slab_overlap"].value(),
+            "zs.workers":              self._w_int["workers"].value(),
         }
 
     def apply_float_to_live(self, key: str, value: float) -> None:

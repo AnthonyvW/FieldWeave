@@ -331,19 +331,18 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
 
         self._rebuild_slot_rows(tca.slots)
 
-    def snapshot(self, s: MotionSystemSettings) -> None:
-        tca = s.tree_core_automation
+    def snapshot(self) -> None:
         self._saved = {
-            "mark_reference_nm":  tca.mark_reference_nm,
-            "mark_z_nm":          tca.mark_z_nm,
-            "starting_height_nm": tca.starting_height_nm,
-            "starting_offset_nm": tca.starting_offset_nm,
-            "slot_separation_nm": tca.slot_separation_nm,
-            "num_slots":          tca.num_slots,
+            "mark_reference_nm":  round(self._w_run["mark_reference_nm"].value() * NM_PER_MM),
+            "mark_z_nm":          round(self._w_run["mark_z_nm"].value() * NM_PER_MM),
+            "starting_height_nm": round(self._w_run["starting_height_nm"].value() * NM_PER_MM),
+            "starting_offset_nm": round(self._w_run["starting_offset_nm"].value() * NM_PER_MM),
+            "slot_separation_nm": round(self._w_run["slot_separation_nm"].value() * NM_PER_MM),
+            "num_slots":          len(self._slot_rows),
         }
-        for i, slot in enumerate(tca.slots):
-            self._saved[f"slot.{i}.position_nm"] = slot.position_nm
-            self._saved[f"slot.{i}.offset_nm"]   = slot.offset_nm
+        for i, row in enumerate(self._slot_rows):
+            self._saved[f"slot.{i}.position_nm"] = round(row.widgets["position_nm"].value() * NM_PER_MM)
+            self._saved[f"slot.{i}.offset_nm"]   = round(row.widgets["offset_nm"].value() * NM_PER_MM)
 
     def apply_run_to_live(self, key: str, value_mm: float) -> None:
         motion = get_app_context().motion
