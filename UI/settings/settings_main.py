@@ -109,7 +109,7 @@ class SettingsDialog(QDialog):
         self._group_boxes = {}  # Maps (page_name, group_name) -> QGroupBox widget
 
         self._add_page("Camera", camera_page(self))
-        self._add_page("Navigation", navigation_page())
+        self._add_page("Navigation", navigation_page(self))
         self._add_page("Automation", automation_page(self))
         self._add_page("Machine Vision", machine_vision_page())
         self._add_page("About FieldWeave", about_page())
