@@ -142,7 +142,6 @@ class CameraSettingsWidget(QWidget):
         # Connect to parent dialog's save button if available
         if self.parent_dialog:
             if hasattr(self.parent_dialog, 'save_btn'):
-                self.parent_dialog.save_btn.clicked.connect(self._save_settings)
                 # Connect modifications_changed signal to enable/disable save button
                 self.modifications_changed.connect(self.parent_dialog.save_btn.setEnabled)
             if hasattr(self.parent_dialog, 'save_camera_settings'):
@@ -680,12 +679,10 @@ class CameraSettingsWidget(QWidget):
                 # Refresh controlled states in case this button enabled other controls
                 self._apply_all_controlled_states(camera.settings)
                 
-                if self.ctx and hasattr(self.ctx, 'toast'):
-                    self.ctx.toast.success(f"{meta.display_name} completed", duration=2000)
+                self.ctx.toast.success(f"{meta.display_name} completed", duration=2000)
             except Exception as e:
                 error(f"Error calling {setter_name}: {e}")
-                if self.ctx and hasattr(self.ctx, 'toast'):
-                    self.ctx.toast.error(f"Error: {e}", duration=3000)
+                self.ctx.toast.error(f"Error: {e}", duration=3000)
         
         button.clicked.connect(on_button_clicked)
         return button
@@ -775,12 +772,10 @@ class CameraSettingsWidget(QWidget):
                 self._apply_all_controlled_states(camera.settings)
                 
                 action = "exported to" if is_export else "imported from"
-                if self.ctx and hasattr(self.ctx, 'toast'):
-                    self.ctx.toast.success(f"Successfully {action} {file_path}", duration=2000)
+                self.ctx.toast.success(f"Successfully {action} {file_path}", duration=2000)
             except Exception as e:
                 error(f"Error calling {setter_name}: {e}")
-                if self.ctx and hasattr(self.ctx, 'toast'):
-                    self.ctx.toast.error(f"Error: {e}", duration=3000)
+                self.ctx.toast.error(f"Error: {e}", duration=3000)
         
         button.clicked.connect(on_button_clicked)
         return button
@@ -1328,10 +1323,10 @@ class CameraSettingsWidget(QWidget):
             # Clear modification markers
             self._clear_all_modifications()
             
-            self.ctx.toast.info("Settings saved successfully", duration=2000)
+            self.ctx.toast.success("Camera settings saved successfully", duration=2000)
         except Exception as e:
             error(f"Error saving camera settings: {e}")
-            self.ctx.toast.info(f"Error saving settings: {e}", duration=3000)
+            self.ctx.toast.error(f"Error saving settings: {e}", duration=3000)
     
     @Slot()
     def _load_settings(self) -> None:

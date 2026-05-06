@@ -122,9 +122,6 @@ class AutomationSettingsWidget(QWidget):
         scroll.setWidget(content)
         root.addWidget(scroll)
 
-        if self.parent_dialog and hasattr(self.parent_dialog, "save_btn"):
-            self.parent_dialog.save_btn.clicked.connect(self._on_save)
-
     def _populate_from_settings(self, s: MotionSystemSettings) -> None:
         self._general.populate(s)
         self._zstack.populate(s)
@@ -170,11 +167,16 @@ class AutomationSettingsWidget(QWidget):
         self._recheck_unsaved()
 
     def _recheck_unsaved(self) -> None:
-        has_changes = (
-            self._general.has_changes()
-            or self._zstack.has_changes()
-            or self._tree_core.has_changes()
-        )
+        general_changed = self._general.has_changes()
+        zstack_changed = self._zstack.has_changes()
+        tree_core_changed = self._tree_core.has_changes()
+        has_changes = general_changed or zstack_changed or tree_core_changed
+
+        if self.parent_dialog and hasattr(self.parent_dialog, "set_category_modified"):
+            self.parent_dialog.set_category_modified("Automation", general_changed, "General")
+            self.parent_dialog.set_category_modified("Automation", zstack_changed, "Z-Stack Scan")
+            self.parent_dialog.set_category_modified("Automation", tree_core_changed, "Tree Core")
+
         self._set_unsaved(has_changes)
 
     @Slot()
@@ -188,9 +190,9 @@ class AutomationSettingsWidget(QWidget):
         self._general.clear_orange()
         self._zstack.clear_orange()
         self._tree_core.clear_orange()
+        self._recheck_unsaved()
         self._set_unsaved(False)
-        if ctx.toast:
-            ctx.toast.success("Automation settings saved", duration=2000)
+        ctx.toast.success("Automation settings saved", duration=2000)
         info("Automation settings saved")
 
     def _set_unsaved(self, has_changes: bool) -> None:

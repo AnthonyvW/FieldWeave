@@ -97,6 +97,7 @@ class SettingsDialog(QDialog):
         button_box.addButton(self.save_btn, QDialogButtonBox.ButtonRole.ActionRole)
         button_box.addButton(close_btn, QDialogButtonBox.ButtonRole.RejectRole)
         
+        self.save_btn.clicked.connect(self._on_save_clicked)
         close_btn.clicked.connect(self._on_close_clicked)
         
         button_container_layout.addWidget(button_box)
@@ -133,17 +134,24 @@ class SettingsDialog(QDialog):
                 self._on_tree_item_clicked(item, 0)
                 return
     
-    def set_category_modified(self, category: str, modified: bool) -> None:
-        """Update category text color to indicate modifications"""
+    def set_category_modified(self, category: str, modified: bool, group: str | None = None) -> None:
         for i in range(self.sidebar.topLevelItemCount()):
             item = self.sidebar.topLevelItem(i)
             if item and item.text(0) == category:
-                if modified:
-                    # Use orange color (#f28c28 from style.py)
-                    item.setForeground(0, QColor("#f28c28"))
+                color = QColor("#f28c28") if modified else None
+                if color:
+                    item.setForeground(0, color)
                 else:
-                    # Reset to default
                     item.setData(0, Qt.ItemDataRole.ForegroundRole, None)
+                if group is not None:
+                    for j in range(item.childCount()):
+                        child = item.child(j)
+                        if child and child.text(0) == group:
+                            if color:
+                                child.setForeground(0, color)
+                            else:
+                                child.setData(0, Qt.ItemDataRole.ForegroundRole, None)
+                            break
                 return
     
     def _update_camera_groups(self, group_names: list[str]) -> None:
@@ -175,32 +183,42 @@ class SettingsDialog(QDialog):
     
     @Slot(QTreeWidgetItem, int)
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        """Handle tree item clicks"""
-        # Get the stored data
         page_index = item.data(0, Qt.ItemDataRole.UserRole)
         group_name = item.data(0, Qt.ItemDataRole.UserRole + 1)
-        
-        if page_index is not None:
-            # Switch to the page
-            self.pages.setCurrentIndex(page_index)
-            
-            # If it's a group item, scroll to that group
-            if group_name:
-                # Get the page name from parent
-                parent = item.parent()
-                if parent:
-                    page_name = parent.text(0)
-                    group_box = self._group_boxes.get((page_name, group_name))
-                    
-                    if group_box:
-                        # Find the scroll area in the current page
-                        current_page = self.pages.currentWidget()
-                        scroll_area = current_page.findChild(QScrollArea)
-                        
-                        if scroll_area:
-                            # Scroll to the group box
-                            scroll_area.ensureWidgetVisible(group_box)
+
+        if page_index is None:
+            return
+
+        self.pages.setCurrentIndex(page_index)
+
+        parent = item.parent()
+        if parent is None:
+            # Top-level category item: collapse all others, expand this one.
+            for i in range(self.sidebar.topLevelItemCount()):
+                top = self.sidebar.topLevelItem(i)
+                if top is not item:
+                    top.setExpanded(False)
+            item.setExpanded(True)
+        else:
+            # Child group item: ensure parent stays expanded and scroll to group.
+            parent.setExpanded(True)
+            page_name = parent.text(0)
+            group_box = self._group_boxes.get((page_name, group_name))
+            if group_box:
+                current_page = self.pages.currentWidget()
+                scroll_area = current_page.findChild(QScrollArea)
+                if scroll_area:
+                    scroll_area.ensureWidgetVisible(group_box)
     
+    def _on_save_clicked(self) -> None:
+        for page in self._page_widgets.values():
+            if not hasattr(page, "has_unsaved_changes") or not page.has_unsaved_changes():
+                continue
+            if hasattr(page, "_on_save"):
+                page._on_save()
+            elif hasattr(page, "_save_settings"):
+                page._save_settings()
+
     def _on_close_clicked(self) -> None:
         """Handle close button click with confirmation if settings modified"""
         if self._handle_close_with_unsaved_changes():
