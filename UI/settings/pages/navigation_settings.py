@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info
 from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
-from UI.widgets.navigation_widget import NavigationWidget
 
 from UI.settings.pages.navigation.controller_settings import ControllerSettingsWidget
 from UI.settings.pages.navigation.navigation_group_settings import NavigationGroupSettingsWidget
@@ -169,7 +168,6 @@ class NavigationSettingsWidget(QWidget):
         self._navigation.clear_orange()
         self._recheck_unsaved()
         self._set_unsaved(False)
-        NavigationWidget.notify_settings_changed()
         ctx.toast.success("Navigation settings saved", duration=2000)
         info("Navigation settings saved")
 

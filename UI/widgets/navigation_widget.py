@@ -205,29 +205,14 @@ class DiamondButton(QPushButton):
 
 
 class NavigationWidget(QWidget):
-    _instances: list[NavigationWidget] = []
-
-    @classmethod
-    def notify_settings_changed(cls) -> None:
-        """
-        Call this after navigation settings are saved to push the updated
-        presets and axis-inversion flags to every live NavigationWidget.
-        NavigationSettingsWidget._on_save() calls this automatically.
-        """
-        for instance in list(cls._instances):
-            instance.refresh_from_settings()
-
     # ------------------------------------------------------------------
     # Step size — shared across instances, stored in nm
     # ------------------------------------------------------------------
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        NavigationWidget._instances.append(self)
-        self.destroyed.connect(
-            lambda: NavigationWidget._instances.remove(self))
 
-        # Axis-inversion flags — updated by refresh_from_settings().
+        # Axis-inversion flags — updated by _poll_settings().
         self._invert_x: bool = False
         self._invert_y: bool = False
         self._invert_z: bool = False
@@ -235,6 +220,10 @@ class NavigationWidget(QWidget):
         # Step size owned by this widget instance (nm).  Never written back to
         # the motion system's settings — the motion system manages its own value.
         self._step_size_nm: int = _FALLBACK_PRESETS_NM[0]
+
+        # Snapshot of the last settings we applied, used by the poll timer to
+        # detect changes without requiring an external notify call.
+        self._last_settings_snapshot: tuple | None = None
 
         # Declare all widget attributes here so they are always defined in __init__
         self.top_btn: DiamondButton
@@ -247,7 +236,7 @@ class NavigationWidget(QWidget):
         self.position_label: QLabel
         self.step_buttons: list[tuple[QPushButton, int]]  # (button, size_nm)
 
-        # Step-size preset buttons container — rebuilt by refresh_from_settings().
+        # Step-size preset buttons container — rebuilt by _apply_settings().
         self._step_buttons_layout: QHBoxLayout | None = None
 
         self._setup_ui()
@@ -272,36 +261,48 @@ class NavigationWidget(QWidget):
         self._set_motion_available(False)
 
         # Apply current settings (presets + inversion flags).
-        self.refresh_from_settings()
+        self._poll_settings()
 
     # ------------------------------------------------------------------
-    # Settings refresh — called at init and after settings are saved
+    # Settings refresh — driven by the poll timer
     # ------------------------------------------------------------------
 
-    def refresh_from_settings(self) -> None:
-        """
-        Pull the latest presets and axis-inversion flags from the motion
-        controller settings and update the widget accordingly.
-
-        Safe to call from any point after __init__ completes.
-        """
+    def _settings_snapshot(self) -> tuple | None:
+        """Return a hashable snapshot of the settings fields we care about, or None."""
         ctx = get_app_context()
         s: MotionSystemSettings | None = (
             ctx.motion.settings if ctx.motion is not None else None
         )
+        if s is None:
+            return None
+        return (
+            getattr(s, "invert_x", False),
+            getattr(s, "invert_y", False),
+            getattr(s, "invert_z", False),
+            tuple(_settings_presets_nm(s)),
+        )
 
-        if s is not None:
-            self._invert_x = getattr(s, "invert_x", False)
-            self._invert_y = getattr(s, "invert_y", False)
-            self._invert_z = getattr(s, "invert_z", False)
-            presets_nm = _settings_presets_nm(s)
+    def _apply_settings(self, snapshot: tuple | None) -> None:
+        """Apply a settings snapshot (or fallbacks when snapshot is None) to the widget."""
+        if snapshot is not None:
+            invert_x, invert_y, invert_z, presets_nm = snapshot
+            self._invert_x = invert_x
+            self._invert_y = invert_y
+            self._invert_z = invert_z
         else:
             self._invert_x = False
             self._invert_y = False
             self._invert_z = False
-            presets_nm = list(_FALLBACK_PRESETS_NM)
+            presets_nm = tuple(_FALLBACK_PRESETS_NM)
 
-        self._rebuild_step_buttons(presets_nm)
+        self._rebuild_step_buttons(list(presets_nm))
+
+    def _poll_settings(self) -> None:
+        """Check whether settings have changed and apply them if so."""
+        snapshot = self._settings_snapshot()
+        if snapshot != self._last_settings_snapshot:
+            self._last_settings_snapshot = snapshot
+            self._apply_settings(snapshot)
 
     # ------------------------------------------------------------------
     # UI setup
@@ -419,11 +420,11 @@ class NavigationWidget(QWidget):
         state = ctx.motion.get_state()
         routine_running = ctx.motion.routine_running
 
+        self._poll_settings()
+
         if state == MotionState.READY and not routine_running:
             if not self._motion_available:
-                # Transition into ready — apply settings once on first entry.
                 self._set_motion_available(True)
-                self.refresh_from_settings()
             if not self._position_timer.isActive():
                 self._position_timer.start()
         elif state in (MotionState.FAILED, MotionState.FAULTED):
@@ -488,7 +489,7 @@ class NavigationWidget(QWidget):
         self._step_buttons_layout.setSpacing(8)
 
         self.step_buttons = []
-        # Populated properly by refresh_from_settings() → _rebuild_step_buttons()
+        # Populated properly by _poll_settings() → _apply_settings() → _rebuild_step_buttons()
         # after __init__ completes; initialise with fallbacks so the widget is
         # never in an empty state during construction.
         self._populate_step_buttons(_FALLBACK_PRESETS_NM)
@@ -555,7 +556,7 @@ class NavigationWidget(QWidget):
         # If the current step size is no longer in the new presets, fall back
         # to the first preset so the controller speed stays consistent.
         if self._current_step_size_nm() not in presets_nm and presets_nm:
-            self._set_step_size_nm(presets_nm[0], notify_instances=False)
+            self._set_step_size_nm(presets_nm[0])
 
         self._populate_step_buttons(presets_nm)
 
@@ -563,13 +564,10 @@ class NavigationWidget(QWidget):
         """Return the step size currently selected on this widget."""
         return self._step_size_nm
 
-    def _set_step_size_nm(self, size_nm: int, *, notify_instances: bool = True) -> None:
-        """Set this widget's step size and, optionally, sync button states on all live instances."""
+    def _set_step_size_nm(self, size_nm: int) -> None:
+        """Set this widget's step size and sync button checked states."""
         self._step_size_nm = size_nm
-
-        if notify_instances:
-            for instance in list(NavigationWidget._instances):
-                instance._sync_step_size_buttons()
+        self._sync_step_size_buttons()
 
     def _sync_step_size_buttons(self) -> None:
         """Update checked states to reflect this widget's current step size."""
