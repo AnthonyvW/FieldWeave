@@ -558,7 +558,7 @@ class FocusResult:
 class FocusAnalysis(VisionAlgorithm):
     """Tenengrad / Laplacian focus scoring with heatmap overlay."""
 
-    def process(self, frame_bytes: bytes, width: int, height: int) -> FocusResult:
+    def process(self, frame_bytes: bytes, width: int, height: int, use_region: bool = True) -> FocusResult:
         f = self._settings.focus
         arr = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((height, width, 3)).copy()
         bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
@@ -571,7 +571,7 @@ class FocusAnalysis(VisionAlgorithm):
                 top=fr.top / 100.0,
                 bottom=fr.bottom / 100.0,
             )
-            if fr.enabled
+            if fr.enabled and use_region
             else None
         )
 
