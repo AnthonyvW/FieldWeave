@@ -10,15 +10,11 @@ OpenCV work happens off the GUI thread; this file only handles display.
 Two activation modes are supported:
 
   - Full-frame mode  (set_region_mode(False)): the heatmap covers the entire
-    preview.  FocusRegionSettings.enabled is forced to False while this mode
-    is active so the worker analyses the whole frame.
+    preview and the worker analyses the whole frame.
 
   - Region mode      (set_region_mode(True)):  the heatmap is clipped to the
-    configured focus region and the surrounding area is dimmed.
-    FocusRegionSettings.enabled is forced to True while this mode is active.
-
-In both cases the previous value of FocusRegionSettings.enabled is restored
-when the overlay is disabled via ``enabled = False``.
+    configured focus region, the surrounding area is dimmed, and the worker
+    only scores the region pixels.
 """
 
 from __future__ import annotations
@@ -53,17 +49,13 @@ class FocusOverlay(Overlay):
     Two display modes are available; select with ``set_region_mode()``:
 
     Full-frame mode (default)
-        The heatmap fills the entire preview rect.  The focus region setting
-        is disabled while this mode is active so the worker scores every pixel.
+        The heatmap fills the entire preview rect and the worker scores every
+        pixel.
 
     Region mode
-        The heatmap is clipped to the active focus region and the area outside
-        is dimmed.  The focus region setting is enabled while this mode is
-        active so the worker only scores the region pixels.  A dashed rectangle
-        marks the region boundary.
-
-    The previous ``FocusRegionSettings.enabled`` value is restored whenever
-    the overlay is toggled off.
+        The heatmap is clipped to the active focus region, the area outside is
+        dimmed, and the worker only scores the region pixels.  A dashed
+        rectangle marks the region boundary.
     """
 
     def __init__(self) -> None:
@@ -73,7 +65,6 @@ class FocusOverlay(Overlay):
         self._relay = _ResultRelay()
         self._relay.result_ready.connect(self._on_result)
         self._region_mode: bool = False
-        self._saved_region_enabled: bool | None = None
 
     # ------------------------------------------------------------------
     # Mode switching
@@ -83,40 +74,11 @@ class FocusOverlay(Overlay):
         """
         Switch between full-frame and region display modes.
 
-        Should be called before enabling the overlay (i.e. before setting
-        ``enabled = True``) so that the worker setting is correct from the
-        first analysed frame.  Safe to call while the overlay is already
-        active; the worker will pick up the new ``focus_region.enabled``
-        value on its next frame.
+        Controls whether the heatmap and region rectangle are clipped to the
+        configured focus region bounds, and whether the worker scores only
+        the region pixels or the entire frame.
         """
         self._region_mode = region_mode
-        if self._saved_region_enabled is not None:
-            self._apply_region_setting(region_mode)
-
-    @property
-    def enabled(self) -> bool:
-        return super().enabled
-
-    @enabled.setter
-    def enabled(self, value: bool) -> None:
-        if value and not super().enabled:
-            self._saved_region_enabled = (
-                get_app_context()
-                .machine_vision.settings.focus.focus_region.enabled
-            )
-            self._apply_region_setting(self._region_mode)
-        elif not value and super().enabled:
-            if self._saved_region_enabled is not None:
-                get_app_context(
-                ).machine_vision.settings.focus.focus_region.enabled = (
-                    self._saved_region_enabled
-                )
-                self._saved_region_enabled = None
-        Overlay.enabled.fset(self, value)
-
-    def _apply_region_setting(self, region_mode: bool) -> None:
-        get_app_context(
-        ).machine_vision.settings.focus.focus_region.enabled = region_mode
 
     # ------------------------------------------------------------------
     # Called by OverlayLabel on every rendered frame (GUI thread)
@@ -130,7 +92,7 @@ class FocusOverlay(Overlay):
         done-callback to deliver the result back to the GUI thread.
         """
         h, w = frame.shape[:2]
-        future = get_app_context().machine_vision.request_focus_analysis(frame, w, h)
+        future = get_app_context().machine_vision.request_focus_analysis(frame, w, h, self._region_mode)
         future.add_done_callback(self._on_future_done)
 
     # ------------------------------------------------------------------
@@ -196,7 +158,7 @@ class FocusOverlay(Overlay):
 
         fr = get_app_context().machine_vision.settings.focus.focus_region
         painter.setOpacity(1.0)
-        if fr.enabled:
+        if self._region_mode:
             rw = rect.width()
             rh = rect.height()
             x0 = rect.left() + int(round(rw * fr.left / 100.0))
@@ -234,7 +196,7 @@ class FocusOverlay(Overlay):
         Does nothing when the focus region is not enabled.
         """
         fr = get_app_context().machine_vision.settings.focus.focus_region
-        if not fr.enabled:
+        if not self._region_mode:
             return
 
         rw = rect.width()

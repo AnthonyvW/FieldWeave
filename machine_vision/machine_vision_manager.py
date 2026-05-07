@@ -159,10 +159,10 @@ class _VisionWorker(QObject):
         self._red_mark_detection = RedMarkDetection(settings)
         self._background_detection = BackgroundDetection(settings)
 
-    @Slot(bytes, int, int)
-    def run_focus_analysis(self, frame_bytes: bytes, width: int, height: int) -> None:
+    @Slot(bytes, int, int, bool)
+    def run_focus_analysis(self, frame_bytes: bytes, width: int, height: int, use_region: bool = True) -> None:
         try:
-            self.focus_result_ready.emit(self._focus.process(frame_bytes, width, height))
+            self.focus_result_ready.emit(self._focus.process(frame_bytes, width, height, use_region))
         except Exception:
             msg = traceback.format_exc()
             error(f"_VisionWorker: focus analysis failed:\n{msg}")
@@ -259,7 +259,7 @@ class MachineVisionManager(QObject):
 
     settings_changed = Signal()
 
-    _request_focus = Signal(bytes, int, int)
+    _request_focus = Signal(bytes, int, int, bool)
     _request_calibration_build = Signal(
         bytes, int, int,
         bytes, int, int,
@@ -494,6 +494,7 @@ class MachineVisionManager(QObject):
         frame: np.ndarray,
         width: int,
         height: int,
+        use_region: bool = True,
     ) -> Future[FocusResult]:
         """
         Submit a focus analysis request using latest-frame-wins policy.
@@ -502,14 +503,18 @@ class MachineVisionManager(QObject):
         one.  Use this for continuous preview feeds where only the most recent
         frame matters.
 
+        Pass ``use_region=False`` to ignore the focus region even when it is
+        enabled in settings.
+
         The frame is copied immediately so the camera buffer may be reused
         before the future resolves.
         """
-        return self._focus_queue.submit((bytes(frame), width, height))
+        return self._focus_queue.submit((bytes(frame), width, height, use_region))
 
     def request_focus_analysis_guaranteed(
         self,
-        frame: np.ndarray
+        frame: np.ndarray,
+        use_region: bool = True,
     ) -> Future[FocusResult]:
         """
         Submit a focus analysis request that is guaranteed to be executed.
@@ -519,10 +524,13 @@ class MachineVisionManager(QObject):
         droppable preview request is dispatched.  Use this when a result for a
         specific captured frame must be obtained (e.g. autofocus scoring).
 
+        Pass ``use_region=False`` to ignore the focus region even when it is
+        enabled in settings.
+
         The frame is copied immediately so the camera buffer may be reused
         before the future resolves.
         """
-        return self._focus_queue.submit_guaranteed((bytes(frame), frame.shape[1], frame.shape[0]))
+        return self._focus_queue.submit_guaranteed((bytes(frame), frame.shape[1], frame.shape[0], use_region))
 
     def request_inspect_calibration(
         self,
