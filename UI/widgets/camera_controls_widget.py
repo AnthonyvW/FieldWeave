@@ -359,8 +359,9 @@ class CameraControlsWidget(QWidget):
 
         if available and not self._camera_available:
             self._set_camera_available(True)
-            self._format_combo.setCurrentText(
-                ctx.camera.settings.fformat.value)
+            self._format_combo.blockSignals(True)
+            self._format_combo.setCurrentText(ctx.camera.settings.fformat.value)
+            self._format_combo.blockSignals(False)
         elif not available and self._camera_available:
             self._set_camera_available(False)
 
