@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QPushButton, QLineEdit, QLabel, QFileDialog, QMessageBox, QComboBox
 )
-from PySide6.QtCore import Slot, Signal, QTimer
+from PySide6.QtCore import Qt, Slot, Signal, QTimer
 from PySide6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush
 from common.logger import info, error, warning, debug
 from common.app_context import get_app_context
@@ -217,35 +217,34 @@ class CameraControlsWidget(QWidget):
     
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        
-        # Default values
+
         self._default_folder = Path("./output")
         self._current_folder = self._default_folder
-        
 
-        
-        # Ensure output folder exists
         self._ensure_output_folder()
-        
-        # Setup UI
+
+        self._overlay: QWidget | None = None
+        self._overlay_label: QLabel | None = None
+        self._camera_available: bool = False
+
         self._setup_ui()
-        
-        # Connect signal to handler
+
         self.photo_captured.connect(self._on_photo_captured)
 
-        # Histogram polling timer — only started when histogram is enabled
         self._histogram_timer = QTimer(self)
-        self._histogram_timer.setInterval(33)  # ~30 fps
+        self._histogram_timer.setInterval(33)
         self._histogram_timer.timeout.connect(self._poll_histogram)
 
-        # Autofocus polling timer — started while a routine is running
         self._autofocus_poll_timer = QTimer(self)
         self._autofocus_poll_timer.setInterval(250)
         self._autofocus_poll_timer.timeout.connect(self._poll_autofocus_state)
 
-        # Histogram is temporarily removed until rendering issues are fixed
-        # Show histogram group only if the camera supports it
-        #self._refresh_histogram_visibility()
+        self._camera_poll_timer = QTimer(self)
+        self._camera_poll_timer.setInterval(500)
+        self._camera_poll_timer.timeout.connect(self._check_camera_available)
+        self._camera_poll_timer.start()
+
+        self._set_camera_available(False)
         
     def _setup_ui(self):
         """Setup the user interface"""
@@ -270,6 +269,101 @@ class CameraControlsWidget(QWidget):
         
         layout.addStretch()
         
+    # ------------------------------------------------------------------
+    # Overlay — mirrors NavigationWidget's no-connection pattern
+    # ------------------------------------------------------------------
+
+    def _ensure_overlay(self) -> None:
+        if self._overlay is not None:
+            return
+        overlay_parent = self.parent()
+        if overlay_parent is None:
+            return
+
+        self._overlay = QWidget(overlay_parent)
+        self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+        self._overlay.show()
+
+        self._overlay_label = QLabel("No Camera Connected", self._overlay)
+        self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._overlay_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 18px;
+                font-style: italic;
+                background: transparent;
+            }
+        """)
+
+        self._set_camera_available(self._camera_available)
+
+    def _reposition_overlay(self) -> None:
+        if self._overlay is None:
+            return
+        overlay_parent = self._overlay.parent()
+        if overlay_parent is None:
+            return
+
+        origin = self.mapTo(overlay_parent, self.rect().topLeft())
+        x, y = origin.x(), origin.y()
+        w, h = self.width(), self.height()
+
+        parent = self.parent()
+        if parent is not None:
+            layout = parent.layout()
+            if layout is not None:
+                left, top, right, bottom = layout.getContentsMargins()
+                x -= left
+                y -= top
+                w += left + right
+                h += top + bottom
+
+        self._overlay.setGeometry(x, y, w, h)
+        self._overlay_label.setGeometry(
+            0, 0, self._overlay.width(), self._overlay.height())
+        self._overlay.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reposition_overlay()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._ensure_overlay()
+        self._reposition_overlay()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._reposition_overlay()
+
+    def _set_camera_available(self, available: bool) -> None:
+        self._camera_available = available
+        if self._overlay is None:
+            return
+        if available:
+            self._overlay.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+            self._overlay_label.hide()
+            self._overlay.lower()
+        else:
+            self._overlay.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 100);")
+            self._overlay_label.show()
+            self._overlay.raise_()
+
+    def _check_camera_available(self) -> None:
+        ctx = get_app_context()
+        available = ctx.camera is not None and ctx.camera.underlying_camera.is_open
+
+        if available and not self._camera_available:
+            self._set_camera_available(True)
+            self._format_combo.setCurrentText(
+                ctx.camera.settings.fformat.value)
+        elif not available and self._camera_available:
+            self._set_camera_available(False)
+
     def _create_histogram_group(self) -> QGroupBox:
         """Create the histogram display group."""
         group = QGroupBox("Histogram")
@@ -642,8 +736,6 @@ class CameraControlsWidget(QWidget):
         self._format_combo = QComboBox()
         self._format_combo.addItems(f.value for f in FileFormat)
 
-        # Set default format from camera settings
-        self._format_combo.setCurrentText(get_app_context().camera.settings.fformat.value)
         self._format_combo.currentIndexChanged.connect(self._on_format_changed)
         
         self._open_folder_button = QPushButton("Browse Output")

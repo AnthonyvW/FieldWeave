@@ -173,14 +173,10 @@ class CameraSettingsWidget(QWidget):
             self.camera_combo.blockSignals(False)
             return
         
-        # Use cached list unless forced to enumerate
         if force_enumerate:
             cameras = ctx.camera_manager.enumerate_cameras()
         else:
             cameras = ctx.camera_manager.available_cameras
-            # If no cached cameras, enumerate once
-            if not cameras:
-                cameras = ctx.camera_manager.enumerate_cameras()
         
         if not cameras:
             self.camera_combo.addItem("No cameras detected")

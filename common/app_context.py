@@ -217,8 +217,6 @@ class AppContext:
                     debug("Camera opened and streaming started successfully")
                 else:
                     warning("Failed to auto-open first camera")
-            else:
-                warning("No cameras found during enumeration")
         except Exception as e:
             error(f"Failed to initialize camera manager: {e}")
             self._camera_manager = None

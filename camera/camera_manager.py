@@ -84,7 +84,8 @@ class CameraManager(QObject):
         self._still_frame_seq: int = 0
 
         self._is_streaming = False
-        
+        self._last_enumerated_count: int | None = None
+
         # Connect internal camera event signal
         self._camera_event.connect(self._on_camera_event, Qt.ConnectionType.QueuedConnection)
         
@@ -170,17 +171,19 @@ class CameraManager(QObject):
                 continue
         
         self._available_cameras = cameras
-        
-        # Single clean summary log
-        if cameras:
-            info(f"Found {len(cameras)} camera(s):")
-            for idx, cam in enumerate(cameras):
-                info(f"  [{idx}] {cam.display_name} ({cam.model})")
-        else:
-            info("No cameras found")
-        
+
+        count = len(cameras)
+        if count != self._last_enumerated_count:
+            if cameras:
+                info(f"Found {count} camera(s):")
+                for idx, cam in enumerate(cameras):
+                    info(f"  [{idx}] {cam.display_name} ({cam.model})")
+            else:
+                info("No cameras found")
+            self._last_enumerated_count = count
+
         self.camera_list_changed.emit()
-        self.enumeration_complete.emit(len(cameras))
+        self.enumeration_complete.emit(count)
         
         return cameras
     
