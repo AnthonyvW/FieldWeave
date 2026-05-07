@@ -318,17 +318,20 @@ class InspectionCalibrationScaleWidget(QWidget):
 
         main_layout.addStretch(1)
 
-        # ---- Poll timer --------------------------------------------------
+        # ---- Routine poll timer (active only while a routine runs) -------
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(250)
         self._poll_timer.timeout.connect(self._poll_routine_state)
 
+        # ---- Idle poll timer (always running, refreshes DPI/cal state) ---
+        self._idle_poll_timer = QTimer(self)
+        self._idle_poll_timer.setInterval(1000)
+        self._idle_poll_timer.timeout.connect(self._poll_idle_state)
+        self._idle_poll_timer.start()
+
         self._refresh_position_display()
         self._refresh_calibration_info()
         self._refresh_inspection_calibration_state()
-        get_app_context().machine_vision.settings_changed.connect(
-            self._on_settings_changed, Qt.ConnectionType.QueuedConnection
-        )
 
     # ------------------------------------------------------------------
     # showEvent — refresh calibration guard on tab switch
@@ -339,10 +342,10 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._refresh_inspection_calibration_state()
 
     # ------------------------------------------------------------------
-    # Settings change slot
+    # Idle poll
     # ------------------------------------------------------------------
 
-    def _on_settings_changed(self) -> None:
+    def _poll_idle_state(self) -> None:
         self._refresh_calibration_info()
         self._refresh_position_display()
         self._refresh_inspection_calibration_state()
@@ -584,8 +587,6 @@ class InspectionCalibrationScaleWidget(QWidget):
         self._routine = None
         self._refresh_position_display()
         self._refresh_calibration_info()
-        if result is not None and result.success:
-            get_app_context().machine_vision.notify_settings_changed()
         if self._last_output_path is not None:
             self._results_widget.show_result(self._last_output_path, self._find_result_image(self._last_output_path))
         if result is not None:

@@ -238,11 +238,6 @@ class MachineVisionManager(QObject):
     """
     GUI-thread owner of the machine-vision pipeline.
 
-    Signals
-    -------
-    settings_changed():
-        Emitted after settings are applied so UI pages can refresh.
-
     Request API
     -----------
     Every ``request_*`` / ``submit_*`` method returns a ``Future`` that is
@@ -256,8 +251,6 @@ class MachineVisionManager(QObject):
     new request arrives while the worker is busy the previously waiting
     request is cancelled and replaced.
     """
-
-    settings_changed = Signal()
 
     _request_focus = Signal(bytes, int, int, bool)
     _request_calibration_build = Signal(
@@ -337,17 +330,11 @@ class MachineVisionManager(QObject):
 
     @property
     def settings(self) -> MachineVisionSettings:
-        """
-        The live settings object shared with all worker algorithms.
+        """The live settings object shared with all worker algorithms.
 
-        Mutate fields directly, then call ``notify_settings_changed()`` if the
-        UI needs to refresh, and ``save_settings()`` to persist to disk.
+        Mutate fields directly, then call ``save_settings()`` to persist to disk.
         """
         return self._settings
-
-    def notify_settings_changed(self) -> None:
-        """Emit ``settings_changed`` so UI pages can refresh after a direct mutation."""
-        self.settings_changed.emit()
 
     def save_settings(self) -> None:
         """Persist the current settings to disk."""

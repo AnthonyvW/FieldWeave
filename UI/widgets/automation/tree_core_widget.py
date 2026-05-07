@@ -309,9 +309,10 @@ class TreeCoreWidget(QWidget):
         self._sample_list_layout: QVBoxLayout
 
         self._setup_ui()
-        ctx = get_app_context()
-        if ctx is not None and ctx.machine_vision is not None:
-            ctx.machine_vision.settings_changed.connect(self._on_settings_changed)
+        self._idle_poll_timer = QTimer(self)
+        self._idle_poll_timer.setInterval(1000)
+        self._idle_poll_timer.timeout.connect(self._poll_idle_state)
+        self._idle_poll_timer.start()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -566,7 +567,7 @@ class TreeCoreWidget(QWidget):
         self._cal_scale_toggle.setEnabled(calibrated)
         self._cal_scale_details.setEnabled(calibrated)
 
-    def _on_settings_changed(self) -> None:
+    def _poll_idle_state(self) -> None:
         self._refresh_inspection_calibration_state()
         if self._cal_scale_toggle.isChecked():
             self._refresh_calibration_scale_info()

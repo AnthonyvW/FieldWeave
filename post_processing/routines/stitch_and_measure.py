@@ -993,7 +993,6 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
             mv = ctx.machine_vision
             mv.settings.dpi = dpi
             mv.save_settings()
-            mv.notify_settings_changed()
             debug(f"StitchAndMeasureRoutine: DPI {dpi:.2f} updated and saved")
 
         debug_path: str | None = None

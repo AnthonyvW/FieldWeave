@@ -19,7 +19,7 @@ Design
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -642,7 +642,6 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
         self._mv = get_app_context().machine_vision
 
         self._has_unsaved_changes: bool = False
-        self._applying_settings: bool = False
         self._saved_values: dict[str, object] = {}
         self._group_boxes: dict[str, QGroupBox] = {}
 
@@ -658,7 +657,11 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
         self._populate_from_settings(self._mv.settings)
         self._connect_panel_signals()
 
-        self._mv.settings_changed.connect(self._on_settings_changed_externally)
+        self._external_state: dict[str, object] = self._read_external_state()
+        self._idle_poll_timer = QTimer(self)
+        self._idle_poll_timer.setInterval(1000)
+        self._idle_poll_timer.timeout.connect(self._poll_external_state)
+        self._idle_poll_timer.start()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -857,11 +860,9 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
     def _on_dpi_apply_clicked(self) -> None:
         dpi = self._dpi_spin.value()
         self._mv.settings.dpi = dpi
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         self._mv.save_settings()
         self._saved_values["dpi"] = dpi
+        self._external_state["dpi"] = dpi
         self.mark_label("dpi", False)
         info(f"[MachineVisionSettings] DPI set to {dpi:.2f}")
         self._refresh_camera_calibration_display()
@@ -869,11 +870,9 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
 
     def _on_dpi_clear_clicked(self) -> None:
         self._mv.settings.dpi = None
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         self._mv.save_settings()
         self._saved_values["dpi"] = None
+        self._external_state["dpi"] = None
         self.mark_label("dpi", False)
         info("[MachineVisionSettings] DPI cleared")
         self._refresh_camera_calibration_display()
@@ -881,10 +880,8 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
 
     def _on_cam_space_clear_clicked(self) -> None:
         self._mv.settings.camera_calibration.calibration = None
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         self._mv.save_settings()
+        self._external_state["camera_calibration"] = False
         info("[MachineVisionSettings] Camera space calibration cleared")
         self._refresh_camera_calibration_display()
         self._set_cam_space_status("Camera space calibration cleared.")
@@ -904,10 +901,8 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
 
     def _on_scale_cal_clear_clicked(self) -> None:
         self._mv.settings.inspect_calibration.last_calibrated = None
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         self._mv.save_settings()
+        self._external_state["last_calibrated"] = None
         info("[MachineVisionSettings] Scale calibration cleared")
         self._refresh_scale_calibration_display()
         self._set_scale_cal_status("Scale calibration cleared.")
@@ -1382,10 +1377,7 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
     def _on_method_combo_changed(self, index: int) -> None:
         method = self._method_combo.itemData(index)
         self._method_stack.setCurrentIndex(0 if method == FOCUS_METHOD_LAPLACIAN else 1)
-        self._applying_settings = True
         self._mv.settings.focus.method = method
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         orange = self._check_modified("method", method)
         self.mark_label("method", orange)
         self._set_unsaved(True)
@@ -1404,10 +1396,6 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
         """Apply the changed field to the manager and update orange state."""
         target = self._mv.settings.focus.tenengrad if section == "tenengrad" else self._mv.settings.focus.laplacian
         setattr(target, field, value)
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
-
         panel = self._tenengrad_panel if section == "tenengrad" else self._laplacian_panel
         self._mark_field(f"{section}.{field}", field, panel, value)
         self._set_unsaved(True)
@@ -1415,27 +1403,18 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
     def _on_red_mark_changed(self, field: str, value: object) -> None:
         """Apply a changed red-mark field to the manager and update orange state."""
         setattr(self._mv.settings.red_mark, field, value)
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         self._mark_field(f"red_mark.{field}", field, self._red_mark_panel, value)
         self._set_unsaved(True)
 
     def _on_background_changed(self, field: str, value: object) -> None:
         """Apply a changed background field to the manager and update orange state."""
         setattr(self._mv.settings.background, field, value)
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         self._mark_field(f"background.{field}", field, self._background_panel, value)
         self._set_unsaved(True)
 
     def _on_focus_region_changed(self, field: str, value: object) -> None:
         """Apply a changed focus-region field to the manager and update orange state."""
         setattr(self._mv.settings.focus.focus_region, field, value)
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         self._mark_field(f"focus_region.{field}", field, self._focus_region_panel, value)
         self._set_unsaved(True)
 
@@ -1449,9 +1428,6 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
             )
         else:
             setattr(mode_settings, field, value)
-        self._applying_settings = True
-        self._mv.notify_settings_changed()
-        self._applying_settings = False
         saved_key = f"inspect_calibration.{mode}.{field if field != 'downsample_none' else 'downsample'}"
         panel = self._inspect_preview_panel if mode == "preview" else self._inspect_snap_panel
         current = mode_settings.downsample if field == "downsample_none" else value
@@ -1552,19 +1528,30 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
         self._set_inspection_status("Inspection position cleared.")
 
     # ------------------------------------------------------------------
-    # External settings change
+    # External state polling
     # ------------------------------------------------------------------
 
-    @Slot()
-    def _on_settings_changed_externally(self) -> None:
-        # Ignore the echo-back from changes we pushed ourselves — repopulating
-        # would overwrite the widget state (e.g. disabled sliders reset to 0).
-        if self._applying_settings:
-            return
-        self._populate_from_settings(self._mv.settings)
-        self._refresh_camera_calibration_display()
-        self._refresh_scale_calibration_display()
-        self._set_unsaved(True)
+    def _read_external_state(self) -> dict[str, object]:
+        s = self._mv.settings
+        icp = s.inspection_calibration_position
+        return {
+            "dpi": s.dpi,
+            "last_calibrated": s.inspect_calibration.last_calibrated,
+            "icp_is_set": icp.is_set,
+            "icp_x": icp.x_nm,
+            "icp_y": icp.y_nm,
+            "icp_z": icp.z_nm,
+            "camera_calibration": s.camera_calibration.calibration is not None,
+        }
+
+    def _poll_external_state(self) -> None:
+        current = self._read_external_state()
+        if current != self._external_state:
+            self._external_state = current
+            self._populate_from_settings(self._mv.settings)
+            self._refresh_camera_calibration_display()
+            self._refresh_scale_calibration_display()
+            self._set_unsaved(True)
 
     # ------------------------------------------------------------------
     # Save

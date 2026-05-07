@@ -152,6 +152,10 @@ class DpiCalibrationWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._build_ui()
+        self._idle_poll_timer = QTimer(self)
+        self._idle_poll_timer.setInterval(1000)
+        self._idle_poll_timer.timeout.connect(self.refresh)
+        self._idle_poll_timer.start()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -670,7 +674,6 @@ class DpiCalibrationStepsWidget(QWidget):
             if result is not None and result.success:
                 self._capture_complete = True
                 self._last_result = result
-                get_app_context().machine_vision.notify_settings_changed()
                 _ResultsDialog(result, parent=self).exec()
                 self._next_step()
             else:
@@ -704,7 +707,6 @@ class DpiCalibrationStepsWidget(QWidget):
     def _on_finish_clicked(self) -> None:
         mv = get_app_context().machine_vision
         mv.settings.dpi = self._dpi_spin.value()
-        mv.notify_settings_changed()
         mv.save_settings()
         info(f"[DpiCalibration] DPI saved as {mv.settings.dpi:.2f}")
         self._restore_overlay_state()
