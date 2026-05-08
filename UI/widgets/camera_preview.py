@@ -554,11 +554,9 @@ class CameraPreview(QFrame):
         if not src:
             return
 
-        camera = camera_manager.active_camera
-        if not camera:
+        stride = camera_manager.preview_frame_stride
+        if stride == 0:
             return
-
-        stride = type(camera.underlying_camera).calculate_stride(width, 24)
         required = stride * height
 
         if width != self._preview_width or height != self._preview_height:
@@ -592,11 +590,9 @@ class CameraPreview(QFrame):
         if not src:
             return
 
-        camera = camera_manager.active_camera
-        if not camera:
+        stride = camera_manager.still_frame_stride
+        if stride == 0:
             return
-
-        stride = type(camera.underlying_camera).calculate_stride(width, 24)
         required = stride * height
 
         if width != self._still_width or height != self._still_height:

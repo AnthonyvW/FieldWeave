@@ -39,16 +39,13 @@ class CameraSettings(ABC):
     exposure_time: int
     preview_resolution: str
     still_resolution: str
-    tint: int
     contrast: int
     hue: int
     saturation: int
     brightness: int
     gamma: int
-    level_range_low: RGBALevel
-    level_range_high: RGBALevel
     fformat: FileFormat
-    
+
     _camera: BaseCamera | None = field(default=None, repr=False, compare=False)
     _file_formats: tuple[str, ...] = tuple(f.value for f in FileFormat)
     _ui_update_callback: Any | None = field(default=None, repr=False, compare=False)
@@ -56,11 +53,6 @@ class CameraSettings(ABC):
     def __post_init__(self) -> None:
         if isinstance(self.fformat, str):
             self.fformat = FileFormat(self.fformat)
-        
-        if isinstance(self.level_range_low, (tuple, list)):
-            self.level_range_low = RGBALevel(*self.level_range_low)
-        if isinstance(self.level_range_high, (tuple, list)):
-            self.level_range_high = RGBALevel(*self.level_range_high)
     
     def validate(self) -> None:
         metadata_list = self.get_metadata()
@@ -74,16 +66,6 @@ class CameraSettings(ABC):
                         raise ValueError(
                             f"{name} = {value} is outside valid range [{meta.min_value}, {meta.max_value}]"
                         )
-        
-        try:
-            self.level_range_low.validate()
-        except ValueError as e:
-            raise ValueError(f"level_range_low invalid: {e}") from e
-        
-        try:
-            self.level_range_high.validate()
-        except ValueError as e:
-            raise ValueError(f"level_range_high invalid: {e}") from e
                 
         if not isinstance(self.fformat, FileFormat):
             raise ValueError(f"fformat must be a FileFormat enum, got {type(self.fformat)}")
@@ -141,13 +123,11 @@ class CameraSettings(ABC):
         try:
             self.set_auto_exposure(self.auto_exposure)
             self.set_exposure(self.exposure)
-            self.set_tint(self.tint)
             self.set_contrast(self.contrast)
             self.set_hue(self.hue)
             self.set_saturation(self.saturation)
             self.set_brightness(self.brightness)
             self.set_gamma(self.gamma)
-            self.set_level_range(self.level_range_low, self.level_range_high)
             
             debug("Successfully applied all settings to camera")
             
@@ -161,10 +141,6 @@ class CameraSettings(ABC):
     
     @abstractmethod
     def set_exposure(self, value: int) -> None:
-        pass
-    
-    @abstractmethod
-    def set_tint(self, value: int) -> None:
         pass
     
     @abstractmethod
@@ -185,10 +161,6 @@ class CameraSettings(ABC):
     
     @abstractmethod
     def set_gamma(self, value: int) -> None:
-        pass
-    
-    @abstractmethod
-    def set_level_range(self, low: RGBALevel, high: RGBALevel) -> None:
         pass
     
     def set_fformat(self, value: str, index: int | None = None) -> None:
@@ -375,13 +347,13 @@ class CameraSettingsManager(ConfigManager[CameraSettings]):
     
     def from_dict(self, data: dict[str, Any]) -> CameraSettings:
         processed_data = data.copy()
-        
-        if 'level_range_low' in processed_data and isinstance(processed_data['level_range_low'], dict):
-            processed_data['level_range_low'] = RGBALevel(**processed_data['level_range_low'])
-        
-        if 'level_range_high' in processed_data and isinstance(processed_data['level_range_high'], dict):
-            processed_data['level_range_high'] = RGBALevel(**processed_data['level_range_high'])
-        
+        hints = self.settings_class.__dataclass_fields__
+        for field_name, field_obj in hints.items():
+            if field_name not in processed_data:
+                continue
+            value = processed_data[field_name]
+            if isinstance(value, dict) and field_obj.type in ("RGBALevel", RGBALevel):
+                processed_data[field_name] = RGBALevel(**value)
         settings = self.settings_class(**processed_data)
         return settings
     

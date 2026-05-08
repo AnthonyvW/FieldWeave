@@ -379,7 +379,7 @@ class ConfigManager(Generic[S], ABC):
                 error(f"Failed to load active settings from {ap}: {e}")
                 raise IOError("Failed to load active settings") from e
 
-        info("No existing settings found, using fresh instance")
+        warning(f"No existing settings found for {self.config_type}, using fresh instance")
         settings = self.from_dict({})
         self._validate(settings, "fresh instance")
         return settings

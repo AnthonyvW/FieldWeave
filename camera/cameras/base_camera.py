@@ -268,34 +268,6 @@ class BaseCamera(ABC):
         pass
     
     @abstractmethod
-    def pull_image(self, buffer: bytes, bits_per_pixel: int = 24, timeout_ms: int = 1000) -> bool:
-        """
-        Pull the latest image into provided buffer
-        
-        Args:
-            buffer: Pre-allocated buffer to receive image data
-            bits_per_pixel: Bits per pixel (typically 24 for RGB)
-            timeout_ms: Timeout in milliseconds
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def snap_image(self, resolution_index: int = 0) -> bool:
-        """
-        Capture a still image at specified resolution
-        
-        Args:
-            resolution_index: Index of resolution to use
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-    
-    @abstractmethod
     def capture_and_save_still(
         self,
         filepath: Path,
@@ -337,14 +309,6 @@ class BaseCamera(ABC):
         """
         pass
     
-    @abstractmethod
-    def calculate_buffer_size(width: int, height: int, bits_per_pixel: int) -> int:
-        pass
-
-    @abstractmethod
-    def calculate_stride(width: int, bits_per_pixel: int) -> int:
-        pass
-
     def save_image(
         self,
         image_data: np.ndarray,
