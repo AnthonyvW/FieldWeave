@@ -34,6 +34,7 @@ Usage::
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Generator
@@ -286,7 +287,10 @@ class ZStackAreaScan(AutomationRoutine):
             # Z-stack loop
             # ----------------------------------------------------------
             stack_start = time.monotonic()
-            stack_captures = 0
+
+            # Tracks pending background saves for this stack so we can verify
+            # all images landed on disk before moving to the next XY position.
+            stack_pending_saves: list[tuple[int, Path, threading.Event, list[bool]]] = []
 
             for z_idx, target_z_nm in enumerate(z_positions):
                 if self._check_stop():
@@ -312,31 +316,19 @@ class ZStackAreaScan(AutomationRoutine):
                 if self._check_stop():
                     break
 
-                # Capture
                 actual_pos = self.motion.get_position()
                 filepath = subfolder / f"{actual_pos.z}.jpg"
                 info(f"[ZStackAreaScan]   Capturing: {str(filepath)}")
 
-                capture_success: bool | None = None
-                capture_error: Exception | None = None
-                capture_done = __import__("threading").Event()
+                save_done = threading.Event()
+                success_cell: list[bool] = [False]
 
-                def _on_complete(
-                    success: bool,
-                    result: object,
-                    _done: object = capture_done,
-                ) -> None:
-                    nonlocal capture_success, capture_error
-                    capture_success = success
-                    if not success:
-                        capture_error = (
-                            result
-                            if isinstance(result, Exception)
-                            else Exception(str(result))
-                        )
-                    _done.set()  # type: ignore[union-attr]
+                def _on_complete(success: bool, _done=save_done, _cell=success_cell) -> None:
+                    _cell[0] = success
+                    _done.set()
 
-                capture_start = time.monotonic()
+                # wait=True blocks until snap+pull completes so the stage is free
+                # to move to the next Z immediately. The save runs in the background.
                 camera.capture_and_save_still(
                     filepath=filepath,
                     resolution_index=0,
@@ -359,24 +351,23 @@ class ZStackAreaScan(AutomationRoutine):
                     wait=True,
                 )
 
-                file_exists = filepath.exists()
+                stack_pending_saves.append((actual_pos.z, filepath, save_done, success_cell))
 
-                if not capture_success and not file_exists:
-                    warning(
-                        f"[ZStackAreaScan]   Capture failed at"
-                        f" Z={actual_pos.z} nm: {capture_error}"
-                    )
-                else:
-                    if not capture_success and file_exists:
-                        warning(
-                            f"[ZStackAreaScan]   Capture callback reported failure"
-                            f" but file exists — treating as success: {capture_error}"
-                        )
+                yield  # pause/stop point: after capture
+
+            # ----------------------------------------------------------
+            # Drain saves for this stack before moving to the next XY
+            # ----------------------------------------------------------
+            save_timeout_s = self._capture_timeout_ms / 1000.0
+            stack_captures = 0
+            for z_nm, filepath, save_done, success_cell in stack_pending_saves:
+                save_done.wait(timeout=save_timeout_s)
+                if success_cell[0]:
                     stack_captures += 1
                     total_images_captured += 1
                     info(f"[ZStackAreaScan]   Saved {filepath}")
-
-                yield  # pause/stop point: after capture
+                else:
+                    warning(f"[ZStackAreaScan]   Save failed at Z={z_nm} nm")
 
             # ----------------------------------------------------------
             # Post-stack timing and ETA
@@ -387,14 +378,13 @@ class ZStackAreaScan(AutomationRoutine):
             stacks_left = total_stacks - stacks_done
 
             mean_stack_s = sum(stack_durations) / stacks_done
-            # Add 1 second per remaining stack to account for XY travel
             eta_s = stacks_left * (mean_stack_s + 1.0)
             self._set_progress(stacks_done, total_stacks, round(eta_s) if stacks_left > 0 else 0)
 
             info(
                 f"[ZStackAreaScan] Stack {stacks_done}/{total_stacks} complete"
                 f"  ({subfolder_name})"
-                f"  captured {stack_captures}/{total_z} images"
+                f"  saved {stack_captures}/{total_z} images"
             )
             info(
                 f"[ZStackAreaScan]   Stack duration:  {_fmt_duration(stack_elapsed)}"

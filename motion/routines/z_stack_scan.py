@@ -36,6 +36,7 @@ Usage::
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Generator, TYPE_CHECKING
@@ -139,10 +140,8 @@ class ZStackScan(AutomationRoutine):
             error("[ZStackScan] No camera available — aborting")
             return
 
-        # Ensure output directory exists
         self._output_folder.mkdir(parents=True, exist_ok=True)
 
-        # Determine travel direction: go to closest Z first
         current_z = self.motion.get_position().z
         if abs(current_z - self._z_start_nm) <= abs(current_z - self._z_end_nm):
             z_near = self._z_start_nm
@@ -151,7 +150,6 @@ class ZStackScan(AutomationRoutine):
             z_near = self._z_end_nm
             z_far = self._z_start_nm
 
-        # Build list of Z positions to visit
         z_positions: list[int] = []
         if z_near == z_far:
             z_positions = [z_near]
@@ -166,8 +164,6 @@ class ZStackScan(AutomationRoutine):
         info(f"[ZStackScan] {total} positions from {z_near} nm to {z_far} nm, step {self._step_nm} nm")
         info(f"[ZStackScan] Output folder: {self._output_folder}")
 
-        # Approach move: overshoot the near end opposite to the scan direction,
-        # then return to z_near. This purges backlash before the first capture.
         if approach_distance_nm > 0:
             approach_z_nm = z_near - direction * approach_distance_nm
             approach_z_mm = approach_z_nm / _NM_PER_MM
@@ -203,6 +199,10 @@ class ZStackScan(AutomationRoutine):
         capture_times: list[float] = []
         captured_positions: list[int] = []
 
+        # Each entry tracks a background save so the stage can move concurrently.
+        # Drained before post-processing or final reporting.
+        pending_saves: list[tuple[int, Path, threading.Event, list[bool]]] = []
+
         for idx, target_z_nm in enumerate(z_positions):
             if self._check_stop():
                 break
@@ -224,25 +224,23 @@ class ZStackScan(AutomationRoutine):
             if self._check_stop():
                 break
 
-            # Capture image
             actual_pos = self.motion.get_position()
             filepath = self._output_folder / f"{actual_pos.z}.jpg"
 
             info(f"[ZStackScan] Capturing image: {filepath}")
 
-            capture_success: bool | None = None
-            capture_error: Exception | None = None
+            save_done = threading.Event()
+            success_cell: list[bool] = [False]
 
-            capture_done = __import__("threading").Event()
-
-            def _on_complete(success: bool, result, _done=capture_done) -> None:
-                nonlocal capture_success, capture_error
-                capture_success = success
-                if not success:
-                    capture_error = result if isinstance(result, Exception) else Exception(str(result))
+            def _on_complete(success: bool, _done=save_done, _cell=success_cell) -> None:
+                _cell[0] = success
                 _done.set()
 
             capture_start = time.monotonic()
+
+            # wait=True blocks until snap+pull completes so the stage is free to
+            # move to the next position immediately. The file save continues in
+            # the background; _on_complete fires when it finishes.
             camera.capture_and_save_still(
                 filepath=filepath,
                 resolution_index=0,
@@ -262,29 +260,33 @@ class ZStackScan(AutomationRoutine):
                 wait=True,
             )
 
-            file_exists = filepath.exists()
-
-            if not capture_success and not file_exists:
-                warning(f"[ZStackScan] Capture failed at Z={actual_pos.z} nm: {capture_error}")
-            else:
-                if not capture_success and file_exists:
-                    warning(
-                        f"[ZStackScan] Capture callback reported failure at Z={actual_pos.z} nm "
-                        f"but file exists on disk — treating as success: {capture_error}"
-                    )
-                capture_times.append(time.monotonic() - capture_start)
-                captured_positions.append(actual_pos.z)
-                self._set_progress(idx + 1, total)
-                info(f"[ZStackScan] Saved {filepath}")
+            capture_times.append(time.monotonic() - capture_start)
+            captured_positions.append(actual_pos.z)
+            pending_saves.append((actual_pos.z, filepath, save_done, success_cell))
+            self._set_progress(idx + 1, total)
 
             yield  # pause/stop point: after capture
 
-        total_elapsed = time.monotonic() - scan_start_time
+        scan_elapsed = time.monotonic() - scan_start_time
+
+        # Drain all pending saves before reporting results or starting
+        # post-processing. Most will already be done by the time we get here.
+        save_timeout_s = capture_timeout_ms / 1000.0
+        n_saved = 0
+        for z_nm, filepath, save_done, success_cell in pending_saves:
+            save_done.wait(timeout=save_timeout_s)
+            if success_cell[0]:
+                n_saved += 1
+                info(f"[ZStackScan] Saved {filepath}")
+            else:
+                warning(f"[ZStackScan] Save failed at Z={z_nm} nm")
+
         n_captured = len(capture_times)
 
         info("[ZStackScan] Scan complete")
-        info(f"[ZStackScan] Total duration:    {total_elapsed:.3f} s")
+        info(f"[ZStackScan] Scan duration:     {scan_elapsed:.3f} s")
         info(f"[ZStackScan] Images captured:   {n_captured} / {total}")
+        info(f"[ZStackScan] Images saved:      {n_saved} / {n_captured}")
         info(
             f"[ZStackScan] Z range:           {z_near / _NM_PER_MM:.6f} mm"
             f" to {z_far / _NM_PER_MM:.6f} mm"
@@ -304,10 +306,7 @@ class ZStackScan(AutomationRoutine):
                 f"avg={sum(capture_times) / len(capture_times):.3f}"
             )
 
-        # ------------------------------------------------------------------
-        # Optional focus stacking
-        # ------------------------------------------------------------------
-        if self._focus_stack_config is not None and n_captured > 0:
+        if self._focus_stack_config is not None and n_saved > 0:
             self._run_focus_stack(post_processing, total_start_time)
         else:
             info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")

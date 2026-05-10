@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Callable, Any, TypeVar, Generic
 from queue import Queue, Empty
+import inspect
 from threading import Thread, Event, Lock
 from functools import wraps
 import time
@@ -236,15 +237,20 @@ class ThreadedCamera(Generic[T]):
                     return True, result
                 return result
 
+            if on_complete is not None:
+                sig = inspect.signature(attr)
+                if 'on_complete' in sig.parameters:
+                    kwargs['on_complete'] = on_complete
+                else:
+                    pending: dict[int, Callable] = object.__getattribute__(self, '_pending_callbacks')
+
             command = CameraCommand(name, args, kwargs)
 
-            if on_complete is not None:
-                pending: dict[str, Callable] = object.__getattribute__(self, '_pending_callbacks')
+            if on_complete is not None and 'on_complete' not in kwargs:
                 pending[id(command)] = on_complete
 
                 def _dispatch(method_name: str, success: bool, cb_result: Any) -> None:
-                    cmd_id = id(command)
-                    cb = pending.pop(cmd_id, None)
+                    cb = pending.pop(id(command), None)
                     if cb is not None:
                         cb(success, cb_result)
 

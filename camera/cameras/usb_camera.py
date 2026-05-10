@@ -139,34 +139,70 @@ class UsbCamera(BaseCamera):
     # Still capture — reads a frame from the live stream
     # ------------------------------------------------------------------
 
-    def capture_and_save_still(
+    def capture_still(
         self,
-        filepath: Path,
-        additional_metadata: dict[str, Any] | None = None,
-        resolution_index: int = 0,
+        resolution_index: int | None = None,
         timeout_ms: int = 5000,
+        on_captured: Callable[[], None] | None = None,
+        on_complete: Callable[[bool, np.ndarray | None], None] | None = None,
     ) -> bool:
-        """Capture a frame from the live stream and save it as a still image.
+        """Capture a frame from the live stream and return it as a numpy array.
 
         USB cameras have no dedicated still mode so this reads the most recent
         buffered frame (or grabs a fresh one when the stream is not running).
-        Runs inline on the calling thread — no secondary thread is needed since
-        this is already invoked from the camera worker. timeout_ms is accepted
-        for interface compatibility but unused.
+        resolution_index and timeout_ms are accepted for interface compatibility
+        but unused. Runs synchronously on the calling thread — this is always
+        the CameraThread background thread, so no secondary thread is needed.
+        on_captured and on_complete fire before returning.
         """
         frame = self._grab_frame()
         if frame is None:
             error("USB still capture: no frame available")
+            if on_complete is not None:
+                on_complete(False, None)
             return False
 
-        success = self.save_image(frame, filepath, additional_metadata)
+        if on_captured is not None:
+            on_captured()
 
-        if success:
-            info(f"USB still saved: {filepath}")
-        else:
-            error(f"USB still save failed: {filepath}")
+        if on_complete is not None:
+            on_complete(True, frame.copy())
 
-        return success
+        return True
+
+    def capture_and_save_still(
+        self,
+        filepath: Path,
+        additional_metadata: dict[str, Any] | None = None,
+        resolution_index: int | None = None,
+        timeout_ms: int = 5000,
+        on_captured: Callable[[], None] | None = None,
+        on_complete: Callable[[bool], None] | None = None,
+    ) -> bool:
+        """Capture a frame from the live stream and save it as a still image.
+
+        Delegates to capture_still. Runs synchronously on the calling thread —
+        save completes and on_complete fires before this method returns.
+        """
+        def _on_complete(success: bool, image: np.ndarray | None) -> None:
+            if image is not None:
+                save_ok = self.save_image(image, filepath, additional_metadata)
+                if save_ok:
+                    info(f"USB still saved: {filepath}")
+                else:
+                    error(f"USB still save failed: {filepath}")
+            else:
+                save_ok = False
+
+            if on_complete is not None:
+                on_complete(save_ok)
+
+        return self.capture_still(
+            resolution_index=resolution_index,
+            timeout_ms=timeout_ms,
+            on_captured=on_captured,
+            on_complete=_on_complete,
+        )
 
     def capture_and_save_stream(
         self,
@@ -189,10 +225,18 @@ class UsbCamera(BaseCamera):
         return success
 
     def _grab_frame(self) -> np.ndarray | None:
-        """Return the latest buffered frame as RGB, or read a fresh one if idle."""
+        """Return the latest buffered frame as RGB.
+
+        When the capture loop is running, reads from the shared buffer only —
+        never touches _cap directly to avoid concurrent OpenCV access.
+        Falls back to a direct cap read only when the loop is not running.
+        """
         with self._frame_lock:
             if self._frame_buffer is not None:
                 return cv2.cvtColor(self._frame_buffer, cv2.COLOR_BGR2RGB)
+
+        if self._running.is_set():
+            return None
 
         if self._cap is None or not self._cap.isOpened():
             return None

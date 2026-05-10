@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QPushButton, QLineEdit, QLabel, QFileDialog, QMessageBox, QComboBox
 )
-from PySide6.QtCore import Qt, Slot, Signal, QTimer
+from PySide6.QtCore import Qt, Slot, QTimer
 from PySide6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush
 from common.logger import info, error, warning, debug
 from common.app_context import get_app_context
@@ -211,10 +211,7 @@ class CameraControlsWidget(QWidget):
     """
     Camera-agnostic widget for camera controls including photo capture and file management.
     """
-    
-    # Signal emitted when photo capture completes
-    photo_captured = Signal(bool, str)  # success, filepath
-    
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
 
@@ -227,9 +224,13 @@ class CameraControlsWidget(QWidget):
         self._overlay_label: QLabel | None = None
         self._camera_available: bool = False
 
-        self._setup_ui()
+        # Capture state — mutated only by the on_complete callback on the
+        # camera thread; read only by _poll_capture_state on the main thread.
+        self._capture_pending: bool = False
+        self._capture_success: bool | None = None
+        self._capture_filepath: str = ""
 
-        self.photo_captured.connect(self._on_photo_captured)
+        self._setup_ui()
 
         self._histogram_timer = QTimer(self)
         self._histogram_timer.setInterval(33)
@@ -243,6 +244,10 @@ class CameraControlsWidget(QWidget):
         self._camera_poll_timer.setInterval(500)
         self._camera_poll_timer.timeout.connect(self._check_camera_available)
         self._camera_poll_timer.start()
+
+        self._capture_poll_timer = QTimer(self)
+        self._capture_poll_timer.setInterval(100)
+        self._capture_poll_timer.timeout.connect(self._poll_capture_state)
 
         self._set_camera_available(False)
         
@@ -871,88 +876,57 @@ class CameraControlsWidget(QWidget):
         return self._current_folder / filename
     
     @Slot()
-    def _take_photo(self):
-        """
-        Capture a still photo from the camera.
-        Works with any camera implementation that supports capture_and_save_still.
-        """
+    def _take_photo(self) -> None:
         ctx = get_app_context()
-        toast = ctx.toast
-        
-        try:
-            camera = ctx.camera
-            
-            if camera is None:
-                warning("Attempted to capture photo but camera is not available")
-                toast.warning("Camera not available", title="Camera Error")
-                return
-            
-            if not camera.underlying_camera.is_open:
-                warning("Attempted to capture photo but camera is not open")
-                toast.warning("Please open the camera first", title="Camera Not Open")
-                return
-            
-            # Get filepath
-            filepath = self._get_filepath()
-            
-            # Ensure folder exists
-            self._ensure_output_folder()
-            
-            info(f"Capturing still image to: {filepath}")
-            toast.info("Capturing high-resolution image...", title="Capturing Image")
-            
-            # Disable button while capturing
-            self._capture_button.setEnabled(False)
-            
-            # Define completion callback - runs on camera thread!
-            def on_capture_complete(success: bool, result):
-                """Called when capture completes (on camera thread)"""
-                # Emit signal to handle UI updates on main thread
-                self.photo_captured.emit(success, str(filepath))
-            
-            # Capture and save still image asynchronously at highest resolution
-            # This returns immediately - UI stays responsive!
-            camera.capture_and_save_still(
-                filepath=filepath,
-                additional_metadata={
-                    "source": "still_capture"
-                },
-                timeout_ms=5000,
-                on_complete=on_capture_complete
-            )
-                
-        except Exception as e:
-            error(f"Error capturing photo: {e}")
-            toast.error(f"{str(e)}", title="Capture Error")
-            import traceback
-            error(traceback.format_exc())
-            # Re-enable button on error
-            self._capture_button.setEnabled(True)
-    
-    @Slot(bool, str)
-    def _on_photo_captured(self, success: bool, filepath: str):
-        """
-        Handle photo capture completion on UI thread.
-        This slot is called via signal from the camera thread.
-        """
-        ctx = get_app_context()
-        toast = ctx.toast
-        
-        # Re-enable button
-        self._capture_button.setEnabled(True)
-        
-        if success:
-            toast.success(f"Saved to: {Path(filepath).name}", 
-                        title="Image Captured", 
-                        duration=10000)
-            # Clear custom filename after successful capture
-            self._filename_edit.clear()
+        camera = ctx.camera
 
-            # Update still histogram overlay if histogram is active
-            ctx2 = get_app_context()
-            camera = getattr(ctx2, "camera", None)
-            underlying = getattr(camera, "underlying_camera", None)
-            #if underlying is not None and underlying.settings.histogram_enabled:
-            #    self._histogram_canvas.update_still(underlying.settings.get_still_histogram())
+        if camera is None:
+            warning("Attempted to capture photo but camera is not available")
+            ctx.toast.warning("Camera not available", title="Camera Error")
+            return
+
+        if not camera.underlying_camera.is_open:
+            warning("Attempted to capture photo but camera is not open")
+            ctx.toast.warning("Please open the camera first", title="Camera Not Open")
+            return
+
+        filepath = self._get_filepath()
+        self._ensure_output_folder()
+
+        info(f"Capturing still image to: {filepath}")
+        ctx.toast.info("Capturing high-resolution image...", title="Capturing Image")
+
+        self._capture_button.setEnabled(False)
+        self._capture_pending = False
+        self._capture_success = None
+        self._capture_filepath = str(filepath)
+
+        def on_capture_complete(success: bool) -> None:
+            self._capture_success = success
+            self._capture_pending = True
+
+        camera.capture_and_save_still(
+            filepath=filepath,
+            additional_metadata={"source": "still_capture"},
+            timeout_ms=5000,
+            on_complete=on_capture_complete,
+        )
+        self._capture_poll_timer.start()
+
+    def _poll_capture_state(self) -> None:
+        if not self._capture_pending:
+            return
+
+        self._capture_poll_timer.stop()
+        self._capture_pending = False
+        success = self._capture_success
+        filepath = self._capture_filepath
+
+        self._capture_button.setEnabled(True)
+
+        ctx = get_app_context()
+        if success:
+            ctx.toast.success(f"Saved to: {Path(filepath).name}", title="Image Captured", duration=10000)
+            self._filename_edit.clear()
         else:
-            toast.error("Unable to capture image from camera", title="Capture Failed")
+            ctx.toast.error("Unable to capture image from camera", title="Capture Failed")
