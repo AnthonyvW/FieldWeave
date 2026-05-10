@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QMimeData, QTimer
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QEvent, QObject, Qt, QMimeData, QTimer
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragLeaveEvent, QDropEvent, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -29,6 +30,7 @@ from motion.routines.tree_core_imaging_routine import TreeCoreImagingRoutine
 from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 _NM_PER_MM = 1_000_000
+_CSV_MAX_ROWS = 20
 
 
 def _get_tca():
@@ -37,6 +39,89 @@ def _get_tca():
     if ctx is None or ctx.motion is None:
         return None
     return getattr(ctx.motion.settings, "tree_core_automation", None)
+
+
+# ---------------------------------------------------------------------------
+# Application-level drag watcher
+# ---------------------------------------------------------------------------
+
+class _AppDragWatcher(QObject):
+    """Event filter installed on QApplication to detect when any CSV drag
+    starts or ends anywhere in the application window, regardless of which
+    widget the cursor is over.
+
+    Calls show_overlay() when a CSV drag enters any top-level window and
+    hide_overlay() when the drag is released or leaves all windows.
+    """
+
+    def __init__(
+        self,
+        show_overlay: Callable[[], None],
+        hide_overlay: Callable[[], None],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._show_overlay = show_overlay
+        self._hide_overlay = hide_overlay
+        self._active = False
+
+    @staticmethod
+    def _is_csv_drag(event: QEvent) -> bool:
+        mime = getattr(event, "mimeData", None)
+        if mime is None:
+            return False
+        return mime().hasUrls() and any(
+            u.toLocalFile().lower().endswith(".csv") for u in mime().urls()
+        )
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        t = event.type()
+        if t == QEvent.Type.DragEnter and not self._active and self._is_csv_drag(event):
+            self._active = True
+            self._show_overlay()
+        elif t in (QEvent.Type.Drop, QEvent.Type.DragLeave) and self._active:
+            self._active = False
+            self._hide_overlay()
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Drop overlay
+# ---------------------------------------------------------------------------
+
+class _DropOverlay(QWidget):
+    """Semi-transparent overlay shown over the parent widget during a CSV drag."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.hide()
+
+    def show_over(self) -> None:
+        self.setGeometry(self.parent().rect())  # type: ignore[union-attr]
+        self.raise_()
+        self.show()
+
+    def set_hovering(self, hovering: bool) -> None:
+        pass
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        painter.fillRect(self.rect(), QColor(255, 165, 0, 60))
+
+        pen = QPen(QColor(255, 165, 0, 220), 2, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(self.rect().adjusted(4, 4, -4, -4))
+
+        font = painter.font()
+        font.setPointSize(font.pointSize() + 4)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(0, 0, 0, 210))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Drop CSV here")
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +296,16 @@ class _SampleRowWidget(QWidget):
         self._name_edit.setPlaceholderText(f"Sample {sample_number} name...")
         layout.addWidget(self._name_edit, 1)
 
+        self._clear_btn = QToolButton()
+        self._clear_btn.setText("🗑")
+        self._clear_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._clear_btn.setAutoRaise(True)
+        self._clear_btn.setObjectName("SampleClearButton")
+        self._clear_btn.setFixedSize(22, 22)
+        self._clear_btn.setToolTip("Clear slot")
+        self._clear_btn.clicked.connect(self._on_clear_clicked)
+        layout.addWidget(self._clear_btn)
+
         self._toggle.toggled.connect(self._on_toggle_changed)
         self._name_edit.textChanged.connect(self._on_text_changed)
 
@@ -249,6 +344,11 @@ class _SampleRowWidget(QWidget):
                 return
         self._apply_style()
 
+    def _on_clear_clicked(self) -> None:
+        self._ever_typed = False
+        self._name_edit.clear()
+        self._toggle.setChecked(False)
+
     def set_text(self, text: str) -> None:
         """Programmatically set the sample name (used for multi-line paste)."""
         self._name_edit.setText(text)
@@ -257,6 +357,7 @@ class _SampleRowWidget(QWidget):
         """Enable or disable all interactive elements in this row."""
         self._toggle.setEnabled(enabled)
         self._name_edit.setEnabled(enabled)
+        self._clear_btn.setEnabled(enabled)
 
     @property
     def sample_number(self) -> int:
@@ -290,10 +391,7 @@ class TreeCoreWidget(QWidget):
         self._controls_widget: QWidget
         self._pause_resume_btn: QPushButton
         self._stop_btn: QPushButton
-        self._status_label: QLabel
         self._poll_timer: QTimer
-
-        # Controls group
         self._slot_spin: QSpinBox
         self._start_btn: QPushButton
 
@@ -308,7 +406,14 @@ class TreeCoreWidget(QWidget):
         # Sample list group
         self._sample_list_layout: QVBoxLayout
 
+        self.setAcceptDrops(True)
         self._setup_ui()
+        self._drop_overlay = _DropOverlay(self)
+        self._drag_watcher = _AppDragWatcher(
+            show_overlay=self._on_global_drag_enter,
+            hide_overlay=self._on_global_drag_end,
+        )
+        QApplication.instance().installEventFilter(self._drag_watcher)  # type: ignore[union-attr]
         self._idle_poll_timer = QTimer(self)
         self._idle_poll_timer.setInterval(1000)
         self._idle_poll_timer.timeout.connect(self._poll_idle_state)
@@ -339,7 +444,7 @@ class TreeCoreWidget(QWidget):
 
         main_layout.addWidget(self._build_calibration_scale_group())
 
-        main_layout.addWidget(self._build_sample_list_group(), 1)
+        main_layout.addWidget(self._build_sample_list_group())
 
         self._controls_widget = QWidget()
         controls_layout = QHBoxLayout(self._controls_widget)
@@ -361,10 +466,7 @@ class TreeCoreWidget(QWidget):
         self._controls_widget.setVisible(False)
         main_layout.addWidget(self._controls_widget)
 
-        self._status_label = QLabel("")
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._status_label.setObjectName("CalScaleStatusLabel")
-        main_layout.addWidget(self._status_label)
+        main_layout.addStretch(1)
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(250)
@@ -524,14 +626,18 @@ class TreeCoreWidget(QWidget):
 
         self._slot_spin.setMaximum(num_slots)
 
-    # ------------------------------------------------------------------
-    # Size hint
-    # ------------------------------------------------------------------
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._drop_overlay.hide()
 
-    def sizeHint(self):  # type: ignore[override]
-        hint = super().sizeHint()
-        hint.setHeight(max(hint.height(), 900))
-        return hint
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        QApplication.instance().removeEventFilter(self._drag_watcher)  # type: ignore[union-attr]
+        super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._drop_overlay.isVisible():
+            self._drop_overlay.setGeometry(self.rect())
 
     # ------------------------------------------------------------------
     # showEvent — refresh slot count from calibration
@@ -723,16 +829,88 @@ class TreeCoreWidget(QWidget):
         if self._routine.is_paused:
             self._routine.resume()
             self._pause_resume_btn.setText("Pause")
-            self._status_label.setText("Running...")
         else:
             self._routine.pause()
             self._pause_resume_btn.setText("Resume")
-            self._status_label.setText("Paused.")
 
     def _on_stop_clicked(self) -> None:
         if self._routine is not None:
             self._routine.stop()
-        self._status_label.setText("Stopping...")
+
+    # ------------------------------------------------------------------
+    # Drag-and-drop CSV loading
+    # ------------------------------------------------------------------
+
+    def _on_global_drag_enter(self) -> None:
+        self._drop_overlay.show_over()
+
+    def _on_global_drag_end(self) -> None:
+        self._drop_overlay.hide()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        mime = event.mimeData()
+        if mime.hasUrls() and any(
+            u.toLocalFile().lower().endswith(".csv") for u in mime.urls()
+        ):
+            self._drop_overlay.set_hovering(True)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self._drop_overlay.set_hovering(False)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self._drop_overlay.hide()
+        urls = [u for u in event.mimeData().urls() if u.toLocalFile().lower().endswith(".csv")]
+        if not urls:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._load_csv_file(urls[0].toLocalFile())
+
+    def _load_csv_file(self, path: str) -> None:
+        import csv
+
+        try:
+            fh = open(path, newline="", encoding="utf-8-sig")
+        except OSError:
+            warning(f"TreeCoreWidget: could not open CSV file: {path}")
+            return
+
+        with fh:
+            reader = csv.reader(fh)
+            header = next(reader, None)
+            if header is None:
+                return
+
+            col_index = 0
+            for i, cell in enumerate(header):
+                if cell.strip().lower() == "sampleid":
+                    col_index = i
+                    break
+
+            # If no SampleID header was found, the header row is data — include it.
+            values: list[str] = []
+            if col_index == 0 and (not header or header[0].strip().lower() != "sampleid"):
+                first_val = header[0].strip() if header else ""
+                if first_val:
+                    values.append(first_val)
+
+            for row in reader:
+                if len(row) <= col_index:
+                    continue
+                value = row[col_index].strip()
+                if value:
+                    values.append(value)
+                if len(values) >= _CSV_MAX_ROWS:
+                    break
+
+        empty_rows = [r for r in self._sample_rows if not r.name]
+        for i, value in enumerate(values):
+            if i >= len(empty_rows):
+                break
+            empty_rows[i].set_text(value)
 
     def _on_paste_overflow(self, source_index: int, lines: list[str]) -> None:
         """Distribute overflow lines from a multi-line paste into subsequent slots."""
@@ -753,7 +931,6 @@ class TreeCoreWidget(QWidget):
         self._cal_goto_btn.setEnabled(False)
         self._pause_resume_btn.setText("Pause")
         self._controls_widget.setVisible(True)
-        self._status_label.setText("Running...")
         self._poll_timer.start()
         for row in self._sample_rows:
             row.set_interactive(False)
@@ -764,7 +941,6 @@ class TreeCoreWidget(QWidget):
         self._output_folder.setEnabled(True)
         self._cal_scale_toggle.setEnabled(True)
         self._controls_widget.setVisible(False)
-        self._status_label.setText("Finished.")
         self._routine = None
         for row in self._sample_rows:
             row.set_interactive(True)

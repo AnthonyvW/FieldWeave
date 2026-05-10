@@ -515,6 +515,16 @@ def apply_style(app: QApplication) -> None:
             height: 14px;
         }}
 
+        /* Sample row — clear slot button */
+        QToolButton#SampleClearButton {{
+            border: none;
+            background: transparent;
+            padding: 0px;
+        }}
+        QToolButton#SampleClearButton:disabled {{
+            color: rgba(0, 0, 0, 80);
+        }}
+
         /* Calibration blocking error box */
         QLabel#CalErrorLabel {{
             font-size: 13px;
