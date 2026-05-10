@@ -39,6 +39,7 @@ class Toast(QFrame):
 
     def __init__(
         self,
+        toast_id: int,
         message: str,
         toast_type: ToastType = ToastType.INFO,
         duration: int = 3000,
@@ -46,6 +47,7 @@ class Toast(QFrame):
         parent: QWidget | None = None,
     ):
         super().__init__(parent, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.toast_id = toast_id
         self.message = message
         self.toast_type = toast_type
         self.duration = duration
@@ -202,6 +204,10 @@ class ToastManager:
     Manages multiple toast notifications stacked in the bottom-right corner
     of the parent window. Each Toast is an independent top-level window so
     no invisible overlay can block mouse events on the parent.
+
+    show_toast and the convenience methods (info, success, warning, error) all
+    return an integer ID that can be passed as dismiss_id in a later call to
+    replace that toast, or passed directly to dismiss() to remove it.
     """
 
     MARGIN = 10
@@ -210,6 +216,8 @@ class ToastManager:
     def __init__(self, parent: QWidget | None = None) -> None:
         self.parent_widget = parent
         self.toasts: list[Toast] = []
+        self._toasts_by_id: dict[int, Toast] = {}
+        self._next_id: int = 1
 
         if self.parent_widget:
             self.parent_widget.installEventFilter(self._make_event_filter())
@@ -244,35 +252,53 @@ class ToastManager:
             toast.setGeometry(QRect(x, y - h, toast.width(), h))
             y -= h + self.SPACING
 
+    def _alloc_id(self) -> int:
+        toast_id = self._next_id
+        self._next_id += 1
+        return toast_id
+
     def show_toast(
         self,
         message: str,
         toast_type: ToastType = ToastType.INFO,
         duration: int = 3000,
         title: str | None = None,
-    ) -> None:
-        toast = Toast(message, toast_type, duration, title, self.parent_widget)
+        dismiss_id: int | None = None,
+    ) -> int:
+        if dismiss_id is not None:
+            self.dismiss(dismiss_id)
+
+        toast_id = self._alloc_id()
+        toast = Toast(toast_id, message, toast_type, duration, title, self.parent_widget)
         self.toasts.append(toast)
-        toast.destroyed.connect(lambda: self._remove_toast(toast))
+        self._toasts_by_id[toast_id] = toast
+        toast.destroyed.connect(lambda: self._remove_toast(toast, toast_id))
         self._reposition_all()
         toast.show_animated()
+        return toast_id
 
-    def _remove_toast(self, toast: Toast) -> None:
+    def dismiss(self, toast_id: int) -> None:
+        toast = self._toasts_by_id.get(toast_id)
+        if toast is not None:
+            toast.dismiss()
+
+    def _remove_toast(self, toast: Toast, toast_id: int) -> None:
         if toast in self.toasts:
             self.toasts.remove(toast)
+        self._toasts_by_id.pop(toast_id, None)
         self._reposition_all()
 
-    def info(self, message: str, duration: int = 3000, title: str | None = None) -> None:
-        self.show_toast(message, ToastType.INFO, duration, title)
+    def info(self, message: str, duration: int = 3000, title: str | None = None, dismiss_id: int | None = None) -> int:
+        return self.show_toast(message, ToastType.INFO, duration, title, dismiss_id)
 
-    def success(self, message: str, duration: int = 3000, title: str | None = None) -> None:
-        self.show_toast(message, ToastType.SUCCESS, duration, title)
+    def success(self, message: str, duration: int = 3000, title: str | None = None, dismiss_id: int | None = None) -> int:
+        return self.show_toast(message, ToastType.SUCCESS, duration, title, dismiss_id)
 
-    def warning(self, message: str, duration: int = 4000, title: str | None = None) -> None:
-        self.show_toast(message, ToastType.WARNING, duration, title)
+    def warning(self, message: str, duration: int = 4000, title: str | None = None, dismiss_id: int | None = None) -> int:
+        return self.show_toast(message, ToastType.WARNING, duration, title, dismiss_id)
 
-    def error(self, message: str, duration: int = 5000, title: str | None = None) -> None:
-        self.show_toast(message, ToastType.ERROR, duration, title)
+    def error(self, message: str, duration: int = 5000, title: str | None = None, dismiss_id: int | None = None) -> int:
+        return self.show_toast(message, ToastType.ERROR, duration, title, dismiss_id)
 
     def clear_all(self) -> None:
         for toast in self.toasts[:]:

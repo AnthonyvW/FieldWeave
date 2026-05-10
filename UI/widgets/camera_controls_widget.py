@@ -229,6 +229,7 @@ class CameraControlsWidget(QWidget):
         self._capture_pending: bool = False
         self._capture_success: bool | None = None
         self._capture_filepath: str = ""
+        self._capture_toast_id: int | None = None
 
         self._setup_ui()
 
@@ -894,7 +895,7 @@ class CameraControlsWidget(QWidget):
         self._ensure_output_folder()
 
         info(f"Capturing still image to: {filepath}")
-        ctx.toast.info("Capturing high-resolution image...", title="Capturing Image")
+        self._capture_toast_id = ctx.toast.info("Capturing high-resolution image...", title="Capturing Image")
 
         self._capture_button.setEnabled(False)
         self._capture_pending = False
@@ -926,7 +927,8 @@ class CameraControlsWidget(QWidget):
 
         ctx = get_app_context()
         if success:
-            ctx.toast.success(f"Saved to: {Path(filepath).name}", title="Image Captured", duration=10000)
+            ctx.toast.success(f"Saved to: {Path(filepath).name}", title="Image Captured", duration=10000, dismiss_id=self._capture_toast_id)
             self._filename_edit.clear()
         else:
-            ctx.toast.error("Unable to capture image from camera", title="Capture Failed")
+            ctx.toast.error("Unable to capture image from camera", title="Capture Failed", dismiss_id=self._capture_toast_id)
+        self._capture_toast_id = None
