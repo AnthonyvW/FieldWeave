@@ -268,44 +268,75 @@ class BaseCamera(ABC):
         pass
     
     @abstractmethod
+    def capture_still(
+        self,
+        resolution_index: int | None = None,
+        timeout_ms: int = 5000,
+        on_captured: Callable[[], None] | None = None,
+        on_complete: Callable[[bool, np.ndarray | None], None] | None = None,
+    ) -> bool:
+        """
+        Capture a still image and return it as a numpy array without saving.
+
+        Args:
+            resolution_index: Still-resolution index.
+            timeout_ms: Maximum time to wait for the frame (milliseconds).
+            on_captured: Zero-argument callback fired as soon as the raw frame is ready.
+            on_complete: ``(success: bool, image: np.ndarray | None) -> None`` fired
+                         once conversion is done.
+
+        Returns:
+            True if the snap and pull succeeded, False otherwise.
+        """
+        pass
+
+    @abstractmethod
     def capture_and_save_still(
         self,
         filepath: Path,
-        resolution_index: int = None,
+        resolution_index: int | None = None,
         additional_metadata: dict[str, Any] | None = None,
-        timeout_ms: int = 5000
+        timeout_ms: int = 5000,
+        on_captured: Callable[[], None] | None = None,
+        on_image: Callable[[np.ndarray], None] | None = None,
+        on_complete: Callable[[bool], None] | None = None,
     ) -> bool:
         """
         Capture a still image and save it with metadata.
-        
+
         Args:
-            filepath: Path where image should be saved
-            resolution_index: Camera resolution to use (0 = highest)
-            additional_metadata: Optional dict of extra metadata to save
-            timeout_ms: Timeout for capture in milliseconds
-            
+            filepath: Path where image should be saved.
+            resolution_index: Camera resolution to use (0 = highest).
+            additional_metadata: Optional dict of extra metadata to save.
+            timeout_ms: Timeout for capture in milliseconds.
+            on_captured: Zero-argument callback fired as soon as the raw frame is ready.
+            on_image: ``(image: np.ndarray) -> None`` fired after conversion but before
+                      the file is written.
+            on_complete: ``(success: bool) -> None`` fired once the file has been written.
+
         Returns:
-            True if successful, False otherwise
-            
+            True if successful, False otherwise.
         """
         pass
-    
+
     @abstractmethod
     def capture_and_save_stream(
         self,
         filepath: Path,
-        additional_metadata: dict[str, Any] | None = None
+        additional_metadata: dict[str, Any] | None = None,
+        on_image: Callable[[np.ndarray], None] | None = None,
     ) -> bool:
         """
         Capture current stream frame and save it with metadata.
-        
+
         Args:
-            filepath: Path where image should be saved
-            additional_metadata: Optional dict of extra metadata to save
-            
+            filepath: Path where image should be saved.
+            additional_metadata: Optional dict of extra metadata to save.
+            on_image: ``(image: np.ndarray) -> None`` fired after the frame is captured
+                      but before the file is written.
+
         Returns:
-            True if successful, False otherwise
-            
+            True if successful, False otherwise.
         """
         pass
     

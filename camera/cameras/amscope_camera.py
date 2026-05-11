@@ -682,7 +682,8 @@ class AmscopeCamera(BaseCamera):
     def capture_and_save_stream(
         self,
         filepath: Path,
-        additional_metadata: dict[str, Any] | None = None
+        additional_metadata: dict[str, Any] | None = None,
+        on_image: Callable[[np.ndarray], None] | None = None,
     ) -> bool:
         """Capture current frame from live stream and save it."""
         if not self._hcam or not self._is_open:
@@ -700,6 +701,13 @@ class AmscopeCamera(BaseCamera):
             image_data = np.frombuffer(self._frame_buffer, dtype=np.uint8).reshape(
                 (height, stride))[:, :width*3].reshape((height, width, 3)).copy()
             image_data = image_data[:, :, ::-1].copy()
+
+            if on_image is not None:
+                try:
+                    on_image(image_data)
+                except Exception as cb_err:
+                    exception(f"Error in on_image callback: {cb_err}")
+
             success = self.save_image(image_data, filepath, additional_metadata)
             del image_data
             gc.collect()

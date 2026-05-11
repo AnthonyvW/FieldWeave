@@ -144,6 +144,7 @@ class UsbCamera(BaseCamera):
         resolution_index: int | None = None,
         timeout_ms: int = 5000,
         on_captured: Callable[[], None] | None = None,
+        on_image: Callable[[np.ndarray], None] | None = None,
         on_complete: Callable[[bool, np.ndarray | None], None] | None = None,
     ) -> bool:
         """Capture a frame from the live stream and return it as a numpy array.
@@ -153,7 +154,7 @@ class UsbCamera(BaseCamera):
         resolution_index and timeout_ms are accepted for interface compatibility
         but unused. Runs synchronously on the calling thread — this is always
         the CameraThread background thread, so no secondary thread is needed.
-        on_captured and on_complete fire before returning.
+        on_captured, on_image, and on_complete fire before returning.
         """
         frame = self._grab_frame()
         if frame is None:
@@ -164,6 +165,9 @@ class UsbCamera(BaseCamera):
 
         if on_captured is not None:
             on_captured()
+
+        if on_image is not None:
+            on_image(frame.copy())
 
         if on_complete is not None:
             on_complete(True, frame.copy())
@@ -177,6 +181,7 @@ class UsbCamera(BaseCamera):
         resolution_index: int | None = None,
         timeout_ms: int = 5000,
         on_captured: Callable[[], None] | None = None,
+        on_image: Callable[[np.ndarray], None] | None = None,
         on_complete: Callable[[bool], None] | None = None,
     ) -> bool:
         """Capture a frame from the live stream and save it as a still image.
@@ -201,6 +206,7 @@ class UsbCamera(BaseCamera):
             resolution_index=resolution_index,
             timeout_ms=timeout_ms,
             on_captured=on_captured,
+            on_image=on_image,
             on_complete=_on_complete,
         )
 
@@ -208,12 +214,16 @@ class UsbCamera(BaseCamera):
         self,
         filepath: Path,
         additional_metadata: dict[str, Any] | None = None,
+        on_image: Callable[[np.ndarray], None] | None = None,
     ) -> bool:
         """Capture the current stream frame and save it."""
         frame = self._grab_frame()
         if frame is None:
             error("USB stream capture: no frame available")
             return False
+
+        if on_image is not None:
+            on_image(frame.copy())
 
         success = self.save_image(frame, filepath, additional_metadata)
 
