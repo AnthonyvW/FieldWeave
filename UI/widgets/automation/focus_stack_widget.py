@@ -26,7 +26,6 @@ from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_scan import ZStackScan
 from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig, FocusStackResult
-from post_processing.routines.post_processing_routine import RoutineResult
 from UI.widgets.automation.output_folder_widget import OutputFolderWidget, ViewImageWidget
 
 
@@ -135,13 +134,9 @@ class FocusStackWidget(QWidget):
         self._routine: ZStackScan | None = None
         self._last_output_folder: str | None = None
         self._last_stacked_path: str | None = None
-        self._pending_stack_result: FocusStackResult | None = None
         self._pending_preview_frame: np.ndarray | None = None
         self._setup_ui()
         self._load_settings()
-
-        ctx = get_app_context()
-        ctx.post_processing.add_routine_complete_listener(self._on_routine_complete)
 
 
     # ------------------------------------------------------------------
@@ -759,42 +754,37 @@ class FocusStackWidget(QWidget):
             overlay.show_frame(frame)
             ctx.camera_preview._video_label.update()
 
-    def _on_routine_complete(self, result: RoutineResult) -> None:
-        """Called from the routine's background thread — marshal Qt calls to main thread."""
-        if not result.success:
-            QMetaObject.invokeMethod(self, "_notify_failure", Qt.ConnectionType.QueuedConnection)
+    def _poll_routine_state(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None or not motion.routine_running:
+            self._handle_routine_complete()
+            self._exit_running_state()
             return
-        fs_result: FocusStackResult | None = result.get("focus_stack")
-        if fs_result is not None:
-            self._pending_stack_result = fs_result
-        QMetaObject.invokeMethod(self, "_notify_success", Qt.ConnectionType.QueuedConnection)
+        self._pause_resume_btn.setText(
+            "Resume" if motion.routine_paused else "Pause"
+        )
 
-    @Slot()
-    def _notify_failure(self) -> None:
+    def _handle_routine_complete(self) -> None:
         ctx = get_app_context()
-        if ctx.toast is not None:
-            ctx.toast.error("Focus stack automation failed.")
-
-    @Slot()
-    def _notify_success(self) -> None:
-        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None:
+            return
+        result = motion.last_routine_result
+        if result is None:
+            return
+        if not result.success:
+            if ctx.toast is not None:
+                ctx.toast.error("Focus stack automation failed.")
+            return
         if ctx.toast is not None:
             ctx.toast.success("Focus stack automation complete.")
-        fs_result = self._pending_stack_result
-        self._pending_stack_result = None
+        fs_result: FocusStackResult | None = result.get("focus_stack")
         if fs_result is not None and ctx.camera_preview is not None:
             overlay = ctx.camera_preview.overlays.focus_stack_preview
             overlay.set_enabled(True)
             overlay.show_frame(fs_result.result_rgb, track_position=True)
             ctx.camera_preview._video_label.update()
-
-    def _poll_routine_state(self) -> None:
-        if self._routine is None or not self._routine.is_running:
-            self._exit_running_state()
-            return
-        self._pause_resume_btn.setText(
-            "Resume" if self._routine.is_paused else "Pause"
-        )
 
     # ------------------------------------------------------------------
     # Public accessors (for the parent automation widget)

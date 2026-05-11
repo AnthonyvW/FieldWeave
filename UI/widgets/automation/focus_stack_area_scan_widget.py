@@ -10,15 +10,20 @@ from PySide6.QtWidgets import (
     QLabel,
     QGroupBox,
     QDoubleSpinBox,
+    QSpinBox,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QToolButton,
 )
 from PySide6.QtCore import Qt, QTimer
 
 from common.app_context import get_app_context
 from common.logger import warning, error
 from motion.routines.z_stack_area_scan import ZStackAreaScan
+from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
+from UI.widgets.utilities.open_filesystem_object_button import OpenFolderButton
 from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 
@@ -290,6 +295,7 @@ class ZStackAreaScanWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._last_output_folder: str | None = None
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -327,6 +333,164 @@ class ZStackAreaScanWidget(QWidget):
         self._output_folder = OutputFolderWidget()
         main_layout.addWidget(self._output_folder)
 
+        # ---- Focus stack settings ----------------------------------------
+        fs_group = QGroupBox("Focus Stack Settings")
+        fs_layout = QVBoxLayout(fs_group)
+        fs_layout.setContentsMargins(10, 8, 10, 8)
+        fs_layout.setSpacing(6)
+
+        self._fs_enable_check = QCheckBox("Run focus stack after each XY position")
+        self._fs_enable_check.setChecked(False)
+        self._fs_enable_check.stateChanged.connect(self._on_fs_enabled_changed)
+        fs_layout.addWidget(self._fs_enable_check)
+
+        self._fs_settings_widget = QWidget()
+        fs_settings_layout = QVBoxLayout(self._fs_settings_widget)
+        fs_settings_layout.setContentsMargins(0, 4, 0, 0)
+        fs_settings_layout.setSpacing(6)
+
+        self._keep_size_check = QCheckBox("Keep original size")
+        self._keep_size_check.setChecked(True)
+        self._keep_size_check.setToolTip(
+            "Keep the output image the same size as the input images. "
+            "Warps are applied in-place rather than expanding the canvas."
+        )
+        fs_settings_layout.addWidget(self._keep_size_check)
+
+        self._advanced_toggle = QToolButton()
+        self._advanced_toggle.setText("Advanced settings")
+        self._advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._advanced_toggle.setCheckable(True)
+        self._advanced_toggle.setChecked(False)
+        self._advanced_toggle.setObjectName("AdvancedSettingsToggle")
+        self._advanced_toggle.toggled.connect(self._on_advanced_toggled)
+        fs_settings_layout.addWidget(self._advanced_toggle)
+
+        self._advanced_widget = QWidget()
+        self._advanced_widget.setVisible(False)
+        advanced_layout = QVBoxLayout(self._advanced_widget)
+        advanced_layout.setContentsMargins(12, 0, 0, 0)
+        advanced_layout.setSpacing(6)
+
+        self._no_align_check = QCheckBox("Skip alignment")
+        self._no_align_check.setChecked(False)
+        self._no_align_check.setToolTip("Skip ECC alignment. Use when images are already registered.")
+        advanced_layout.addWidget(self._no_align_check)
+
+        self._crop_check = QCheckBox("Crop to intersection")
+        self._crop_check.setChecked(False)
+        self._crop_check.setToolTip(
+            "Crop the output to the largest rectangle covered by every frame after "
+            "alignment. Removes border regions but shrinks the output image."
+        )
+        advanced_layout.addWidget(self._crop_check)
+
+        sharpness_row = QWidget()
+        sharpness_layout = QHBoxLayout(sharpness_row)
+        sharpness_layout.setContentsMargins(0, 0, 0, 0)
+        sharpness_layout.setSpacing(8)
+        sharpness_layout.addWidget(QLabel("Sharpness:"))
+        self._sharpness_spin = QDoubleSpinBox()
+        self._sharpness_spin.setFixedHeight(28)
+        self._sharpness_spin.setDecimals(1)
+        self._sharpness_spin.setMinimum(1.0)
+        self._sharpness_spin.setMaximum(8.0)
+        self._sharpness_spin.setSingleStep(0.5)
+        self._sharpness_spin.setValue(4.0)
+        self._sharpness_spin.setToolTip(
+            "Weight sharpness exponent. Higher values favour the sharpest pixel "
+            "more aggressively (approaching hard selection). Lower values blend "
+            "more smoothly. Useful range: 1.0 (soft) to 8.0 (near-hard)."
+        )
+        sharpness_layout.addWidget(self._sharpness_spin)
+        sharpness_layout.addStretch(1)
+        advanced_layout.addWidget(sharpness_row)
+
+        cull_row = QWidget()
+        cull_layout = QHBoxLayout(cull_row)
+        cull_layout.setContentsMargins(0, 0, 0, 0)
+        cull_layout.setSpacing(8)
+        self._cull_check = QCheckBox("Cull out-of-focus frames")
+        self._cull_check.setChecked(False)
+        self._cull_check.setToolTip(
+            "Discard frames whose focus score falls below the threshold fraction "
+            "of the sharpest frame. At least the two sharpest frames are always kept."
+        )
+        cull_layout.addWidget(self._cull_check)
+        self._cull_threshold_spin = QDoubleSpinBox()
+        self._cull_threshold_spin.setFixedHeight(28)
+        self._cull_threshold_spin.setDecimals(2)
+        self._cull_threshold_spin.setMinimum(0.0)
+        self._cull_threshold_spin.setMaximum(1.0)
+        self._cull_threshold_spin.setSingleStep(0.05)
+        self._cull_threshold_spin.setValue(0.6)
+        self._cull_threshold_spin.setToolTip(
+            "Frames scoring below this fraction of the peak score are culled. "
+            "Raise toward 1.0 to cull more aggressively."
+        )
+        cull_layout.addWidget(self._cull_threshold_spin)
+        cull_layout.addStretch(1)
+        advanced_layout.addWidget(cull_row)
+
+        self._slab_check = QCheckBox("Enable slabbing")
+        self._slab_check.setChecked(False)
+        self._slab_check.setToolTip(
+            "Split the image set into overlapping sub-stacks, stack each "
+            "independently, then fuse the results. Reduces peak RAM for large stacks."
+        )
+        self._slab_check.stateChanged.connect(self._on_slab_enabled_changed)
+        advanced_layout.addWidget(self._slab_check)
+
+        self._slab_params_widget = QWidget()
+        self._slab_params_widget.setVisible(False)
+        slab_params_layout = QHBoxLayout(self._slab_params_widget)
+        slab_params_layout.setContentsMargins(20, 0, 0, 0)
+        slab_params_layout.setSpacing(8)
+        slab_params_layout.addWidget(QLabel("Size:"))
+        self._slab_size_spin = QSpinBox()
+        self._slab_size_spin.setFixedHeight(28)
+        self._slab_size_spin.setMinimum(2)
+        self._slab_size_spin.setMaximum(500)
+        self._slab_size_spin.setValue(20)
+        self._slab_size_spin.setToolTip("Number of images per sub-stack.")
+        slab_params_layout.addWidget(self._slab_size_spin)
+        slab_params_layout.addWidget(QLabel("Overlap:"))
+        self._slab_overlap_spin = QSpinBox()
+        self._slab_overlap_spin.setFixedHeight(28)
+        self._slab_overlap_spin.setMinimum(0)
+        self._slab_overlap_spin.setMaximum(499)
+        self._slab_overlap_spin.setValue(5)
+        self._slab_overlap_spin.setToolTip(
+            "Number of images shared between adjacent slabs. Must be less than size."
+        )
+        slab_params_layout.addWidget(self._slab_overlap_spin)
+        slab_params_layout.addStretch(1)
+        advanced_layout.addWidget(self._slab_params_widget)
+
+        workers_row = QWidget()
+        workers_layout = QHBoxLayout(workers_row)
+        workers_layout.setContentsMargins(0, 0, 0, 0)
+        workers_layout.setSpacing(8)
+        workers_layout.addWidget(QLabel("Workers:"))
+        self._workers_spin = QSpinBox()
+        self._workers_spin.setFixedHeight(28)
+        self._workers_spin.setMinimum(0)
+        self._workers_spin.setMaximum(16)
+        self._workers_spin.setValue(3)
+        self._workers_spin.setToolTip(
+            "Number of parallel workers for stacking. 0 = no limit (use all available). "
+            "Higher values are faster but increase peak RAM by ~100 MiB per additional worker."
+        )
+        workers_layout.addWidget(self._workers_spin)
+        workers_layout.addStretch(1)
+        advanced_layout.addWidget(workers_row)
+
+        fs_settings_layout.addWidget(self._advanced_widget)
+        fs_layout.addWidget(self._fs_settings_widget)
+        self._fs_settings_widget.setVisible(False)
+        main_layout.addWidget(fs_group)
+
         # ---- Summary label ----
         self._summary_label = QLabel("")
         self._summary_label.setObjectName("AreaScanSummary")
@@ -343,6 +507,10 @@ class ZStackAreaScanWidget(QWidget):
         self._start_btn.setEnabled(False)
         self._start_btn.clicked.connect(self._on_start_clicked)
         main_layout.addWidget(self._start_btn)
+
+        # ---- Open Folder button (shown once a scan has started) ----
+        self._open_folder_btn = OpenFolderButton()
+        main_layout.addWidget(self._open_folder_btn)
 
         # Timer for polling routine state on the UI thread
         self._poll_timer = QTimer(self)
@@ -467,6 +635,38 @@ class ZStackAreaScanWidget(QWidget):
         self._update_summary()
 
     # ------------------------------------------------------------------
+    # Focus stack slots
+    # ------------------------------------------------------------------
+
+    def _on_fs_enabled_changed(self) -> None:
+        self._fs_settings_widget.setVisible(self._fs_enable_check.isChecked())
+
+    def _on_advanced_toggled(self, checked: bool) -> None:
+        self._advanced_widget.setVisible(checked)
+        self._advanced_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+        )
+
+    def _on_slab_enabled_changed(self) -> None:
+        self._slab_params_widget.setVisible(self._slab_check.isChecked())
+
+    def _build_focus_stack_config(self) -> FocusStackRoutineConfig | None:
+        if not self._fs_enable_check.isChecked():
+            return None
+        slab: tuple[int, int] | None = None
+        if self._slab_check.isChecked():
+            slab = (self._slab_size_spin.value(), self._slab_overlap_spin.value())
+        return FocusStackRoutineConfig(
+            no_align=self._no_align_check.isChecked(),
+            keep_size=self._keep_size_check.isChecked(),
+            crop=self._crop_check.isChecked(),
+            sharpness=self._sharpness_spin.value(),
+            cull=self._cull_threshold_spin.value() if self._cull_check.isChecked() else None,
+            workers=self._workers_spin.value(),
+            slab=slab,
+        )
+
+    # ------------------------------------------------------------------
     # Start slot
     # ------------------------------------------------------------------
 
@@ -526,9 +726,11 @@ class ZStackAreaScanWidget(QWidget):
             z_end_nm=round(z_end * _NM_PER_MM),
             z_step_nm=round(z.step_mm * _NM_PER_MM),
             output_folder=output_folder,
+            focus_stack_config=self._build_focus_stack_config(),
         )
         motion.start_routine(routine)
 
+        self._last_output_folder = output_folder
         self._enter_running_state()
 
     # ------------------------------------------------------------------
@@ -537,10 +739,15 @@ class ZStackAreaScanWidget(QWidget):
 
     def _enter_running_state(self) -> None:
         self._start_btn.setEnabled(False)
+        self._fs_enable_check.setEnabled(False)
+        self._fs_settings_widget.setEnabled(False)
+        self._open_folder_btn.set_folder(self._last_output_folder)
         self._poll_timer.start()
 
     def _exit_running_state(self) -> None:
         self._poll_timer.stop()
+        self._fs_enable_check.setEnabled(True)
+        self._fs_settings_widget.setEnabled(self._fs_enable_check.isChecked())
         self._update_summary()
 
     def _poll_routine_state(self) -> None:

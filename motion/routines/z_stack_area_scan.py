@@ -9,10 +9,16 @@ The routine reports elapsed time after each Z-stack and provides a running
 estimate of remaining time, incorporating a 1-second-per-remaining-stack
 travel-time allowance.
 
+If a :class:`FocusStackRoutineConfig` is supplied, a :class:`QueuedFocusStackRoutine`
+is launched for each XY subfolder after its Z-stack images have been saved to
+disk.  The stacked output is written to ``<subfolder>/stacked.<ext>`` where the
+extension comes from ``focus_stack_config.output_extension``.
+
 Usage::
 
     from common.app_context import get_app_context
     from motion.automations.z_stack_area_scan import ZStackAreaScan
+    from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 
     ctx = get_app_context()
     routine = ZStackAreaScan(
@@ -27,6 +33,7 @@ Usage::
         z_end_nm=5_000_000,
         z_step_nm=500_000,
         output_folder="/data/scans/area_run1",
+        focus_stack_config=FocusStackRoutineConfig(),
     )
     routine.start()
     routine.wait()
@@ -37,7 +44,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import Generator
+from typing import Generator, TYPE_CHECKING
 
 from common.app_context import get_app_context
 from common.logger import info, warning, error
@@ -45,6 +52,11 @@ from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 
 from motion.routines.automation_routine import AutomationRoutine
+from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
+
+if TYPE_CHECKING:
+    from post_processing.post_processing_manager import PostProcessingManager
+    from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 
 _NM_PER_MM = 1_000_000
 
@@ -87,6 +99,10 @@ class ZStackAreaScan(AutomationRoutine):
     - an estimated time to completion (mean stack duration so far plus
       1 second per remaining stack to account for XY travel).
 
+    If *focus_stack_config* is provided, a :class:`QueuedFocusStackRoutine` is
+    launched for each XY subfolder immediately after its images have been saved.
+    The stacked output is written to ``<subfolder>/stacked.<ext>``.
+
     Parameters
     ----------
     motion:
@@ -112,6 +128,10 @@ class ZStackAreaScan(AutomationRoutine):
     output_folder:
         Root directory for saved images.  Per-XY subfolders are created
         automatically.
+    focus_stack_config:
+        When supplied, a :class:`QueuedFocusStackRoutine` is run against each
+        XY subfolder after its images are saved.  Pass ``None`` to skip
+        focus stacking.
     capture_timeout_ms:
         How long (ms) to wait for each image capture to complete.
     """
@@ -131,6 +151,7 @@ class ZStackAreaScan(AutomationRoutine):
         z_end_nm: int,
         z_step_nm: int,
         output_folder: str | Path,
+        focus_stack_config: FocusStackRoutineConfig | None = None,
         capture_timeout_ms: int = 5000,
     ) -> None:
         super().__init__(motion)
@@ -153,6 +174,7 @@ class ZStackAreaScan(AutomationRoutine):
         self._z_end_nm = z_end_nm
         self._z_step_nm = z_step_nm
         self._output_folder = Path(output_folder)
+        self._focus_stack_config = focus_stack_config
         self._capture_timeout_ms = capture_timeout_ms
 
     # ------------------------------------------------------------------
@@ -162,6 +184,7 @@ class ZStackAreaScan(AutomationRoutine):
     def steps(self) -> Generator[None, None, None]:  # noqa: C901
         ctx = get_app_context()
         camera = ctx.camera
+        post_processing = ctx.post_processing
 
         self._set_activity("Initialising")
 
@@ -203,6 +226,9 @@ class ZStackAreaScan(AutomationRoutine):
             f"  step {self._z_step_nm} nm"
         )
         info(f"[ZStackAreaScan] Output folder: {self._output_folder}")
+        if self._focus_stack_config is not None:
+            ext = self._focus_stack_config.output_extension
+            info(f"[ZStackAreaScan] Focus stacking enabled — output extension: {ext}")
 
         self._set_progress(0, total_stacks)
 
@@ -369,6 +395,12 @@ class ZStackAreaScan(AutomationRoutine):
                 else:
                     warning(f"[ZStackAreaScan]   Save failed at Z={z_nm} nm")
 
+            # Enqueue focus stack for this XY — the manager's worker thread
+            # runs them one at a time while imaging continues freely.
+            if self._focus_stack_config is not None and stack_captures > 0:
+                if not self._check_stop():
+                    self._enqueue_focus_stack(post_processing, subfolder, target_x_nm, target_y_nm)
+
             # ----------------------------------------------------------
             # Post-stack timing and ETA
             # ----------------------------------------------------------
@@ -401,6 +433,11 @@ class ZStackAreaScan(AutomationRoutine):
 
         self._set_activity("Returning home")
         self.motion.home()
+
+        if self._focus_stack_config is not None and post_processing is not None:
+            self._set_activity("Waiting for focus stacking to finish")
+            post_processing.wait_for_queue(check_stop=self._check_stop)
+
         # ------------------------------------------------------------------
         # Final summary
         # ------------------------------------------------------------------
@@ -420,3 +457,33 @@ class ZStackAreaScan(AutomationRoutine):
                 f"  max={max(stack_durations):.3f}"
                 f"  avg={sum(stack_durations) / len(stack_durations):.3f}"
             )
+
+    # ------------------------------------------------------------------
+    # Focus stack helper
+    # ------------------------------------------------------------------
+
+    def _enqueue_focus_stack(
+        self,
+        post_processing: PostProcessingManager | None,
+        subfolder: Path,
+        x_nm: int,
+        y_nm: int,
+    ) -> None:
+        if post_processing is None:
+            error("[ZStackAreaScan] No post_processing manager available — skipping focus stack")
+            return
+
+        cfg = self._focus_stack_config
+        ext = cfg.output_extension
+        stacked_folder = self._output_folder / "focus_stacked"
+        stacked_folder.mkdir(parents=True, exist_ok=True)
+        output_path = str(stacked_folder / f"{x_nm}_{y_nm}.{ext}")
+
+        routine = QueuedFocusStackRoutine(
+            settings=post_processing.settings,
+            input_folder=str(subfolder),
+            output_path=output_path,
+            config=cfg,
+        )
+        post_processing.queue_routine(routine)
+        info(f"[ZStackAreaScan]   Queued focus stack — output: {output_path}")

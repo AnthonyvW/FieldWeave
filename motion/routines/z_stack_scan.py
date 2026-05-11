@@ -56,11 +56,12 @@ from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 
 from motion.routines.automation_routine import AutomationRoutine
+from post_processing.routines.focus_stack_routine import StreamingFocusStackRoutine
+from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
 
 if TYPE_CHECKING:
     from post_processing.post_processing_manager import PostProcessingManager
     from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
-    from focusweave.streaming_stack import PreviewCallback
 
 _NM_PER_MM = 1_000_000
 
@@ -357,6 +358,7 @@ class ZStackScan(AutomationRoutine):
         elif self._focus_stack_config is not None and n_saved > 0:
             self._run_queued_focus_stack(post_processing, total_start_time)
         else:
+            self._set_result(success=True)
             info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")
 
     # ------------------------------------------------------------------
@@ -372,7 +374,6 @@ class ZStackScan(AutomationRoutine):
             error("[ZStackScan] No post_processing manager available — skipping live focus stack")
             return None
 
-        from post_processing.routines.focus_stack_routine import StreamingFocusStackRoutine
 
         cfg = self._focus_stack_config
         ext = cfg.output_extension
@@ -417,6 +418,12 @@ class ZStackScan(AutomationRoutine):
 
         routine.wait()
 
+        fs_result = routine.result
+        if fs_result is not None and fs_result.success:
+            self._set_result(success=True, focus_stack=fs_result.get("focus_stack"))
+        else:
+            self._set_result(success=False)
+
         info(f"[ZStackScan] Focus stack time:  {time.monotonic() - focus_stack_start_time:.3f} s")
         info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")
 
@@ -434,7 +441,6 @@ class ZStackScan(AutomationRoutine):
             info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")
             return
 
-        from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
 
         cfg = self._focus_stack_config
         ext = cfg.output_extension
@@ -465,6 +471,12 @@ class ZStackScan(AutomationRoutine):
             time.sleep(0.25)
 
         focus_routine.wait()
+
+        fs_result = focus_routine.result
+        if fs_result is not None and fs_result.success:
+            self._set_result(success=True, focus_stack=fs_result.get("focus_stack"))
+        else:
+            self._set_result(success=False)
 
         info(f"[ZStackScan] Focus stack time:  {time.monotonic() - focus_stack_start_time:.3f} s")
         info(f"[ZStackScan] Total time:        {time.monotonic() - total_start_time:.3f} s")

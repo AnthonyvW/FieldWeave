@@ -10,17 +10,28 @@ stable surface callers hold; routines are swappable payloads passed to
 :class:`FieldWeaveSettingsManager` so post-processing config lives in the
 application-wide config file.
 
-Typical usage::
+Typical usage — immediate start::
 
     routine = StitchAndMeasureRoutine(manager.settings, input_folder="/path/to/scan")
     manager.start_routine(routine)
     manager.pause_routine()
     manager.resume_routine()
     manager.stop_routine()
+
+Typical usage — queued (fire and forget)::
+
+    for subfolder in subfolders:
+        routine = QueuedFocusStackRoutine(manager.settings, input_folder=subfolder, ...)
+        manager.queue_routine(routine)
+
+    manager.wait_for_queue(check_stop=lambda: should_abort)
 """
 
 from __future__ import annotations
 
+import threading
+import time
+from queue import Queue
 from typing import Callable, TYPE_CHECKING
 
 from common.logger import info, error, warning
@@ -61,6 +72,14 @@ class PostProcessingManager:
     live job/activity/progress updates from whatever routine is currently
     active.
 
+    Queued execution
+    ----------------
+    Call :meth:`queue_routine` to add a routine to a FIFO queue that is drained
+    by an internal worker thread.  Queued routines run one at a time in
+    submission order, concurrently with whatever the caller is doing.  Use
+    :meth:`wait_for_queue` to block until the queue is empty, or
+    :meth:`clear_queue` to discard pending jobs.
+
     Typical usage
     -------------
     ::
@@ -87,6 +106,10 @@ class PostProcessingManager:
         self._active_routine: PostProcessingRoutine | None = None
         self._routine_state_listeners: list[RoutineStateCallback] = []
         self._routine_complete_listeners: list[RoutineCompleteCallback] = []
+
+        self._queue: Queue[PostProcessingRoutine | None] = Queue()
+        self._queue_worker: threading.Thread | None = None
+        self._queue_worker_lock = threading.Lock()
 
         info("PostProcessingManager: initialised")
 
@@ -236,12 +259,102 @@ class PostProcessingManager:
             self._active_routine = None
 
     # ------------------------------------------------------------------
+    # Queued routine API
+    # ------------------------------------------------------------------
+
+    @property
+    def queue_depth(self) -> int:
+        """Number of routines waiting in the queue (excludes the one currently running)."""
+        return self._queue.qsize()
+
+    def queue_routine(self, routine: PostProcessingRoutine) -> None:
+        """Add *routine* to the FIFO queue.
+
+        A worker thread is started on the first call and keeps running until
+        :meth:`shutdown` is called.  Queued routines execute one at a time in
+        submission order.  The caller is never blocked.
+        """
+        self._queue.put(routine)
+        self._ensure_queue_worker_running()
+        info(f"PostProcessingManager: queued routine '{routine.job_name}' (depth now {self._queue.qsize()})")
+
+    def clear_queue(self) -> int:
+        """Discard all pending queued routines without affecting the one currently running.
+
+        Returns the number of routines that were removed.
+        """
+        removed = 0
+        while not self._queue.empty():
+            item = self._queue.get_nowait()
+            if item is None:
+                self._queue.put(None)  # put the sentinel back so the worker can exit
+                break
+            removed += 1
+        if removed:
+            info(f"PostProcessingManager: cleared {removed} queued routine(s)")
+        return removed
+
+    def wait_for_queue(
+        self,
+        check_stop: Callable[[], bool] | None = None,
+        poll_interval: float = 0.25,
+    ) -> bool:
+        """Block until the queue is empty and the worker is idle.
+
+        Parameters
+        ----------
+        check_stop:
+            Optional callable polled every *poll_interval* seconds.  If it
+            returns ``True`` the active routine is stopped, the queue is
+            cleared, and this method returns ``False``.
+        poll_interval:
+            How often to poll *check_stop* and the queue state, in seconds.
+
+        Returns
+        -------
+        bool
+            ``True`` if the queue drained normally, ``False`` if aborted via
+            *check_stop*.
+        """
+        while not self._queue.empty() or self.routine_running:
+            if check_stop is not None and check_stop():
+                self.stop_routine()
+                self.clear_queue()
+                return False
+            time.sleep(poll_interval)
+        return True
+
+    def _ensure_queue_worker_running(self) -> None:
+        with self._queue_worker_lock:
+            if self._queue_worker is None or not self._queue_worker.is_alive():
+                self._queue_worker = threading.Thread(
+                    target=self._queue_worker_loop,
+                    daemon=True,
+                    name="PostProcessingQueueWorker",
+                )
+                self._queue_worker.start()
+
+    def _queue_worker_loop(self) -> None:
+        while True:
+            routine = self._queue.get()
+            if routine is None:
+                break
+            while self.routine_running:
+                time.sleep(0.05)
+            self.start_routine(routine)
+            routine.wait()
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Stop any running routine cleanly."""
+        """Stop any running routine and drain the queue worker cleanly."""
+        self.clear_queue()
+        self._queue.put(None)  # sentinel to exit the worker loop
         self.stop_routine()
+        if self._queue_worker is not None:
+            self._queue_worker.join(timeout=10)
         info("PostProcessingManager: shut down")
 
     # ------------------------------------------------------------------
