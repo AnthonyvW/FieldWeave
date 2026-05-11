@@ -494,6 +494,7 @@ class AmscopeCamera(BaseCamera):
         additional_metadata: dict[str, Any] | None = None,
         timeout_ms: int = 5000,
         on_captured: Callable[[], None] | None = None,
+        on_image: Callable[[np.ndarray], None] | None = None,
         on_complete: Callable[[bool], None] | None = None,
     ) -> bool:
         """
@@ -512,6 +513,12 @@ class AmscopeCamera(BaseCamera):
                                  the still frame (milliseconds).
             on_captured:         Zero-argument callback fired as soon as the raw
                                  frame has been pulled from the SDK.
+            on_image:            ``(image: np.ndarray) -> None`` fired on the
+                                 background save thread after conversion but
+                                 before the file is written. The array is the
+                                 same object passed to ``save_image``; do not
+                                 retain a reference beyond the callback if
+                                 memory usage matters.
             on_complete:         ``(success: bool) -> None`` fired once the file
                                  has been written (or the save failed).
 
@@ -627,6 +634,12 @@ class AmscopeCamera(BaseCamera):
                     t_processed = time.perf_counter()
                     process_ms = (t_processed - t_proc_start) * 1000
                     debug(f"Still image processing (numpy): {process_ms:.1f} ms")
+
+                    if on_image is not None:
+                        try:
+                            on_image(image_data)
+                        except Exception as cb_err:
+                            exception(f"Error in on_image callback: {cb_err}")
 
                     save_ok = self.save_image(image_data, filepath, additional_metadata)
 

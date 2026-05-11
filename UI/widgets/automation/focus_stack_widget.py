@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+
+import numpy as np
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -43,6 +45,7 @@ class _ConfirmAutomationDialog(QDialog):
         step_decimals: int,
         output_folder: str,
         will_focus_stack: bool,
+        live: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -57,6 +60,7 @@ class _ConfirmAutomationDialog(QDialog):
 
         fmt = f".{step_decimals}f"
         time_str = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+        focus_stack_label = "Yes (live)" if live else "Yes (after capture)"
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -83,7 +87,7 @@ class _ConfirmAutomationDialog(QDialog):
             ("Estimated frames", str(n_frames)),
             ("Estimated time",   time_str),
             ("Output folder",    output_folder),
-            ("Focus stack",      "Yes (after capture)" if will_focus_stack else "No"),
+            ("Focus stack",      focus_stack_label if will_focus_stack else "No"),
         ]
         for label_text, value_text in rows:
             row = QWidget()
@@ -132,6 +136,7 @@ class FocusStackWidget(QWidget):
         self._last_output_folder: str | None = None
         self._last_stacked_path: str | None = None
         self._pending_stack_result: FocusStackResult | None = None
+        self._pending_preview_frame: np.ndarray | None = None
         self._setup_ui()
         self._load_settings()
 
@@ -654,6 +659,7 @@ class FocusStackWidget(QWidget):
             step_decimals=self._step_spin.decimals(),
             output_folder=output_folder,
             will_focus_stack=focus_stack_config is not None,
+            live=focus_stack_config is not None,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -672,6 +678,8 @@ class FocusStackWidget(QWidget):
             step_nm=round(step_mm * _NM_PER_MM),
             output_folder=output_folder,
             focus_stack_config=focus_stack_config,
+            live=focus_stack_config is not None,
+            on_preview_frame=self._on_preview_frame_received if focus_stack_config is not None else None,
         )
         motion.start_routine(self._routine)
 
@@ -712,6 +720,9 @@ class FocusStackWidget(QWidget):
         self._pause_resume_btn.setText("Pause")
         self._controls_widget.setVisible(True)
         self._poll_timer.start()
+        ctx = get_app_context()
+        if ctx.camera_preview is not None:
+            ctx.camera_preview.overlays.focus_stack_preview.clear()
 
     def _exit_running_state(self) -> None:
         self._poll_timer.stop()
@@ -729,6 +740,24 @@ class FocusStackWidget(QWidget):
 
         if self._last_output_folder is not None:
             self._results_widget.show_result(self._last_output_folder, stacked_path)
+
+    def _on_preview_frame_received(self, frame: np.ndarray, count: int) -> None:
+        """Called from the post-processing thread — marshal to main thread."""
+        self._pending_preview_frame = frame
+        QMetaObject.invokeMethod(self, "_apply_preview_frame", Qt.ConnectionType.QueuedConnection)
+
+    @Slot()
+    def _apply_preview_frame(self) -> None:
+        frame = self._pending_preview_frame
+        if frame is None:
+            return
+        self._pending_preview_frame = None
+        ctx = get_app_context()
+        if ctx.camera_preview is not None:
+            overlay = ctx.camera_preview.overlays.focus_stack_preview
+            overlay.set_enabled(True)
+            overlay.show_frame(frame)
+            ctx.camera_preview._video_label.update()
 
     def _on_routine_complete(self, result: RoutineResult) -> None:
         """Called from the routine's background thread — marshal Qt calls to main thread."""
@@ -753,10 +782,11 @@ class FocusStackWidget(QWidget):
             ctx.toast.success("Focus stack automation complete.")
         fs_result = self._pending_stack_result
         self._pending_stack_result = None
-        if fs_result is not None:
-            preview = ctx.camera_preview
-            if preview is not None:
-                preview.show_static_image(fs_result.result_rgb)
+        if fs_result is not None and ctx.camera_preview is not None:
+            overlay = ctx.camera_preview.overlays.focus_stack_preview
+            overlay.set_enabled(True)
+            overlay.show_frame(fs_result.result_rgb, track_position=True)
+            ctx.camera_preview._video_label.update()
 
     def _poll_routine_state(self) -> None:
         if self._routine is None or not self._routine.is_running:

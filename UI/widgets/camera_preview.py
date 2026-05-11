@@ -19,6 +19,7 @@ from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
 from UI.widgets.preview_overlay.background_detection import BackgroundDetectionOverlay
+from UI.widgets.preview_overlay.focus_stack_preview import FocusStackPreviewOverlay
 
 
 class EyeToggleButton(QPushButton):
@@ -266,6 +267,11 @@ class OverlayController:
         self._preview._click_to_move_overlay.set_enabled(enabled)
         self._preview._video_label.update()
 
+    @property
+    def focus_stack_preview(self) -> FocusStackPreviewOverlay:
+        """Direct access to the focus stack preview overlay."""
+        return self._preview._focus_stack_preview_overlay
+
     def set_channel(
         self,
         *,
@@ -321,9 +327,6 @@ class CameraPreview(QFrame):
 
         self._preview_hidden: bool = False
 
-        self._static_image: np.ndarray | None = None
-        self._static_image_position: tuple[int, int, int] | None = None
-
         self._video_label = OverlayLabel()
         self._video_label.setObjectName("VideoLabel")
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -355,6 +358,7 @@ class CameraPreview(QFrame):
         self._background_overlay = BackgroundDetectionOverlay()
         self._channel_overlay = ChannelOverlay()
         self._click_to_move_overlay = ClickToMoveOverlay()
+        self._focus_stack_preview_overlay = FocusStackPreviewOverlay()
 
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
@@ -363,6 +367,7 @@ class CameraPreview(QFrame):
         self._video_label.add_overlay(self._red_mark_overlay)
         self._video_label.add_overlay(self._background_overlay)
         self._video_label.add_overlay(self._click_to_move_overlay)
+        self._video_label.add_overlay(self._focus_stack_preview_overlay)
 
         self._crosshair_button = CrosshairButton(self)
         self._crosshair_button.move(10, 10)
@@ -416,35 +421,6 @@ class CameraPreview(QFrame):
                 preview.overlays.crosshair = True
         """
         return self._overlays
-
-    def show_static_image(self, image: np.ndarray) -> None:
-        """Display a static RGB image in place of the live camera stream.
-
-        The static image is shown until the stage position changes from where
-        it was when this was called.
-        """
-        self._static_image = image
-        ctx = get_app_context()
-        if ctx.motion is not None:
-            pos = ctx.motion.get_position()
-            self._static_image_position = (pos.x, pos.y, pos.z)
-        else:
-            self._static_image_position = None
-        h, w = image.shape[:2]
-        q_image = QImage(image.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
-        lw = self._video_label.width()
-        lh = self._video_label.height()
-        if lw > 0 and lh > 0:
-            scaled = q_image.scaled(
-                lw, lh,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._video_label.setPixmap(QPixmap.fromImage(scaled))
-
-    def clear_static_image(self) -> None:
-        """Resume live camera display, discarding any pinned static image."""
-        self._static_image = None
 
     def _connect_to_camera_manager(self) -> None:
         ctx = get_app_context()
@@ -567,17 +543,6 @@ class CameraPreview(QFrame):
         self._preview_buf[:required] = src[:required]
         self._preview_seq = camera_manager.preview_frame_seq
 
-        if self._static_image is not None:
-            if self._static_image_position is not None:
-                ctx = get_app_context()
-                if ctx.motion is not None:
-                    pos = ctx.motion.get_position()
-                    if (pos.x, pos.y, pos.z) != self._static_image_position:
-                        self._static_image = None
-                        self._static_image_position = None
-            if self._static_image is not None:
-                return
-
         if self._preview_seq >= self._still_seq:
             self._render_display(self._preview_buf, width, height, stride)
 
@@ -603,8 +568,7 @@ class CameraPreview(QFrame):
         self._still_buf[:required] = src[:required]
         self._still_seq = camera_manager.still_frame_seq
 
-        if self._static_image is None:
-            self._render_display(self._still_buf, width, height, stride)
+        self._render_display(self._still_buf, width, height, stride)
 
     # ------------------------------------------------------------------
     # Rendering
