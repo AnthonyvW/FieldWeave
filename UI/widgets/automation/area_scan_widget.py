@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt, QTimer
 
 from common.app_context import get_app_context
 from common.logger import warning, error
-from motion.routines.z_stack_area_scan import ZStackAreaScan
+from motion.routines.area_scan import AreaScan
 from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 from UI.widgets.utilities.open_filesystem_object_button import OpenFolderButton
 from UI.widgets.automation.output_folder_widget import OutputFolderWidget
@@ -288,7 +288,7 @@ class _AxisRangeWidget(QWidget):
 # Main widget
 # ---------------------------------------------------------------------------
 
-class ZStackAreaScanWidget(QWidget):
+class AreaScanWidget(QWidget):
     """Widget for configuring and running a area scan across an XY grid."""
 
     mode_name: str = "Area Scan"
@@ -659,7 +659,7 @@ class ZStackAreaScanWidget(QWidget):
         """Return (x_mm, y_mm, z_mm) or None if the motion controller is unavailable."""
         ctx = get_app_context()
         if ctx.motion is None or not ctx.motion.is_ready():
-            warning("ZStackAreaScanWidget: motion controller not ready")
+            warning("AreaScanWidget: motion controller not ready")
             return None
         return ctx.motion.get_position().to_mm()
 
@@ -827,11 +827,11 @@ class ZStackAreaScanWidget(QWidget):
         ctx = get_app_context()
         motion = ctx.motion
         if motion is None or not motion.is_ready():
-            error("ZStackAreaScanWidget: motion controller not ready — cannot start scan")
+            error("AreaScanWidget: motion controller not ready — cannot start scan")
             return
 
         _NM_PER_MM = 1_000_000
-        routine = ZStackAreaScan(
+        routine = AreaScan(
             motion=motion,
             x_start_nm=round(x_start * _NM_PER_MM),
             x_end_nm=round(x_end * _NM_PER_MM),

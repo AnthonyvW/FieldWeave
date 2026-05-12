@@ -17,11 +17,11 @@ extension comes from ``focus_stack_config.output_extension``.
 Usage::
 
     from common.app_context import get_app_context
-    from motion.automations.z_stack_area_scan import ZStackAreaScan
+    from motion.automations.z_stack_area_scan import AreaScan
     from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 
     ctx = get_app_context()
-    routine = ZStackAreaScan(
+    routine = AreaScan(
         motion=ctx.motion,
         x_start_nm=0,
         x_end_nm=2_000_000,
@@ -176,7 +176,7 @@ def _write_scan_profile(
     with profile_path.open("w", encoding="utf-8") as f:
         json.dump(profile, f, indent=2)
 
-    info(f"[ZStackAreaScan] Scan profile written to {profile_path}")
+    info(f"[AreaScan] Scan profile written to {profile_path}")
     return True
 
 
@@ -204,7 +204,7 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
-class ZStackAreaScan(AutomationRoutine):
+class AreaScan(AutomationRoutine):
     """
     Capture a Z-stack at every XY grid position.
 
@@ -322,7 +322,7 @@ class ZStackAreaScan(AutomationRoutine):
         self._set_activity("Initialising")
 
         if camera is None:
-            error("[ZStackAreaScan] No camera available - aborting")
+            error("[AreaScan] No camera available - aborting")
             return
 
         self._output_folder.mkdir(parents=True, exist_ok=True)
@@ -343,27 +343,27 @@ class ZStackAreaScan(AutomationRoutine):
         z_far_base = self._z_end_nm
 
         info(
-            f"[ZStackAreaScan] Grid: {len(x_positions)} X × {len(y_positions)} Y"
+            f"[AreaScan] Grid: {len(x_positions)} X × {len(y_positions)} Y"
             f" = {total_stacks} stacks"
         )
         info(
-            f"[ZStackAreaScan] X: {self._x_start_nm}–{self._x_end_nm} nm"
+            f"[AreaScan] X: {self._x_start_nm}–{self._x_end_nm} nm"
             f"  step {self._x_step_nm} nm"
         )
         info(
-            f"[ZStackAreaScan] Y: {self._y_start_nm}–{self._y_end_nm} nm"
+            f"[AreaScan] Y: {self._y_start_nm}–{self._y_end_nm} nm"
             f"  step {self._y_step_nm} nm"
         )
         info(
-            f"[ZStackAreaScan] Z: {self._z_start_nm}–{self._z_end_nm} nm"
+            f"[AreaScan] Z: {self._z_start_nm}–{self._z_end_nm} nm"
             f"  step {self._z_step_nm} nm"
         )
-        info(f"[ZStackAreaScan] Output folder: {self._output_folder}")
-        info(f"[ZStackAreaScan] Settle times: XY={xy_settle_ms} ms  Z={z_settle_ms} ms")
-        info(f"[ZStackAreaScan] Capture timeout: {capture_timeout_ms} ms")
+        info(f"[AreaScan] Output folder: {self._output_folder}")
+        info(f"[AreaScan] Settle times: XY={xy_settle_ms} ms  Z={z_settle_ms} ms")
+        info(f"[AreaScan] Capture timeout: {capture_timeout_ms} ms")
         if self._focus_stack_config is not None:
             ext = self._focus_stack_config.output_extension
-            info(f"[ZStackAreaScan] Focus stacking enabled - output extension: {ext}")
+            info(f"[AreaScan] Focus stacking enabled - output extension: {ext}")
 
         self._set_progress(0, total_stacks)
 
@@ -402,7 +402,7 @@ class ZStackAreaScan(AutomationRoutine):
                 _eta,
             )
             info(
-                f"[ZStackAreaScan] Stack {stack_idx + 1}/{total_stacks}:"
+                f"[AreaScan] Stack {stack_idx + 1}/{total_stacks}:"
                 f" moving to X={target_x_nm / _NM_PER_MM:.6f} mm"
                 f"  Y={target_y_nm / _NM_PER_MM:.6f} mm"
             )
@@ -450,7 +450,7 @@ class ZStackAreaScan(AutomationRoutine):
 
             total_z = len(z_positions)
             info(
-                f"[ZStackAreaScan]   Z-stack: {total_z} slices"
+                f"[AreaScan]   Z-stack: {total_z} slices"
                 f" from {z_near} nm to {z_far} nm"
             )
 
@@ -478,7 +478,7 @@ class ZStackAreaScan(AutomationRoutine):
                     f"  -  Z slice {z_idx + 1}/{total_z}"
                 )
                 info(
-                    f"[ZStackAreaScan]   Z slice {z_idx + 1}/{total_z}:"
+                    f"[AreaScan]   Z slice {z_idx + 1}/{total_z}:"
                     f" moving to Z={target_z_nm / _NM_PER_MM:.6f} mm"
                 )
                 z_move_start = time.monotonic()
@@ -497,7 +497,7 @@ class ZStackAreaScan(AutomationRoutine):
 
                 actual_pos = self.motion.get_position()
                 filepath = subfolder / f"{actual_pos.z}.jpg"
-                info(f"[ZStackAreaScan]   Capturing: {str(filepath)}")
+                info(f"[AreaScan]   Capturing: {str(filepath)}")
 
                 save_done = threading.Event()
                 success_cell: list[bool] = [False]
@@ -555,9 +555,9 @@ class ZStackAreaScan(AutomationRoutine):
                 if success_cell[0]:
                     stack_captures += 1
                     total_images_captured += 1
-                    info(f"[ZStackAreaScan]   Saved {filepath}")
+                    info(f"[AreaScan]   Saved {filepath}")
                 else:
-                    warning(f"[ZStackAreaScan]   Save failed at Z={z_nm} nm")
+                    warning(f"[AreaScan]   Save failed at Z={z_nm} nm")
 
             # Enqueue focus stack for this XY - the manager's worker thread
             # runs them one at a time while imaging continues freely.
@@ -592,22 +592,22 @@ class ZStackAreaScan(AutomationRoutine):
             self._set_progress(stacks_done, total_stacks, round(eta_s) if stacks_left > 0 else 0)
 
             info(
-                f"[ZStackAreaScan] Stack {stacks_done}/{total_stacks} complete"
+                f"[AreaScan] Stack {stacks_done}/{total_stacks} complete"
                 f"  ({subfolder_name})"
                 f"  saved {stack_captures}/{total_z} images"
             )
             info(
-                f"[ZStackAreaScan]   Stack duration:  {_fmt_duration(stack_elapsed)}"
+                f"[AreaScan]   Stack duration:  {_fmt_duration(stack_elapsed)}"
                 f"  (mean: {_fmt_duration(mean_stack_s)})"
             )
             if stacks_left > 0:
                 info(
-                    f"[ZStackAreaScan]   Stacks remaining: {stacks_left}"
+                    f"[AreaScan]   Stacks remaining: {stacks_left}"
                     f"  |  ETA: {_fmt_duration(eta_s)}"
                     f"  (includes ~1 s/stack for XY travel)"
                 )
             else:
-                info("[ZStackAreaScan]   All stacks complete.")
+                info("[AreaScan]   All stacks complete.")
 
         self._set_activity("Returning home")
         self.motion.home()
@@ -622,15 +622,15 @@ class ZStackAreaScan(AutomationRoutine):
         total_elapsed = time.monotonic() - routine_start
         stacks_completed_final = len(stack_durations)
 
-        info("[ZStackAreaScan] ===== Scan complete =====")
-        info(f"[ZStackAreaScan] Total duration:      {_fmt_duration(total_elapsed)}")
-        info(f"[ZStackAreaScan] Stacks completed:    {stacks_completed_final} / {total_stacks}")
-        info(f"[ZStackAreaScan] Images captured:     {total_images_captured}")
-        info(f"[ZStackAreaScan] Output folder:       {self._output_folder}")
+        info("[AreaScan] ===== Scan complete =====")
+        info(f"[AreaScan] Total duration:      {_fmt_duration(total_elapsed)}")
+        info(f"[AreaScan] Stacks completed:    {stacks_completed_final} / {total_stacks}")
+        info(f"[AreaScan] Images captured:     {total_images_captured}")
+        info(f"[AreaScan] Output folder:       {self._output_folder}")
 
         if stack_durations:
             info(
-                f"[ZStackAreaScan] Stack time (s):      "
+                f"[AreaScan] Stack time (s):      "
                 f"min={min(stack_durations):.3f}"
                 f"  max={max(stack_durations):.3f}"
                 f"  avg={sum(stack_durations) / len(stack_durations):.3f}"
@@ -671,7 +671,7 @@ class ZStackAreaScan(AutomationRoutine):
         y_nm: int,
     ) -> None:
         if post_processing is None:
-            error("[ZStackAreaScan] No post_processing manager available - skipping focus stack")
+            error("[AreaScan] No post_processing manager available - skipping focus stack")
             return
 
         cfg = self._focus_stack_config
@@ -687,4 +687,4 @@ class ZStackAreaScan(AutomationRoutine):
             config=cfg,
         )
         post_processing.queue_routine(routine)
-        info(f"[ZStackAreaScan]   Queued focus stack - output: {output_path}")
+        info(f"[AreaScan]   Queued focus stack - output: {output_path}")
