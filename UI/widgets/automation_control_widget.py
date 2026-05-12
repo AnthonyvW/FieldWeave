@@ -17,7 +17,6 @@ from common.app_context import get_app_context
 
 from UI.widgets.automation.focus_stack_widget import FocusStackWidget
 from UI.widgets.automation.area_scan_widget import AreaScanWidget
-from UI.widgets.automation.square_move_widget import SquareMoveWidget
 from UI.widgets.automation.tree_core_widget import TreeCoreWidget
 from UI.widgets.automation.inspection_calibration_scale_widget import InspectionCalibrationScaleWidget
 
@@ -168,7 +167,6 @@ class AutomationWidget(QWidget):
             TreeCoreWidget(),
             FocusStackWidget(),
             AreaScanWidget(),
-            SquareMoveWidget(),
             InspectionCalibrationScaleWidget(),
         ]
 
