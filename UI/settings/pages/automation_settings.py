@@ -36,6 +36,7 @@ from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManag
 
 from UI.settings.pages.automation.general_settings import GeneralSettingsWidget
 from UI.settings.pages.automation.z_stack_settings import ZStackSettingsWidget
+from UI.settings.pages.automation.area_scan_settings import AreaScanSettingsWidget
 from UI.settings.pages.automation.tree_core_settings import TreeCoreSettingsWidget
 from UI.settings.pages.shared import NM_PER_MM
 
@@ -43,7 +44,7 @@ from UI.settings.pages.shared import NM_PER_MM
 class AutomationSettingsWidget(QWidget):
     """Full settings page for all automation routines."""
 
-    _GROUP_NAMES = ["General", "Z-Stack Scan", "Tree Core"]
+    _GROUP_NAMES = ["General", "Focus Stack", "Area Scan", "Tree Core"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -96,7 +97,16 @@ class AutomationSettingsWidget(QWidget):
             self._on_zstack_check,
         )
         cl.addWidget(self._zstack)
-        self._group_boxes["Z-Stack Scan"] = self._zstack
+        self._group_boxes["Focus Stack"] = self._zstack
+
+        self._zstack_area = AreaScanSettingsWidget()
+        self._zstack_area.connect_signals(
+            self._on_zstack_area_float,
+            self._on_zstack_area_int,
+            self._on_zstack_area_check,
+        )
+        cl.addWidget(self._zstack_area)
+        self._group_boxes["Area Scan"] = self._zstack_area
 
         self._tree_core = TreeCoreSettingsWidget()
         self._tree_core.connect_signals(self._on_run_changed, self._on_slot_changed)
@@ -125,9 +135,11 @@ class AutomationSettingsWidget(QWidget):
     def _populate_from_settings(self, s: MotionSystemSettings) -> None:
         self._general.populate(s)
         self._zstack.populate(s)
+        self._zstack_area.populate(s)
         self._tree_core.populate(s)
         self._general.snapshot()
         self._zstack.snapshot()
+        self._zstack_area.snapshot()
         self._tree_core.snapshot()
         self._set_unsaved(False)
 
@@ -154,6 +166,24 @@ class AutomationSettingsWidget(QWidget):
         self._zstack.mark_field(key, checked)
         self._recheck_unsaved()
 
+    def _on_zstack_area_float(self, key: str, value: float) -> None:
+        nm_keys = {"x_step_nm", "y_step_nm", "z_step_nm", "z_start_nm", "z_end_nm"}
+        stored = round(value * NM_PER_MM) if key in nm_keys else value
+        self._zstack_area.apply_float_to_live(key, value)
+        self._zstack_area.mark_field(key, stored)
+        self._recheck_unsaved()
+
+    def _on_zstack_area_int(self, key: str, value: int) -> None:
+        self._zstack_area.apply_int_to_live(key, value)
+        self._zstack_area.mark_field(key, value)
+        self._recheck_unsaved()
+
+    def _on_zstack_area_check(self, key: str, value: int) -> None:
+        checked = value != 0
+        self._zstack_area.apply_check_to_live(key, value)
+        self._zstack_area.mark_field(key, checked)
+        self._recheck_unsaved()
+
     def _on_run_changed(self, key: str, value_mm: float) -> None:
         value_nm = round(value_mm * NM_PER_MM)
         self._tree_core.apply_run_to_live(key, value_mm)
@@ -169,12 +199,14 @@ class AutomationSettingsWidget(QWidget):
     def _recheck_unsaved(self) -> None:
         general_changed = self._general.has_changes()
         zstack_changed = self._zstack.has_changes()
+        zstack_area_changed = self._zstack_area.has_changes()
         tree_core_changed = self._tree_core.has_changes()
-        has_changes = general_changed or zstack_changed or tree_core_changed
+        has_changes = general_changed or zstack_changed or zstack_area_changed or tree_core_changed
 
         if self.parent_dialog and hasattr(self.parent_dialog, "set_category_modified"):
             self.parent_dialog.set_category_modified("Automation", general_changed, "General")
             self.parent_dialog.set_category_modified("Automation", zstack_changed, "Z-Stack Scan")
+            self.parent_dialog.set_category_modified("Automation", zstack_area_changed, "Z-Stack Area Scan")
             self.parent_dialog.set_category_modified("Automation", tree_core_changed, "Tree Core")
 
         self._set_unsaved(has_changes)
@@ -186,9 +218,11 @@ class AutomationSettingsWidget(QWidget):
         self._settings_manager.save(s)
         self._general.snapshot()
         self._zstack.snapshot()
+        self._zstack_area.snapshot()
         self._tree_core.snapshot()
         self._general.clear_orange()
         self._zstack.clear_orange()
+        self._zstack_area.clear_orange()
         self._tree_core.clear_orange()
         self._recheck_unsaved()
         self._set_unsaved(False)

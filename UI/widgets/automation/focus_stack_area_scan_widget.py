@@ -297,6 +297,7 @@ class ZStackAreaScanWidget(QWidget):
         super().__init__(parent)
         self._last_output_folder: str | None = None
         self._setup_ui()
+        self._populate_from_settings()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -315,18 +316,27 @@ class ZStackAreaScanWidget(QWidget):
         self._x_axis.connect_start(self._set_x_start)
         self._x_axis.connect_end(self._set_x_end)
         self._x_axis.connect_step_changed(self._update_summary)
+        self._x_axis.connect_step_changed(
+            lambda v: self._write_int_to_settings("x_step_nm", round(v * 1_000_000))
+        )
         main_layout.addWidget(self._x_axis)
 
         self._y_axis = _AxisRangeWidget("Y", printer_step, step_decimals)
         self._y_axis.connect_start(self._set_y_start)
         self._y_axis.connect_end(self._set_y_end)
         self._y_axis.connect_step_changed(self._update_summary)
+        self._y_axis.connect_step_changed(
+            lambda v: self._write_int_to_settings("y_step_nm", round(v * 1_000_000))
+        )
         main_layout.addWidget(self._y_axis)
 
         self._z_axis = _AxisRangeWidget("Z", printer_step, step_decimals)
         self._z_axis.connect_start(self._set_z_start)
         self._z_axis.connect_end(self._set_z_end)
         self._z_axis.connect_step_changed(self._update_summary)
+        self._z_axis.connect_step_changed(
+            lambda v: self._write_int_to_settings("z_step_nm", round(v * 1_000_000))
+        )
         main_layout.addWidget(self._z_axis)
 
         # ---- Output folder ----
@@ -342,6 +352,9 @@ class ZStackAreaScanWidget(QWidget):
         self._fs_enable_check = QCheckBox("Run focus stack after each XY position")
         self._fs_enable_check.setChecked(False)
         self._fs_enable_check.stateChanged.connect(self._on_fs_enabled_changed)
+        self._fs_enable_check.stateChanged.connect(
+            lambda v: self._write_check_to_settings("run_focus_stack", v)
+        )
         fs_layout.addWidget(self._fs_enable_check)
 
         self._fs_settings_widget = QWidget()
@@ -354,6 +367,9 @@ class ZStackAreaScanWidget(QWidget):
         self._keep_size_check.setToolTip(
             "Keep the output image the same size as the input images. "
             "Warps are applied in-place rather than expanding the canvas."
+        )
+        self._keep_size_check.stateChanged.connect(
+            lambda v: self._write_check_to_settings("keep_size", v)
         )
         fs_settings_layout.addWidget(self._keep_size_check)
 
@@ -376,6 +392,9 @@ class ZStackAreaScanWidget(QWidget):
         self._no_align_check = QCheckBox("Skip alignment")
         self._no_align_check.setChecked(False)
         self._no_align_check.setToolTip("Skip ECC alignment. Use when images are already registered.")
+        self._no_align_check.stateChanged.connect(
+            lambda v: self._write_check_to_settings("no_align", v)
+        )
         advanced_layout.addWidget(self._no_align_check)
 
         self._crop_check = QCheckBox("Crop to intersection")
@@ -383,6 +402,9 @@ class ZStackAreaScanWidget(QWidget):
         self._crop_check.setToolTip(
             "Crop the output to the largest rectangle covered by every frame after "
             "alignment. Removes border regions but shrinks the output image."
+        )
+        self._crop_check.stateChanged.connect(
+            lambda v: self._write_check_to_settings("crop", v)
         )
         advanced_layout.addWidget(self._crop_check)
 
@@ -403,6 +425,9 @@ class ZStackAreaScanWidget(QWidget):
             "more aggressively (approaching hard selection). Lower values blend "
             "more smoothly. Useful range: 1.0 (soft) to 8.0 (near-hard)."
         )
+        self._sharpness_spin.valueChanged.connect(
+            lambda v: self._write_float_to_settings("sharpness", v)
+        )
         sharpness_layout.addWidget(self._sharpness_spin)
         sharpness_layout.addStretch(1)
         advanced_layout.addWidget(sharpness_row)
@@ -417,6 +442,9 @@ class ZStackAreaScanWidget(QWidget):
             "Discard frames whose focus score falls below the threshold fraction "
             "of the sharpest frame. At least the two sharpest frames are always kept."
         )
+        self._cull_check.stateChanged.connect(
+            lambda v: self._write_check_to_settings("cull_enabled", v)
+        )
         cull_layout.addWidget(self._cull_check)
         self._cull_threshold_spin = QDoubleSpinBox()
         self._cull_threshold_spin.setFixedHeight(28)
@@ -429,6 +457,9 @@ class ZStackAreaScanWidget(QWidget):
             "Frames scoring below this fraction of the peak score are culled. "
             "Raise toward 1.0 to cull more aggressively."
         )
+        self._cull_threshold_spin.valueChanged.connect(
+            lambda v: self._write_float_to_settings("cull_threshold", v)
+        )
         cull_layout.addWidget(self._cull_threshold_spin)
         cull_layout.addStretch(1)
         advanced_layout.addWidget(cull_row)
@@ -440,6 +471,9 @@ class ZStackAreaScanWidget(QWidget):
             "independently, then fuse the results. Reduces peak RAM for large stacks."
         )
         self._slab_check.stateChanged.connect(self._on_slab_enabled_changed)
+        self._slab_check.stateChanged.connect(
+            lambda v: self._write_check_to_settings("slab_enabled", v)
+        )
         advanced_layout.addWidget(self._slab_check)
 
         self._slab_params_widget = QWidget()
@@ -454,6 +488,9 @@ class ZStackAreaScanWidget(QWidget):
         self._slab_size_spin.setMaximum(500)
         self._slab_size_spin.setValue(20)
         self._slab_size_spin.setToolTip("Number of images per sub-stack.")
+        self._slab_size_spin.valueChanged.connect(
+            lambda v: self._write_int_to_settings("slab_size", v)
+        )
         slab_params_layout.addWidget(self._slab_size_spin)
         slab_params_layout.addWidget(QLabel("Overlap:"))
         self._slab_overlap_spin = QSpinBox()
@@ -463,6 +500,9 @@ class ZStackAreaScanWidget(QWidget):
         self._slab_overlap_spin.setValue(5)
         self._slab_overlap_spin.setToolTip(
             "Number of images shared between adjacent slabs. Must be less than size."
+        )
+        self._slab_overlap_spin.valueChanged.connect(
+            lambda v: self._write_int_to_settings("slab_overlap", v)
         )
         slab_params_layout.addWidget(self._slab_overlap_spin)
         slab_params_layout.addStretch(1)
@@ -481,6 +521,9 @@ class ZStackAreaScanWidget(QWidget):
         self._workers_spin.setToolTip(
             "Number of parallel workers for stacking. 0 = no limit (use all available). "
             "Higher values are faster but increase peak RAM by ~100 MiB per additional worker."
+        )
+        self._workers_spin.valueChanged.connect(
+            lambda v: self._write_int_to_settings("workers", v)
         )
         workers_layout.addWidget(self._workers_spin)
         workers_layout.addStretch(1)
@@ -516,6 +559,80 @@ class ZStackAreaScanWidget(QWidget):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(250)
         self._poll_timer.timeout.connect(self._poll_routine_state)
+
+    # ------------------------------------------------------------------
+    # Settings population and write-back
+    # ------------------------------------------------------------------
+
+    def _populate_from_settings(self) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        a = motion.settings.z_stack_area_scan
+        _NM_PER_MM = 1_000_000
+
+        self._x_axis._step_spin.blockSignals(True)
+        self._x_axis._step_spin.setValue(a.x_step_nm / _NM_PER_MM)
+        self._x_axis._step_spin.blockSignals(False)
+
+        self._y_axis._step_spin.blockSignals(True)
+        self._y_axis._step_spin.setValue(a.y_step_nm / _NM_PER_MM)
+        self._y_axis._step_spin.blockSignals(False)
+
+        self._z_axis._step_spin.blockSignals(True)
+        self._z_axis._step_spin.setValue(a.z_step_nm / _NM_PER_MM)
+        self._z_axis._step_spin.blockSignals(False)
+
+        for widget, checked in (
+            (self._fs_enable_check,   a.run_focus_stack),
+            (self._keep_size_check,   a.keep_size),
+            (self._no_align_check,    a.no_align),
+            (self._crop_check,        a.crop),
+            (self._cull_check,        a.cull_enabled),
+            (self._slab_check,        a.slab_enabled),
+        ):
+            widget.blockSignals(True)
+            widget.setChecked(checked)
+            widget.blockSignals(False)
+
+        for spin, value in (
+            (self._sharpness_spin,       a.sharpness),
+            (self._cull_threshold_spin,  a.cull_threshold),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
+        for spin, value in (
+            (self._slab_size_spin,    a.slab_size),
+            (self._slab_overlap_spin, a.slab_overlap),
+            (self._workers_spin,      a.workers),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
+        self._on_fs_enabled_changed()
+        self._on_slab_enabled_changed()
+        self._update_summary()
+
+    def _write_float_to_settings(self, key: str, value: float) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        setattr(motion.settings.z_stack_area_scan, key, value)
+
+    def _write_int_to_settings(self, key: str, value: int) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        setattr(motion.settings.z_stack_area_scan, key, value)
+
+    def _write_check_to_settings(self, key: str, value: int) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        setattr(motion.settings.z_stack_area_scan, key, value != 0)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -126,6 +126,50 @@ class ZStackScanSettings:
 
 
 @dataclass
+class AreaScanSettings:
+    """Persisted defaults for the Z-stack area scan routine.
+
+    Scan parameters
+    ---------------
+    x_step_nm:
+        Step size along X between grid positions, in nanometres.
+    y_step_nm:
+        Step size along Y between grid positions, in nanometres.
+    z_step_nm:
+        Distance between Z capture positions within each stack, in nanometres.
+    z_start_nm:
+        Default near end of the Z range, in nanometres.
+    z_end_nm:
+        Default far end of the Z range, in nanometres.
+
+    Focus stack parameters
+    ----------------------
+    All fields correspond directly to the controls in FocusStackWidget and
+    are forwarded to FocusStackRoutineConfig when a scan is started.
+    """
+
+    # Scan
+    x_step_nm: int = 1_000_000
+    y_step_nm: int = 1_000_000
+    z_step_nm: int = 200_000
+
+    # Focus stack — top-level toggles
+    run_focus_stack: bool = True
+    keep_size: bool = True
+
+    # Focus stack — advanced
+    no_align: bool = False
+    crop: bool = False
+    sharpness: float = 4.0
+    cull_enabled: bool = False
+    cull_threshold: float = 0.6
+    slab_enabled: bool = False
+    slab_size: int = 20
+    slab_overlap: int = 5
+    workers: int = 3
+
+
+@dataclass
 class AutomationSettings:
     """General settings shared across all automation routines.
 
@@ -214,6 +258,11 @@ class MotionSystemSettings:
         default_factory=ZStackScanSettings
     )
 
+    # Z-stack area scan and focus stack defaults.
+    z_stack_area_scan: AreaScanSettings = field(
+        default_factory=AreaScanSettings
+    )
+
     def validate(self) -> None:
         """
         Validate motion system settings.
@@ -261,6 +310,22 @@ class MotionSystemSettings:
             raise ValueError("z_stack_scan.slab_overlap must be less than slab_size")
         if not (1 <= self.z_stack_scan.workers <= 16):
             raise ValueError("z_stack_scan.workers must be between 1 and 16")
+        if self.z_stack_area_scan.x_step_nm <= 0:
+            raise ValueError("z_stack_area_scan.x_step_nm must be positive")
+        if self.z_stack_area_scan.y_step_nm <= 0:
+            raise ValueError("z_stack_area_scan.y_step_nm must be positive")
+        if self.z_stack_area_scan.z_step_nm <= 0:
+            raise ValueError("z_stack_area_scan.z_step_nm must be positive")
+        if not (1.0 <= self.z_stack_area_scan.sharpness <= 8.0):
+            raise ValueError("z_stack_area_scan.sharpness must be between 1.0 and 8.0")
+        if not (0.0 <= self.z_stack_area_scan.cull_threshold <= 1.0):
+            raise ValueError("z_stack_area_scan.cull_threshold must be between 0.0 and 1.0")
+        if self.z_stack_area_scan.slab_size < 2:
+            raise ValueError("z_stack_area_scan.slab_size must be at least 2")
+        if self.z_stack_area_scan.slab_overlap >= self.z_stack_area_scan.slab_size:
+            raise ValueError("z_stack_area_scan.slab_overlap must be less than slab_size")
+        if not (1 <= self.z_stack_area_scan.workers <= 16):
+            raise ValueError("z_stack_area_scan.workers must be between 1 and 16")
 
 class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
     """Configuration manager for motion system settings."""
@@ -341,6 +406,16 @@ class MotionSystemSettingsManager(ConfigManager[MotionSystemSettings]):
             )
         else:
             filtered_data.pop("z_stack_scan", None)
+
+        # Deserialise the nested AreaScanSettings if present.
+        raw_z_stack_area = filtered_data.get("z_stack_area_scan")
+        if isinstance(raw_z_stack_area, dict):
+            valid_z_stack_area_fields = {f.name for f in fields(AreaScanSettings)}
+            filtered_data["z_stack_area_scan"] = AreaScanSettings(
+                **{k: v for k, v in raw_z_stack_area.items() if k in valid_z_stack_area_fields}
+            )
+        else:
+            filtered_data.pop("z_stack_area_scan", None)
 
         return MotionSystemSettings(**filtered_data)
 
