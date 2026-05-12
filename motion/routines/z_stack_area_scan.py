@@ -34,6 +34,9 @@ Usage::
         z_step_nm=500_000,
         output_folder="/data/scans/area_run1",
         focus_stack_config=FocusStackRoutineConfig(),
+        xy_settle_ms=200,
+        z_settle_ms=0,
+        capture_timeout_ms=5000,
     )
     routine.start()
     routine.wait()
@@ -41,6 +44,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -59,6 +63,124 @@ if TYPE_CHECKING:
     from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 
 _NM_PER_MM = 1_000_000
+
+
+def _write_scan_profile(
+    output_folder: Path,
+    x_start_nm: int,
+    y_start_nm: int,
+    z_start_nm: int,
+    x_step_nm: int,
+    y_step_nm: int,
+    z_step_nm: int,
+    x_positions: list[int],
+    y_positions: list[int],
+    z_positions_count: int,
+    dpi: float | None,
+    total_elapsed_s: float,
+    stack_profiles: list[dict],
+    total_images_captured: int,
+    xy_settle_ms: int,
+    z_settle_ms: int,
+    capture_timeout_ms: int,
+) -> bool:
+    x_count = len(x_positions)
+    y_count = len(y_positions)
+    total_stacks = x_count * y_count
+
+    durations = [s["duration_s"] for s in stack_profiles]
+    mean_s = sum(durations) / len(durations) if durations else 0.0
+
+    all_slices = [sl for s in stack_profiles for sl in s.get("slice_profiles", [])]
+    mean_z_move_s = sum(sl["z_move_s"] for sl in all_slices) / len(all_slices) if all_slices else None
+    mean_z_settle_s = sum(sl["z_settle_s"] for sl in all_slices) / len(all_slices) if all_slices else None
+    mean_capture_s = sum(sl["capture_s"] for sl in all_slices) / len(all_slices) if all_slices else None
+    mean_xy_move_s = sum(s["xy_move_s"] for s in stack_profiles) / len(stack_profiles) if stack_profiles else None
+    mean_xy_settle_s = sum(s["xy_settle_s"] for s in stack_profiles) / len(stack_profiles) if stack_profiles else None
+
+    dpi_line = f"  DPI: {dpi:.2f}" if dpi is not None else "  DPI: not available"
+
+    if durations:
+        timing_lines = (
+            f"  Stack duration - min: {min(durations):.3f} s,"
+            f" max: {max(durations):.3f} s,"
+            f" mean: {mean_s:.3f} s\n"
+            f"  Per-slice averages across all stacks:\n"
+            f"    XY move:    {mean_xy_move_s:.3f} s  (settle: {mean_xy_settle_s:.3f} s)\n"
+            f"    Z move:     {mean_z_move_s:.3f} s  (settle: {mean_z_settle_s:.3f} s)\n"
+            f"    Capture:    {mean_capture_s:.3f} s\n"
+            f"  Configured settle times: XY={xy_settle_ms} ms  Z={z_settle_ms} ms\n"
+            f"  Capture timeout: {capture_timeout_ms} ms"
+        )
+    else:
+        timing_lines = "  No stacks completed."
+
+    description = (
+        f"Z-Stack Area Scan - {output_folder.name}\n"
+        f"  Grid: {x_count} X x {y_count} Y = {total_stacks} stacks,"
+        f" {z_positions_count} Z slices each\n"
+        f"  X: start {x_start_nm} nm, step {x_step_nm} nm"
+        f" ({x_start_nm / _NM_PER_MM:.6f} mm, step {x_step_nm / _NM_PER_MM:.6f} mm)\n"
+        f"  Y: start {y_start_nm} nm, step {y_step_nm} nm"
+        f" ({y_start_nm / _NM_PER_MM:.6f} mm, step {y_step_nm / _NM_PER_MM:.6f} mm)\n"
+        f"  Z: start {z_start_nm} nm, step {z_step_nm} nm"
+        f" ({z_start_nm / _NM_PER_MM:.6f} mm, step {z_step_nm / _NM_PER_MM:.6f} mm)\n"
+        f"{dpi_line}\n"
+        f"  Total elapsed: {_fmt_duration(total_elapsed_s)}"
+        f" ({total_elapsed_s:.3f} s)\n"
+        f"  Stacks completed: {len(stack_profiles)} / {total_stacks}\n"
+        f"  Images captured: {total_images_captured}\n"
+        f"{timing_lines}"
+    )
+
+    profile = {
+        "description": description,
+        "scan_parameters": {
+            "output_folder": str(output_folder),
+            "dpi": dpi,
+            "x_start_nm": x_start_nm,
+            "x_start_mm": x_start_nm / _NM_PER_MM,
+            "x_step_nm": x_step_nm,
+            "x_step_mm": x_step_nm / _NM_PER_MM,
+            "y_start_nm": y_start_nm,
+            "y_start_mm": y_start_nm / _NM_PER_MM,
+            "y_step_nm": y_step_nm,
+            "y_step_mm": y_step_nm / _NM_PER_MM,
+            "z_start_nm": z_start_nm,
+            "z_start_mm": z_start_nm / _NM_PER_MM,
+            "z_step_nm": z_step_nm,
+            "z_step_mm": z_step_nm / _NM_PER_MM,
+            "x_positions_count": x_count,
+            "y_positions_count": y_count,
+            "z_slices_per_stack": z_positions_count,
+            "total_stacks": total_stacks,
+            "xy_settle_ms": xy_settle_ms,
+            "z_settle_ms": z_settle_ms,
+            "capture_timeout_ms": capture_timeout_ms,
+        },
+        "summary": {
+            "total_elapsed_s": round(total_elapsed_s, 3),
+            "total_elapsed_formatted": _fmt_duration(total_elapsed_s),
+            "stacks_completed": len(stack_profiles),
+            "total_images_captured": total_images_captured,
+            "stack_duration_min_s": round(min(durations), 3) if durations else None,
+            "stack_duration_max_s": round(max(durations), 3) if durations else None,
+            "stack_duration_mean_s": round(mean_s, 3) if durations else None,
+            "mean_xy_move_s": round(mean_xy_move_s, 3) if mean_xy_move_s is not None else None,
+            "mean_xy_settle_s": round(mean_xy_settle_s, 3) if mean_xy_settle_s is not None else None,
+            "mean_z_move_s": round(mean_z_move_s, 3) if mean_z_move_s is not None else None,
+            "mean_z_settle_s": round(mean_z_settle_s, 3) if mean_z_settle_s is not None else None,
+            "mean_capture_s": round(mean_capture_s, 3) if mean_capture_s is not None else None,
+        },
+        "stack_profiles": stack_profiles,
+    }
+
+    profile_path = output_folder / "scan_profile.json"
+    with profile_path.open("w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2)
+
+    info(f"[ZStackAreaScan] Scan profile written to {profile_path}")
+    return True
 
 
 def _build_axis_positions(start_nm: int, end_nm: int, step_nm: int) -> list[int]:
@@ -134,6 +256,12 @@ class ZStackAreaScan(AutomationRoutine):
         focus stacking.
     capture_timeout_ms:
         How long (ms) to wait for each image capture to complete.
+    xy_settle_ms:
+        How long (ms) to pause after reaching each XY position before beginning
+        the Z-stack.  Allows the stage to stop vibrating.  Defaults to 200 ms.
+    z_settle_ms:
+        How long (ms) to pause after each Z move before triggering the camera.
+        Defaults to 0 (no settle).
     """
 
     job_name = "Z-Stack Area Scan"
@@ -153,6 +281,8 @@ class ZStackAreaScan(AutomationRoutine):
         output_folder: str | Path,
         focus_stack_config: FocusStackRoutineConfig | None = None,
         capture_timeout_ms: int = 5000,
+        xy_settle_ms: int = 200,
+        z_settle_ms: int = 0,
     ) -> None:
         super().__init__(motion)
 
@@ -176,6 +306,8 @@ class ZStackAreaScan(AutomationRoutine):
         self._output_folder = Path(output_folder)
         self._focus_stack_config = focus_stack_config
         self._capture_timeout_ms = capture_timeout_ms
+        self._xy_settle_ms = xy_settle_ms
+        self._z_settle_ms = z_settle_ms
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -189,7 +321,7 @@ class ZStackAreaScan(AutomationRoutine):
         self._set_activity("Initialising")
 
         if camera is None:
-            error("[ZStackAreaScan] No camera available — aborting")
+            error("[ZStackAreaScan] No camera available - aborting")
             return
 
         self._output_folder.mkdir(parents=True, exist_ok=True)
@@ -226,22 +358,29 @@ class ZStackAreaScan(AutomationRoutine):
             f"  step {self._z_step_nm} nm"
         )
         info(f"[ZStackAreaScan] Output folder: {self._output_folder}")
+        info(f"[ZStackAreaScan] Settle times: XY={self._xy_settle_ms} ms  Z={self._z_settle_ms} ms")
+        info(f"[ZStackAreaScan] Capture timeout: {self._capture_timeout_ms} ms")
         if self._focus_stack_config is not None:
             ext = self._focus_stack_config.output_extension
-            info(f"[ZStackAreaScan] Focus stacking enabled — output extension: {ext}")
+            info(f"[ZStackAreaScan] Focus stacking enabled - output extension: {ext}")
 
         self._set_progress(0, total_stacks)
 
         routine_start = time.monotonic()
         stack_durations: list[float] = []
+        stack_profiles: list[dict] = []
         total_images_captured = 0
+
+        dpi: float | None = None
+        mv = getattr(ctx, "machine_vision", None)
+        if mv is not None:
+            mv_settings = getattr(mv, "settings", None)
+            if mv_settings is not None:
+                dpi = getattr(mv_settings, "dpi", None)
 
         for stack_idx, (target_x_nm, target_y_nm) in enumerate(xy_grid):
             if self._check_stop():
                 break
-
-            stacks_remaining_before = total_stacks - stack_idx
-            stacks_completed = stack_idx
 
             # ----------------------------------------------------------
             # Move to XY position
@@ -256,7 +395,7 @@ class ZStackAreaScan(AutomationRoutine):
             else:
                 _eta = 0
             self._set_status(
-                f"Stack {stack_idx + 1}/{total_stacks}  —  moving to XY",
+                f"Stack {stack_idx + 1}/{total_stacks}  -  moving to XY",
                 stack_idx,
                 total_stacks,
                 _eta,
@@ -266,14 +405,19 @@ class ZStackAreaScan(AutomationRoutine):
                 f" moving to X={target_x_nm / _NM_PER_MM:.6f} mm"
                 f"  Y={target_y_nm / _NM_PER_MM:.6f} mm"
             )
+            stack_start_move = time.monotonic()
             self.motion.move_to_position(xy_target, wait=True)
+            xy_move_s = time.monotonic() - stack_start_move
 
             yield  # pause/stop point: after XY move
-            
+
             if self._check_stop():
                 break
 
-            time.sleep(0.2) # Allow motion system to settle for the stack
+            xy_settle_start = time.monotonic()
+            if self._xy_settle_ms > 0:
+                time.sleep(self._xy_settle_ms / 1000.0)
+            xy_settle_s = time.monotonic() - xy_settle_start
 
             # ----------------------------------------------------------
             # Prepare subfolder for this XY position
@@ -317,6 +461,7 @@ class ZStackAreaScan(AutomationRoutine):
             # Tracks pending background saves for this stack so we can verify
             # all images landed on disk before moving to the next XY position.
             stack_pending_saves: list[tuple[int, Path, threading.Event, list[bool]]] = []
+            slice_profiles: list[dict] = []
 
             for z_idx, target_z_nm in enumerate(z_positions):
                 if self._check_stop():
@@ -329,18 +474,25 @@ class ZStackAreaScan(AutomationRoutine):
                 )
                 self._set_activity(
                     f"Stack {stack_idx + 1}/{total_stacks}"
-                    f"  —  Z slice {z_idx + 1}/{total_z}"
+                    f"  -  Z slice {z_idx + 1}/{total_z}"
                 )
                 info(
                     f"[ZStackAreaScan]   Z slice {z_idx + 1}/{total_z}:"
                     f" moving to Z={target_z_nm / _NM_PER_MM:.6f} mm"
                 )
+                z_move_start = time.monotonic()
                 self.motion.move_to_position(z_target_pos, wait=True)
+                z_move_s = time.monotonic() - z_move_start
 
                 yield  # pause/stop point: after Z move
 
                 if self._check_stop():
                     break
+
+                z_settle_start = time.monotonic()
+                if self._z_settle_ms > 0:
+                    time.sleep(self._z_settle_ms / 1000.0)
+                z_settle_s = time.monotonic() - z_settle_start
 
                 actual_pos = self.motion.get_position()
                 filepath = subfolder / f"{actual_pos.z}.jpg"
@@ -353,6 +505,7 @@ class ZStackAreaScan(AutomationRoutine):
                     _cell[0] = success
                     _done.set()
 
+                capture_start = time.monotonic()
                 # wait=True blocks until snap+pull completes so the stage is free
                 # to move to the next Z immediately. The save runs in the background.
                 camera.capture_and_save_still(
@@ -376,6 +529,16 @@ class ZStackAreaScan(AutomationRoutine):
                     on_complete=_on_complete,
                     wait=True,
                 )
+                capture_s = time.monotonic() - capture_start
+
+                slice_profiles.append({
+                    "z_idx": z_idx,
+                    "z_nm": actual_pos.z,
+                    "z_mm": actual_pos.z / _NM_PER_MM,
+                    "z_move_s": round(z_move_s, 3),
+                    "z_settle_s": round(z_settle_s, 3),
+                    "capture_s": round(capture_s, 3),
+                })
 
                 stack_pending_saves.append((actual_pos.z, filepath, save_done, success_cell))
 
@@ -395,7 +558,7 @@ class ZStackAreaScan(AutomationRoutine):
                 else:
                     warning(f"[ZStackAreaScan]   Save failed at Z={z_nm} nm")
 
-            # Enqueue focus stack for this XY — the manager's worker thread
+            # Enqueue focus stack for this XY - the manager's worker thread
             # runs them one at a time while imaging continues freely.
             if self._focus_stack_config is not None and stack_captures > 0:
                 if not self._check_stop():
@@ -408,6 +571,20 @@ class ZStackAreaScan(AutomationRoutine):
             stack_durations.append(stack_elapsed)
             stacks_done = len(stack_durations)
             stacks_left = total_stacks - stacks_done
+
+            stack_profiles.append({
+                "stack_index": stack_idx,
+                "x_nm": target_x_nm,
+                "y_nm": target_y_nm,
+                "x_mm": target_x_nm / _NM_PER_MM,
+                "y_mm": target_y_nm / _NM_PER_MM,
+                "z_slices": total_z,
+                "images_saved": stack_captures,
+                "duration_s": round(stack_elapsed, 3),
+                "xy_move_s": round(xy_move_s, 3),
+                "xy_settle_s": round(xy_settle_s, 3),
+                "slice_profiles": slice_profiles,
+            })
 
             mean_stack_s = sum(stack_durations) / stacks_done
             eta_s = stacks_left * (mean_stack_s + 1.0)
@@ -458,6 +635,29 @@ class ZStackAreaScan(AutomationRoutine):
                 f"  avg={sum(stack_durations) / len(stack_durations):.3f}"
             )
 
+        z_canonical_count = len(
+            _build_axis_positions(self._z_start_nm, self._z_end_nm, self._z_step_nm)
+        )
+        _write_scan_profile(
+            output_folder=self._output_folder,
+            x_start_nm=self._x_start_nm,
+            y_start_nm=self._y_start_nm,
+            z_start_nm=self._z_start_nm,
+            x_step_nm=self._x_step_nm,
+            y_step_nm=self._y_step_nm,
+            z_step_nm=self._z_step_nm,
+            x_positions=x_positions,
+            y_positions=y_positions,
+            z_positions_count=z_canonical_count,
+            dpi=dpi,
+            total_elapsed_s=total_elapsed,
+            stack_profiles=stack_profiles,
+            total_images_captured=total_images_captured,
+            xy_settle_ms=self._xy_settle_ms,
+            z_settle_ms=self._z_settle_ms,
+            capture_timeout_ms=self._capture_timeout_ms,
+        )
+
     # ------------------------------------------------------------------
     # Focus stack helper
     # ------------------------------------------------------------------
@@ -470,7 +670,7 @@ class ZStackAreaScan(AutomationRoutine):
         y_nm: int,
     ) -> None:
         if post_processing is None:
-            error("[ZStackAreaScan] No post_processing manager available — skipping focus stack")
+            error("[ZStackAreaScan] No post_processing manager available - skipping focus stack")
             return
 
         cfg = self._focus_stack_config
@@ -486,4 +686,4 @@ class ZStackAreaScan(AutomationRoutine):
             config=cfg,
         )
         post_processing.queue_routine(routine)
-        info(f"[ZStackAreaScan]   Queued focus stack — output: {output_path}")
+        info(f"[ZStackAreaScan]   Queued focus stack - output: {output_path}")
