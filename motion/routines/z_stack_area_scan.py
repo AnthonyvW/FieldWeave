@@ -34,9 +34,6 @@ Usage::
         z_step_nm=500_000,
         output_folder="/data/scans/area_run1",
         focus_stack_config=FocusStackRoutineConfig(),
-        xy_settle_ms=200,
-        z_settle_ms=0,
-        capture_timeout_ms=5000,
     )
     routine.start()
     routine.wait()
@@ -254,14 +251,19 @@ class ZStackAreaScan(AutomationRoutine):
         When supplied, a :class:`QueuedFocusStackRoutine` is run against each
         XY subfolder after its images are saved.  Pass ``None`` to skip
         focus stacking.
-    capture_timeout_ms:
+
+    Settings read at runtime
+    ------------------------
+    ``ctx.settings.motion.automation.capture_timeout_ms``:
         How long (ms) to wait for each image capture to complete.
-    xy_settle_ms:
-        How long (ms) to pause after reaching each XY position before beginning
-        the Z-stack.  Allows the stage to stop vibrating.  Defaults to 200 ms.
-    z_settle_ms:
-        How long (ms) to pause after each Z move before triggering the camera.
-        Defaults to 0 (no settle).
+    ``ctx.settings.motion.automation.settle_x_ms``:
+        Settle time after each X-only move, in milliseconds.
+    ``ctx.settings.motion.automation.settle_y_ms``:
+        Settle time after each Y-only move, in milliseconds.
+    ``ctx.settings.motion.automation.settle_z_ms``:
+        Settle time after each Z move before triggering the camera.
+    ``ctx.settings.motion.automation.settle_travel_ms``:
+        Settle time after the combined XY travel move to each grid position.
     """
 
     job_name = "Z-Stack Area Scan"
@@ -280,9 +282,6 @@ class ZStackAreaScan(AutomationRoutine):
         z_step_nm: int,
         output_folder: str | Path,
         focus_stack_config: FocusStackRoutineConfig | None = None,
-        capture_timeout_ms: int = 5000,
-        xy_settle_ms: int = 200,
-        z_settle_ms: int = 0,
     ) -> None:
         super().__init__(motion)
 
@@ -305,9 +304,6 @@ class ZStackAreaScan(AutomationRoutine):
         self._z_step_nm = z_step_nm
         self._output_folder = Path(output_folder)
         self._focus_stack_config = focus_stack_config
-        self._capture_timeout_ms = capture_timeout_ms
-        self._xy_settle_ms = xy_settle_ms
-        self._z_settle_ms = z_settle_ms
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -317,6 +313,11 @@ class ZStackAreaScan(AutomationRoutine):
         ctx = get_app_context()
         camera = ctx.camera
         post_processing = ctx.post_processing
+
+        automation = ctx.motion.settings.automation
+        capture_timeout_ms = automation.capture_timeout_ms
+        xy_settle_ms = automation.settle_travel_ms
+        z_settle_ms = automation.settle_z_ms
 
         self._set_activity("Initialising")
 
@@ -358,8 +359,8 @@ class ZStackAreaScan(AutomationRoutine):
             f"  step {self._z_step_nm} nm"
         )
         info(f"[ZStackAreaScan] Output folder: {self._output_folder}")
-        info(f"[ZStackAreaScan] Settle times: XY={self._xy_settle_ms} ms  Z={self._z_settle_ms} ms")
-        info(f"[ZStackAreaScan] Capture timeout: {self._capture_timeout_ms} ms")
+        info(f"[ZStackAreaScan] Settle times: XY={xy_settle_ms} ms  Z={z_settle_ms} ms")
+        info(f"[ZStackAreaScan] Capture timeout: {capture_timeout_ms} ms")
         if self._focus_stack_config is not None:
             ext = self._focus_stack_config.output_extension
             info(f"[ZStackAreaScan] Focus stacking enabled - output extension: {ext}")
@@ -415,8 +416,8 @@ class ZStackAreaScan(AutomationRoutine):
                 break
 
             xy_settle_start = time.monotonic()
-            if self._xy_settle_ms > 0:
-                time.sleep(self._xy_settle_ms / 1000.0)
+            if xy_settle_ms > 0:
+                time.sleep(xy_settle_ms / 1000.0)
             xy_settle_s = time.monotonic() - xy_settle_start
 
             # ----------------------------------------------------------
@@ -490,8 +491,8 @@ class ZStackAreaScan(AutomationRoutine):
                     break
 
                 z_settle_start = time.monotonic()
-                if self._z_settle_ms > 0:
-                    time.sleep(self._z_settle_ms / 1000.0)
+                if z_settle_ms > 0:
+                    time.sleep(z_settle_ms / 1000.0)
                 z_settle_s = time.monotonic() - z_settle_start
 
                 actual_pos = self.motion.get_position()
@@ -525,7 +526,7 @@ class ZStackAreaScan(AutomationRoutine):
                         "total_z_slices": total_z,
                         "xy_subfolder": subfolder_name,
                     },
-                    timeout_ms=self._capture_timeout_ms,
+                    timeout_ms=capture_timeout_ms,
                     on_complete=_on_complete,
                     wait=True,
                 )
@@ -547,7 +548,7 @@ class ZStackAreaScan(AutomationRoutine):
             # ----------------------------------------------------------
             # Drain saves for this stack before moving to the next XY
             # ----------------------------------------------------------
-            save_timeout_s = self._capture_timeout_ms / 1000.0
+            save_timeout_s = capture_timeout_ms / 1000.0
             stack_captures = 0
             for z_nm, filepath, save_done, success_cell in stack_pending_saves:
                 save_done.wait(timeout=save_timeout_s)
@@ -653,9 +654,9 @@ class ZStackAreaScan(AutomationRoutine):
             total_elapsed_s=total_elapsed,
             stack_profiles=stack_profiles,
             total_images_captured=total_images_captured,
-            xy_settle_ms=self._xy_settle_ms,
-            z_settle_ms=self._z_settle_ms,
-            capture_timeout_ms=self._capture_timeout_ms,
+            xy_settle_ms=xy_settle_ms,
+            z_settle_ms=z_settle_ms,
+            capture_timeout_ms=capture_timeout_ms,
         )
 
     # ------------------------------------------------------------------

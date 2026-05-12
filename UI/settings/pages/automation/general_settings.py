@@ -12,7 +12,7 @@ from UI.settings.pages.shared import NoScrollDoubleSpinBox, NoScrollSpinBox, Set
 
 
 class GeneralSettingsWidget(SettingsGroupBase):
-    """General automation settings group (overlap percentages, capture timeout)."""
+    """General automation settings group (overlap percentages, capture timeout, settle times)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("General", parent)
@@ -49,6 +49,24 @@ class GeneralSettingsWidget(SettingsGroupBase):
         self._w_int["capture_timeout_ms"] = timeout_spin
         form.addRow(self._register_label("capture_timeout_ms", QLabel("Capture timeout:")), timeout_spin)
 
+        form.addRow(QLabel("Settle times:"), QLabel("Delay after a move before the next operation."))
+
+        for key, label_text, tooltip in (
+            ("settle_x_ms",      "X settle (ms):",      "Settle time after a move that changes X, in milliseconds."),
+            ("settle_y_ms",      "Y settle (ms):",      "Settle time after a move that changes Y, in milliseconds."),
+            ("settle_z_ms",      "Z settle (ms):",      "Settle time after a Z-only move before triggering the camera, in milliseconds."),
+            ("settle_travel_ms", "Travel settle (ms):", "Settle time after a multi-axis travel move (e.g. moving to a new slot or grid position), in milliseconds."),
+        ):
+            spin = NoScrollSpinBox()
+            spin.setMinimum(0)
+            spin.setMaximum(10_000)
+            spin.setSingleStep(10)
+            spin.setSuffix(" ms")
+            spin.setFixedWidth(130)
+            spin.setToolTip(tooltip)
+            self._w_int[key] = spin
+            form.addRow(self._register_label(key, QLabel(label_text)), spin)
+
     def connect_signals(self, on_changed) -> None:
         for key, spin in self._w.items():
             spin.valueChanged.connect(lambda v, k=key: on_changed(k, v, float))
@@ -64,6 +82,10 @@ class GeneralSettingsWidget(SettingsGroupBase):
         self._w["overlap_x_pct"].setValue(s.automation.overlap_x_pct)
         self._w["overlap_y_pct"].setValue(s.automation.overlap_y_pct)
         self._w_int["capture_timeout_ms"].setValue(s.automation.capture_timeout_ms)
+        self._w_int["settle_x_ms"].setValue(s.automation.settle_x_ms)
+        self._w_int["settle_y_ms"].setValue(s.automation.settle_y_ms)
+        self._w_int["settle_z_ms"].setValue(s.automation.settle_z_ms)
+        self._w_int["settle_travel_ms"].setValue(s.automation.settle_travel_ms)
 
         for w in self._w.values():
             w.blockSignals(False)
@@ -75,6 +97,10 @@ class GeneralSettingsWidget(SettingsGroupBase):
             "overlap_x_pct":      self._w["overlap_x_pct"].value(),
             "overlap_y_pct":      self._w["overlap_y_pct"].value(),
             "capture_timeout_ms": self._w_int["capture_timeout_ms"].value(),
+            "settle_x_ms":        self._w_int["settle_x_ms"].value(),
+            "settle_y_ms":        self._w_int["settle_y_ms"].value(),
+            "settle_z_ms":        self._w_int["settle_z_ms"].value(),
+            "settle_travel_ms":   self._w_int["settle_travel_ms"].value(),
         }
 
     def apply_to_live(self, key: str, value: object, type_: type) -> None:
@@ -84,10 +110,12 @@ class GeneralSettingsWidget(SettingsGroupBase):
         setattr(motion.settings.automation, key, type_(value))
 
     def has_changes(self) -> bool:
-        return (
+        return any(
+            self._saved.get(key) != self._w_int[key].value()
+            for key in ("capture_timeout_ms", "settle_x_ms", "settle_y_ms", "settle_z_ms", "settle_travel_ms")
+        ) or (
             self._saved.get("overlap_x_pct") != self._w["overlap_x_pct"].value()
             or self._saved.get("overlap_y_pct") != self._w["overlap_y_pct"].value()
-            or self._saved.get("capture_timeout_ms") != self._w_int["capture_timeout_ms"].value()
         )
 
     def mark_field(self, key: str, value: object) -> None:

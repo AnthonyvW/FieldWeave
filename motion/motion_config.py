@@ -131,11 +131,28 @@ class AutomationSettings:
 
     Overlap percentages express what fraction of each captured frame overlaps
     with the next frame along that axis, as a value from 0 to 100.
+
+    Settle times are delays inserted after a move completes, before the next
+    operation (capture or autofocus), to allow vibration to decay:
+
+    settle_x_ms:
+        Settle time after a move that changes X, in milliseconds.
+    settle_y_ms:
+        Settle time after a move that changes Y, in milliseconds.
+    settle_z_ms:
+        Settle time after a move that changes Z only, in milliseconds.
+    settle_travel_ms:
+        Settle time after a multi-axis travel move (e.g. moving to a new
+        slot or returning to a start position), in milliseconds.
     """
 
     overlap_x_pct: float = 50.0
     overlap_y_pct: float = 50.0
     capture_timeout_ms: int = 5000
+    settle_x_ms: int = 200
+    settle_y_ms: int = 200
+    settle_z_ms: int = 10
+    settle_travel_ms: int = 200
 
     @property
     def overlap_x(self) -> int:
@@ -222,6 +239,14 @@ class MotionSystemSettings:
             raise ValueError("overlap_y_pct must be between 0 and 100")
         if self.automation.capture_timeout_ms <= 0:
             raise ValueError("capture_timeout_ms must be positive")
+        if self.automation.settle_x_ms < 0:
+            raise ValueError("settle_x_ms must be non-negative")
+        if self.automation.settle_y_ms < 0:
+            raise ValueError("settle_y_ms must be non-negative")
+        if self.automation.settle_z_ms < 0:
+            raise ValueError("settle_z_ms must be non-negative")
+        if self.automation.settle_travel_ms < 0:
+            raise ValueError("settle_travel_ms must be non-negative")
         if self.z_stack_scan.step_nm <= 0:
             raise ValueError("z_stack_scan.step_nm must be positive")
         if self.z_stack_scan.approach_distance_nm < 0:

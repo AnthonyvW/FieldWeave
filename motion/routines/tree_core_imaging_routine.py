@@ -90,8 +90,6 @@ from machine_vision.algorithms.background_detection import is_background_frame
 
 _NM_PER_MM = 1_000_000
 _NM_PER_TICK = 10_000
-_SETTLE_S = 0.2
-_DWELL_S = 1.0
 
 _FOCUS_DROP_REACQUIRE = 0.2   # score drop below reference that triggers re-descent
 _FOCUS_DROP_GAP       = 0.35  # score drop in a single step that indicates a gap/end
@@ -180,8 +178,6 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         Ordered sequence of ``(slot_index, name)`` pairs.  ``slot_index``
         is zero-based and must be within range for the current calibration.
         ``name`` becomes the sub-folder name inside *output_folder*.
-    capture_timeout_s:
-        Seconds to wait for still-frame captures before giving up.
     image_overlap:
         Fractional overlap between consecutive frames in the sweep direction,
         in the range [0, 1).  Defaults to 0.4 (40 % overlap).
@@ -189,6 +185,14 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         When True the calibration scale bar is imaged after all slots are
         processed.  Output is saved to ``<output_folder>/calibration_slide/``.
         Requires a saved scale bar position in the machine vision settings.
+
+    Settings read at runtime
+    ------------------------
+    ``ctx.settings.motion.automation.capture_timeout_ms``:
+        How long (ms) to wait for each image capture to complete.
+    ``ctx.settings.motion.automation.settle_travel_ms``:
+        Settle time (ms) inserted after travel moves to the mark position
+        and after returning to the slot's starting position.
     """
 
     job_name = "Tree Core Imaging"
@@ -199,14 +203,12 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         *,
         output_folder: str | Path,
         slots: list[tuple[int, str]],
-        capture_timeout_s: float = 10.0,
         image_overlap: float = 0.4,
         image_calibration_scale: bool = False,
     ) -> None:
         super().__init__(motion)
         self._output_folder = Path(output_folder)
         self._slots = list(slots)
-        self._capture_timeout_s = capture_timeout_s
         self._image_overlap = image_overlap
         self._image_calibration_scale = image_calibration_scale
 
@@ -214,6 +216,10 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         ctx = get_app_context()
         tca = ctx.motion.settings.tree_core_automation
         mv = ctx.machine_vision
+
+        automation = ctx.motion.settings.automation
+        capture_timeout_s = automation.capture_timeout_ms / 1000.0
+        settle_travel_s = automation.settle_travel_ms / 1000.0
 
         if not tca.has_been_calibrated:
             error("[TreeCoreImaging] Slot calibration has not been completed — aborting")
@@ -268,7 +274,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     "z_position_mm": pos.z / _NM_PER_MM,
                     "source": "tree_core_imaging",
                 },
-                timeout_ms=int(self._capture_timeout_s * 1000),
+                timeout_ms=int(capture_timeout_s * 1000),
                 wait=True,
             )
             info(f"[TreeCoreImaging] Saved {filepath}")
@@ -312,7 +318,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 motion=self.motion,
                 output_path=str(cal_slide_folder),
                 start_position=start_position,
-                capture_timeout_s=self._capture_timeout_s,
+                capture_timeout_s=capture_timeout_s,
             )
             cal_routine.start()
 
@@ -379,7 +385,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 )
 
             self.motion.move_to_position(mark_target, wait=True)
-            time.sleep(_SETTLE_S)
+            if settle_travel_s > 0:
+                time.sleep(settle_travel_s)
 
             yield
             if self._check_stop():
@@ -387,7 +394,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
             _advance(f"Centering on mark — {slot_label}", slot_iter, 1, 6)
             info(f"[TreeCoreImaging] Running red mark centering for {slot_label}")
-            _run_centering(self.motion, self._capture_timeout_s, self)
+            _run_centering(self.motion, capture_timeout_s, self)
 
             yield
             if self._check_stop():
@@ -416,10 +423,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 )
 
             self.motion.move_to_position(start_target, wait=True)
-            time.sleep(_SETTLE_S)
-
-            info(f"[TreeCoreImaging] Dwelling {_DWELL_S}s at starting position for {slot_label}")
-            time.sleep(_DWELL_S)
+            if settle_travel_s > 0:
+                time.sleep(settle_travel_s)
 
             # ------------------------------------------------------------------
             # Autofocus descent to find best Z at the starting position
@@ -439,7 +444,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
             # Capture one frame to get live sensor dimensions for FOV derivation.
             # The sensor size won't change during the run so this is done once per slot.
-            size_frame = capture_still_frame(ctx.camera_manager, timeout_s=self._capture_timeout_s)
+            size_frame = capture_still_frame(ctx.camera_manager, timeout_s=capture_timeout_s)
             if size_frame is None:
                 error(f"[TreeCoreImaging] Frame capture for step-size derivation failed — skipping {slot_label}")
                 continue
@@ -647,7 +652,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             else:
                 focused_start_pos = Position(x=main_start_nm, y=start_pos.y, z=focused_z_nm)
             self.motion.move_to_position(focused_start_pos, wait=True)
-            time.sleep(_SETTLE_S)
+            if settle_travel_s > 0:
+                time.sleep(settle_travel_s)
 
             yield
             if self._check_stop():
@@ -689,7 +695,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 self.motion.move_to_position(target, wait=True)
                 current_main_nm = next_main_nm
 
-                frame = capture_still_frame(ctx.camera_manager, timeout_s=self._capture_timeout_s)
+                frame = capture_still_frame(ctx.camera_manager, timeout_s=capture_timeout_s)
                 if frame is None:
                     warning("[TreeCoreImaging] Frame capture failed during reverse sweep — stopping sweep")
                     break
