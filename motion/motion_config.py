@@ -74,6 +74,8 @@ class TreeCoreAutomationSettings:
     # string if no calibration has been completed yet.
     last_calibrated_iso: str = ""
 
+    image_name_template: str = "Y{y}_X{x}_Z{z}"
+
     # Ordered list of slot definitions (defaults to 20 empty slots).
     slots: list[TreeCoreSlot] = field(default_factory=lambda: [TreeCoreSlot() for _ in range(20)])
 
@@ -108,6 +110,8 @@ class ZStackScanSettings:
     # Scan
     step_nm: int = 200_000
     approach_distance_nm: int = 400_000
+    image_name_template: str = "{z}"
+    stacked_name_template: str = "stacked"
 
     # Focus stack — top-level toggles
     run_focus_stack: bool = True
@@ -157,6 +161,7 @@ class AreaScanSettings:
     y_step_nm: int = 1_000_000
     z_step_nm: int = 200_000
     scan_strategy: str = "snake"
+    image_name_template: str = "{d}_{i}"
 
     # Focus stack — top-level toggles
     run_focus_stack: bool = True

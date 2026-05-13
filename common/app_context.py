@@ -13,6 +13,7 @@ from machine_vision.machine_vision_manager import MachineVisionManager
 from post_processing.post_processing_manager import PostProcessingManager
 from common.logger import info, error, warning, debug
 from common.fieldweaveConfig import FieldWeaveSettingsManager, FieldWeaveSettings
+from common.image_name_formatter import ImageNameFormatter
 from motion.motion_controller_manager import MotionControllerManager
 from motion.motion_controller_manager import MotionState
 
@@ -52,6 +53,8 @@ class AppContext:
         self._camera_preview: CameraPreview | None = None
         self._initialized = True
         self._cleaned_up: bool = False
+
+        self.image_name_formatter = ImageNameFormatter(pad_positions=True)
 
         self._load_settings()
         self._initialize_motion_manager()

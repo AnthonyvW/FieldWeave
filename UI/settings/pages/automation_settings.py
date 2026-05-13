@@ -95,6 +95,7 @@ class AutomationSettingsWidget(QWidget):
             self._on_zstack_float,
             self._on_zstack_int,
             self._on_zstack_check,
+            self._on_zstack_line,
         )
         cl.addWidget(self._zstack)
         self._group_boxes["Focus Stack"] = self._zstack
@@ -104,12 +105,14 @@ class AutomationSettingsWidget(QWidget):
             self._on_zstack_area_float,
             self._on_zstack_area_int,
             self._on_zstack_area_check,
+            self._on_zstack_area_combo,
+            self._on_zstack_area_line,
         )
         cl.addWidget(self._zstack_area)
         self._group_boxes["Area Scan"] = self._zstack_area
 
         self._tree_core = TreeCoreSettingsWidget()
-        self._tree_core.connect_signals(self._on_run_changed, self._on_slot_changed)
+        self._tree_core.connect_signals(self._on_run_changed, self._on_slot_changed, self._on_tree_core_line)
         self._tree_core.set_slot_mutation_callback(self._recheck_unsaved)
         cl.addWidget(self._tree_core)
         self._group_boxes["Tree Core"] = self._tree_core
@@ -166,6 +169,11 @@ class AutomationSettingsWidget(QWidget):
         self._zstack.mark_field(key, checked)
         self._recheck_unsaved()
 
+    def _on_zstack_line(self, key: str, value: str) -> None:
+        self._zstack.apply_line_to_live(key, value)
+        self._zstack.mark_line_field(key)
+        self._recheck_unsaved()
+
     def _on_zstack_area_float(self, key: str, value: float) -> None:
         nm_keys = {"x_step_nm", "y_step_nm", "z_step_nm", "z_start_nm", "z_end_nm"}
         stored = round(value * NM_PER_MM) if key in nm_keys else value
@@ -184,6 +192,16 @@ class AutomationSettingsWidget(QWidget):
         self._zstack_area.mark_field(key, checked)
         self._recheck_unsaved()
 
+    def _on_zstack_area_combo(self, key: str, value: str) -> None:
+        self._zstack_area.apply_combo_to_live(key, value)
+        self._zstack_area.mark_combo_field(key)
+        self._recheck_unsaved()
+
+    def _on_zstack_area_line(self, key: str, value: str) -> None:
+        self._zstack_area.apply_line_to_live(key, value)
+        self._zstack_area.mark_line_field(key)
+        self._recheck_unsaved()
+
     def _on_run_changed(self, key: str, value_mm: float) -> None:
         value_nm = round(value_mm * NM_PER_MM)
         self._tree_core.apply_run_to_live(key, value_mm)
@@ -194,6 +212,11 @@ class AutomationSettingsWidget(QWidget):
         value_nm = round(value_mm * NM_PER_MM)
         self._tree_core.apply_slot_to_live(index, key, value_mm)
         self._tree_core.mark_slot_field(index, key, value_nm)
+        self._recheck_unsaved()
+
+    def _on_tree_core_line(self, key: str, value: str) -> None:
+        self._tree_core.apply_line_to_live(key, value)
+        self._tree_core.mark_line_field(key)
         self._recheck_unsaved()
 
     def _recheck_unsaved(self) -> None:

@@ -303,6 +303,8 @@ class AreaScan(AutomationRoutine):
         if scan_strategy not in ("snake", "line"):
             raise ValueError(f"scan_strategy must be 'snake' or 'line', got {scan_strategy!r}")
 
+        ctx = get_app_context()
+
         self._x_start_nm = x_start_nm
         self._x_end_nm = x_end_nm
         self._x_step_nm = x_step_nm
@@ -315,6 +317,10 @@ class AreaScan(AutomationRoutine):
         self._output_folder = Path(output_folder)
         self._focus_stack_config = focus_stack_config
         self._scan_strategy = scan_strategy
+
+        template = ctx.motion.settings.z_stack_area_scan.image_name_template if ctx.motion.settings else "{d}_{i}"
+        ctx.image_name_formatter.set_template(template)
+        ctx.image_name_formatter.set_index(1)
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -449,7 +455,7 @@ class AreaScan(AutomationRoutine):
             # ----------------------------------------------------------
             # Prepare subfolder for this XY position
             # ----------------------------------------------------------
-            subfolder_name = f"x{target_x_nm}_y{target_y_nm}"
+            subfolder_name = f"x{target_x_nm}_y{target_y_nm}"            
             subfolder = self._output_folder / subfolder_name
             subfolder.mkdir(parents=True, exist_ok=True)
 
@@ -589,7 +595,7 @@ class AreaScan(AutomationRoutine):
             # runs them one at a time while imaging continues freely.
             if self._focus_stack_config is not None and stack_captures > 0:
                 if not self._check_stop():
-                    self._enqueue_focus_stack(post_processing, subfolder, target_x_nm, target_y_nm)
+                    self._enqueue_focus_stack(post_processing, subfolder)
 
             # ----------------------------------------------------------
             # Post-stack timing and ETA
@@ -696,8 +702,6 @@ class AreaScan(AutomationRoutine):
         self,
         post_processing: PostProcessingManager | None,
         subfolder: Path,
-        x_nm: int,
-        y_nm: int,
     ) -> None:
         if post_processing is None:
             error("[AreaScan] No post_processing manager available - skipping focus stack")
@@ -707,7 +711,9 @@ class AreaScan(AutomationRoutine):
         ext = cfg.output_extension
         stacked_folder = self._output_folder / "focus_stacked"
         stacked_folder.mkdir(parents=True, exist_ok=True)
-        output_path = str(stacked_folder / f"{x_nm}_{y_nm}.{ext}")
+        ctx = get_app_context()
+        image_name = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
+        output_path = str(stacked_folder / f"{image_name}.{ext}")
 
         routine = QueuedFocusStackRoutine(
             settings=post_processing.settings,

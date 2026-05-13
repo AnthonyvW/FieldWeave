@@ -143,6 +143,11 @@ class ZStackScan(AutomationRoutine):
         self._live = live
         self._on_preview_frame = on_preview_frame
 
+        ctx = get_app_context()
+        template = ctx.motion.settings.z_stack_scan.image_name_template
+        ctx.image_name_formatter.set_template(template)
+        ctx.image_name_formatter.set_index(1)
+
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
     # ------------------------------------------------------------------
@@ -248,7 +253,8 @@ class ZStackScan(AutomationRoutine):
                 break
 
             actual_pos = self.motion.get_position()
-            filepath = self._output_folder / f"{actual_pos.z}.jpg"
+            image_name = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
+            filepath = self._output_folder / f"{image_name}.jpg"
 
             info(f"[ZStackScan] Capturing image: {filepath}")
 
@@ -377,7 +383,9 @@ class ZStackScan(AutomationRoutine):
 
         cfg = self._focus_stack_config
         ext = cfg.output_extension
-        output_path = str(self._output_folder / f"stacked.{ext}")
+        ctx = get_app_context()
+        name = ctx.motion.settings.z_stack_scan.stacked_name_template
+        output_path = str(self._output_folder / f"{name}.{ext}")
 
         info(f"[ZStackScan] Starting streaming focus stack — output: {output_path}")
 
@@ -444,7 +452,9 @@ class ZStackScan(AutomationRoutine):
 
         cfg = self._focus_stack_config
         ext = cfg.output_extension
-        output_path = str(self._output_folder / f"stacked.{ext}")
+        ctx = get_app_context()
+        name = ctx.motion.settings.z_stack_scan.stacked_name_template
+        output_path = str(self._output_folder / f"{name}.{ext}")
 
         info(f"[ZStackScan] Starting queued focus stack — output: {output_path}")
         focus_stack_start_time = time.monotonic()

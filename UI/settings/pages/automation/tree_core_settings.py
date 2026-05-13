@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -144,6 +145,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Tree Core", parent)
         self._w_run: dict[str, NoScrollDoubleSpinBox] = {}
+        self._w_line: dict[str, QLineEdit] = {}
         self._axis_labels: dict[str, QLabel] = {}
         self._slot_rows: list[_SlotRow] = []
         self._saved: dict[str, object] = {}
@@ -273,6 +275,18 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
 
         vbox.addWidget(run_box)
 
+        template_edit = QLineEdit()
+        template_edit.setPlaceholderText("Y{y}_X{x}_Z{z}")
+        template_edit.setToolTip(
+            "Image filename template. Supported placeholders:\n"
+            "  {x} {y} {z}  stage position in nm (zero-padded)\n"
+            "  {i}          image index\n"
+            "  {d}         date (default: YYYYMMDD); custom via {d:%Y%m%d_%H%M%S}\n"
+            "Unknown placeholders are left intact."
+        )
+        self._w_line["image_name_template"] = template_edit
+        run_form.addRow(self._register_label("image_name_template", QLabel("Image name:")), template_edit)
+
         slots_box = QGroupBox("Slots")
         slots_vbox = QVBoxLayout(slots_box)
 
@@ -296,10 +310,12 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
 
         vbox.addWidget(slots_box)
 
-    def connect_signals(self, on_run_changed, on_slot_changed) -> None:
+    def connect_signals(self, on_run_changed, on_slot_changed, on_line) -> None:
         self._on_slot_changed_cb = on_slot_changed
         for key, spin in self._w_run.items():
             spin.valueChanged.connect(lambda v, k=key: on_run_changed(k, v))
+        for key, edit in self._w_line.items():
+            edit.textChanged.connect(lambda v, k=key: on_line(k, v))
 
     def _connect_slot_signals(self, row: _SlotRow) -> None:
         for key, spin in row.widgets.items():
@@ -312,12 +328,17 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
 
         for w in self._w_run.values():
             w.blockSignals(True)
+        for w in self._w_line.values():
+            w.blockSignals(True)
         self._w_run["mark_reference_nm"].setValue(tca.mark_reference_nm / NM_PER_MM)
         self._w_run["mark_z_nm"].setValue(tca.mark_z_nm / NM_PER_MM)
         self._w_run["starting_height_nm"].setValue(tca.starting_height_nm / NM_PER_MM)
         self._w_run["starting_offset_nm"].setValue(tca.starting_offset_nm / NM_PER_MM)
         self._w_run["slot_separation_nm"].setValue(tca.slot_separation_nm / NM_PER_MM)
+        self._w_line["image_name_template"].setText(tca.image_name_template)
         for w in self._w_run.values():
+            w.blockSignals(False)
+        for w in self._w_line.values():
             w.blockSignals(False)
 
         axis_upper = tca.axis.upper()
@@ -339,6 +360,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
             "starting_offset_nm": round(self._w_run["starting_offset_nm"].value() * NM_PER_MM),
             "slot_separation_nm": round(self._w_run["slot_separation_nm"].value() * NM_PER_MM),
             "num_slots":          len(self._slot_rows),
+            "image_name_template": self._w_line["image_name_template"].text(),
         }
         for i, row in enumerate(self._slot_rows):
             self._saved[f"slot.{i}.position_nm"] = round(row.widgets["position_nm"].value() * NM_PER_MM)
@@ -349,6 +371,12 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         if motion is None or motion.settings is None:
             return
         setattr(motion.settings.tree_core_automation, key, round(value_mm * NM_PER_MM))
+
+    def apply_line_to_live(self, key: str, value: str) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        setattr(motion.settings.tree_core_automation, key, value)
 
     def apply_slot_to_live(self, index: int, key: str, value_mm: float) -> None:
         motion = get_app_context().motion
@@ -406,6 +434,8 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
             for key, spin in row.widgets.items():
                 if self._saved.get(f"slot.{i}.{key}") != round(spin.value() * NM_PER_MM):
                     return True
+        if self._saved.get("image_name_template") != self._w_line["image_name_template"].text():
+            return True
         return False
 
     def clear_orange(self) -> None:
@@ -415,6 +445,9 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
 
     def mark_run_field(self, key: str, value_nm: int) -> None:
         self.mark_label(key, self._saved.get(key) != value_nm)
+
+    def mark_line_field(self, key: str) -> None:
+        self.mark_label(key, self._saved.get(key) != self._w_line[key].text())
 
     def mark_slot_field(self, index: int, key: str, value_nm: int) -> None:
         if index < len(self._slot_rows):

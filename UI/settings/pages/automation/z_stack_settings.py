@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -24,6 +25,7 @@ class ZStackSettingsWidget(SettingsGroupBase):
         self._w: dict[str, NoScrollDoubleSpinBox] = {}
         self._w_int: dict[str, NoScrollSpinBox] = {}
         self._w_check: dict[str, QCheckBox] = {}
+        self._w_line: dict[str, QLineEdit] = {}
         self._saved: dict[str, object] = {}
         self._build()
 
@@ -75,6 +77,30 @@ class ZStackSettingsWidget(SettingsGroupBase):
         fs_box = QGroupBox("Focus Stack")
         fs_form = QFormLayout(fs_box)
         fs_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        template_edit = QLineEdit()
+        template_edit.setPlaceholderText("{z}")
+        template_edit.setToolTip(
+            "Filename template for individual captured images (without extension). Supported placeholders:\n"
+            "  {x} {y} {z}  stage position in nm (zero-padded)\n"
+            "  {i}          image index\n"
+            "  {d}         date (default: YYYYMMDD); custom via {d:%Y%m%d_%H%M%S}\n"
+            "Unknown placeholders are left intact."
+        )
+        self._w_line["image_name_template"] = template_edit
+        fs_form.addRow(self._register_label("image_name_template", QLabel("Image name:")), template_edit)
+
+        stacked_edit = QLineEdit()
+        stacked_edit.setPlaceholderText("stacked")
+        stacked_edit.setToolTip(
+            "Output filename for the focus-stacked image (without extension). Supported placeholders:\n"
+            "  {x} {y} {z}  stage position in nm (zero-padded)\n"
+            "  {i}          image index\n"
+            "  {d}         date (default: YYYYMMDD); custom via {d:%Y%m%d_%H%M%S}\n"
+            "Unknown placeholders are left intact."
+        )
+        self._w_line["stacked_name_template"] = stacked_edit
+        fs_form.addRow(self._register_label("stacked_name_template", QLabel("Focus Stacked Output Name:")), stacked_edit)
 
         for key, label_text, tooltip in (
             ("run_focus_stack", "Run after capture:", "Automatically run focus stacking after all frames are captured."),
@@ -135,13 +161,15 @@ class ZStackSettingsWidget(SettingsGroupBase):
 
         vbox.addWidget(fs_box)
 
-    def connect_signals(self, on_float, on_int, on_check) -> None:
+    def connect_signals(self, on_float, on_int, on_check, on_line) -> None:
         for key, spin in self._w.items():
             spin.valueChanged.connect(lambda v, k=key: on_float(k, v))
         for key, spin in self._w_int.items():
             spin.valueChanged.connect(lambda v, k=key: on_int(k, v))
         for key, check in self._w_check.items():
             check.stateChanged.connect(lambda v, k=key: on_check(k, v))
+        for key, edit in self._w_line.items():
+            edit.textChanged.connect(lambda v, k=key: on_line(k, v))
 
     def populate(self, s: MotionSystemSettings) -> None:
         for w in self._w.values():
@@ -149,6 +177,8 @@ class ZStackSettingsWidget(SettingsGroupBase):
         for w in self._w_int.values():
             w.blockSignals(True)
         for w in self._w_check.values():
+            w.blockSignals(True)
+        for w in self._w_line.values():
             w.blockSignals(True)
 
         zs = s.z_stack_scan
@@ -165,12 +195,16 @@ class ZStackSettingsWidget(SettingsGroupBase):
         self._w_check["crop"].setChecked(zs.crop)
         self._w_check["cull_enabled"].setChecked(zs.cull_enabled)
         self._w_check["slab_enabled"].setChecked(zs.slab_enabled)
+        self._w_line["image_name_template"].setText(zs.image_name_template)
+        self._w_line["stacked_name_template"].setText(zs.stacked_name_template)
 
         for w in self._w.values():
             w.blockSignals(False)
         for w in self._w_int.values():
             w.blockSignals(False)
         for w in self._w_check.values():
+            w.blockSignals(False)
+        for w in self._w_line.values():
             w.blockSignals(False)
 
     def snapshot(self) -> None:
@@ -188,6 +222,8 @@ class ZStackSettingsWidget(SettingsGroupBase):
             "zs.slab_size":            self._w_int["slab_size"].value(),
             "zs.slab_overlap":         self._w_int["slab_overlap"].value(),
             "zs.workers":              self._w_int["workers"].value(),
+            "zs.image_name_template":  self._w_line["image_name_template"].text(),
+            "zs.stacked_name_template": self._w_line["stacked_name_template"].text(),
         }
 
     def apply_float_to_live(self, key: str, value: float) -> None:
@@ -212,6 +248,12 @@ class ZStackSettingsWidget(SettingsGroupBase):
             return
         setattr(motion.settings.z_stack_scan, key, value != 0)
 
+    def apply_line_to_live(self, key: str, value: str) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        setattr(motion.settings.z_stack_scan, key, value)
+
     def has_changes(self) -> bool:
         zs_checks = {k: self._w_check[k].isChecked() for k in self._w_check}
         return any(
@@ -225,7 +267,14 @@ class ZStackSettingsWidget(SettingsGroupBase):
             self._saved.get("zs.approach_distance_nm") != round(self._w["approach_distance_nm"].value() * NM_PER_MM)
         ) or any(
             self._saved.get(f"zs.{k}") != v.value() for k, v in self._w_int.items()
+        ) or (
+            self._saved.get("zs.image_name_template") != self._w_line["image_name_template"].text()
+        ) or (
+            self._saved.get("zs.stacked_name_template") != self._w_line["stacked_name_template"].text()
         )
 
     def mark_field(self, key: str, stored_value: object) -> None:
         self.mark_label(key, self._saved.get(f"zs.{key}") != stored_value)
+
+    def mark_line_field(self, key: str) -> None:
+        self.mark_label(key, self._saved.get(f"zs.{key}") != self._w_line[key].text())

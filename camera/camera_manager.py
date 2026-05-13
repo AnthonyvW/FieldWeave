@@ -420,13 +420,17 @@ class CameraManager(QObject):
         if stride == 0:
             return None
 
+        required = stride * self._frame_height
+        if len(self._current_frame_buffer) < required:
+            return None
+
         arr = np.frombuffer(self._current_frame_buffer, dtype=np.uint8)
         bytes_per_pixel = 3
 
         if stride == self._frame_width * bytes_per_pixel:
-            return arr.reshape((self._frame_height, self._frame_width, bytes_per_pixel)).copy()
+            return arr[:required].reshape((self._frame_height, self._frame_width, bytes_per_pixel)).copy()
 
-        arr_2d = arr.reshape((self._frame_height, stride))
+        arr_2d = arr[:required].reshape((self._frame_height, stride))
         return arr_2d[:, :self._frame_width * bytes_per_pixel].reshape(
             (self._frame_height, self._frame_width, bytes_per_pixel)
         ).copy()

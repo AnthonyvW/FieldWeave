@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +27,7 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         self._w_int: dict[str, NoScrollSpinBox] = {}
         self._w_check: dict[str, QCheckBox] = {}
         self._w_combo: dict[str, QComboBox] = {}
+        self._w_line: dict[str, QLineEdit] = {}
         self._saved: dict[str, object] = {}
         self._build()
 
@@ -78,6 +80,18 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         fs_box = QGroupBox("Focus Stack")
         fs_form = QFormLayout(fs_box)
         fs_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        template_edit = QLineEdit()
+        template_edit.setPlaceholderText("{d}_{i}")
+        template_edit.setToolTip(
+            "Output filename template for focus-stacked images. Supported placeholders:\n"
+            "  {x} {y} {z}  stage position in nm (zero-padded)\n"
+            "  {i}          image index\n"
+            "  {d}         date (default: YYYYMMDD); custom via {d:%Y%m%d_%H%M%S}\n"
+            "Unknown placeholders are left intact."
+        )
+        self._w_line["image_name_template"] = template_edit
+        fs_form.addRow(self._register_label("image_name_template", QLabel("Output name:")), template_edit)
 
         for key, label_text, tooltip in (
             ("run_focus_stack", "Run after capture:", "Automatically run focus stacking after all frames are captured."),
@@ -141,7 +155,7 @@ class AreaScanSettingsWidget(SettingsGroupBase):
 
         vbox.addWidget(fs_box)
 
-    def connect_signals(self, on_float, on_int, on_check, on_combo) -> None:
+    def connect_signals(self, on_float, on_int, on_check, on_combo, on_line) -> None:
         for key, spin in self._w_float.items():
             spin.valueChanged.connect(lambda v, k=key: on_float(k, v))
         for key, spin in self._w_int.items():
@@ -150,6 +164,8 @@ class AreaScanSettingsWidget(SettingsGroupBase):
             check.stateChanged.connect(lambda v, k=key: on_check(k, v))
         for key, combo in self._w_combo.items():
             combo.currentIndexChanged.connect(lambda _, k=key: on_combo(k, self._w_combo[k].currentData()))
+        for key, edit in self._w_line.items():
+            edit.textChanged.connect(lambda v, k=key: on_line(k, v))
 
     def populate(self, s: MotionSystemSettings) -> None:
         for w in self._w_float.values():
@@ -159,6 +175,8 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         for w in self._w_check.values():
             w.blockSignals(True)
         for w in self._w_combo.values():
+            w.blockSignals(True)
+        for w in self._w_line.values():
             w.blockSignals(True)
 
         a = s.z_stack_area_scan
@@ -181,6 +199,8 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         if idx >= 0:
             self._w_combo["scan_strategy"].setCurrentIndex(idx)
 
+        self._w_line["image_name_template"].setText(a.image_name_template)
+
         for w in self._w_float.values():
             w.blockSignals(False)
         for w in self._w_int.values():
@@ -188,6 +208,8 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         for w in self._w_check.values():
             w.blockSignals(False)
         for w in self._w_combo.values():
+            w.blockSignals(False)
+        for w in self._w_line.values():
             w.blockSignals(False)
 
     def snapshot(self) -> None:
@@ -207,6 +229,7 @@ class AreaScanSettingsWidget(SettingsGroupBase):
             "a.cull_enabled":    self._w_check["cull_enabled"].isChecked(),
             "a.slab_enabled":    self._w_check["slab_enabled"].isChecked(),
             "a.scan_strategy":  self._w_combo["scan_strategy"].currentData(),
+            "a.image_name_template": self._w_line["image_name_template"].text(),
         }
 
     def apply_float_to_live(self, key: str, value: float) -> None:
@@ -235,6 +258,12 @@ class AreaScanSettingsWidget(SettingsGroupBase):
             return
         setattr(motion.settings.z_stack_area_scan, key, value)
 
+    def apply_line_to_live(self, key: str, value: str) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        setattr(motion.settings.z_stack_area_scan, key, value)
+
     def has_changes(self) -> bool:
         nm_keys = {"x_step_nm", "y_step_nm", "z_step_nm"}
         return (
@@ -255,6 +284,7 @@ class AreaScanSettingsWidget(SettingsGroupBase):
                 for k in ("run_focus_stack", "keep_size", "no_align", "crop", "cull_enabled", "slab_enabled")
             )
             or self._saved.get("a.scan_strategy") != self._w_combo["scan_strategy"].currentData()
+            or self._saved.get("a.image_name_template") != self._w_line["image_name_template"].text()
         )
 
     def mark_field(self, key: str, value: object) -> None:
@@ -262,3 +292,6 @@ class AreaScanSettingsWidget(SettingsGroupBase):
 
     def mark_combo_field(self, key: str) -> None:
         self.mark_label(key, self._saved.get(f"a.{key}") != self._w_combo[key].currentData())
+
+    def mark_line_field(self, key: str) -> None:
+        self.mark_label(key, self._saved.get(f"a.{key}") != self._w_line[key].text())

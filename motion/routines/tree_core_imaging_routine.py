@@ -245,6 +245,10 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         def _round_to_step(value_nm: int) -> int:
             return round(value_nm / step_size_nm) * step_size_nm
 
+        template = tca.image_name_template
+        ctx.image_name_formatter.set_template(template)
+        ctx.image_name_formatter.set_index(1)
+
         n_slots = len(self._slots)
 
         def _slot_pct(slot_iter: int, fraction: float) -> int:
@@ -256,11 +260,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             self._set_status(activity, pct, 100)
 
         def _capture_and_save(slot_folder: Path, pos: Position) -> None:
-            y_nm = _round_to_step(pos.y)
-            x_nm = _round_to_step(pos.x)
-            z_nm = _round_to_step(pos.z)
-            filename = f"Y{y_nm}_X{x_nm}_Z{z_nm}.{fformat}"
-            filepath = slot_folder / filename
+            filename = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
+            filepath = slot_folder / f"{filename}.{fformat}"
             info(f"[TreeCoreImaging] Capturing image: {filepath}")
             camera.capture_and_save_still(
                 filepath=filepath,
