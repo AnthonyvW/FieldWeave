@@ -4,6 +4,7 @@ import math
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -24,6 +25,7 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         self._w_float: dict[str, NoScrollDoubleSpinBox] = {}
         self._w_int: dict[str, NoScrollSpinBox] = {}
         self._w_check: dict[str, QCheckBox] = {}
+        self._w_combo: dict[str, QComboBox] = {}
         self._saved: dict[str, object] = {}
         self._build()
 
@@ -58,6 +60,18 @@ class AreaScanSettingsWidget(SettingsGroupBase):
             spin.setToolTip(tooltip)
             self._w_float[key] = spin
             scan_form.addRow(self._register_label(key, QLabel(label_text)), spin)
+
+        strategy_combo = QComboBox()
+        strategy_combo.addItem("Snake", userData="snake")
+        strategy_combo.addItem("Line", userData="line")
+        strategy_combo.setFixedWidth(130)
+        strategy_combo.setToolTip(
+            "XY traversal order. Snake reverses the X direction on every other row, "
+            "requiring only a single Y move between rows. "
+            "Line always returns to the X start before beginning the next row."
+        )
+        self._w_combo["scan_strategy"] = strategy_combo
+        scan_form.addRow(self._register_label("scan_strategy", QLabel("Strategy:")), strategy_combo)
 
         vbox.addWidget(scan_box)
 
@@ -127,13 +141,15 @@ class AreaScanSettingsWidget(SettingsGroupBase):
 
         vbox.addWidget(fs_box)
 
-    def connect_signals(self, on_float, on_int, on_check) -> None:
+    def connect_signals(self, on_float, on_int, on_check, on_combo) -> None:
         for key, spin in self._w_float.items():
             spin.valueChanged.connect(lambda v, k=key: on_float(k, v))
         for key, spin in self._w_int.items():
             spin.valueChanged.connect(lambda v, k=key: on_int(k, v))
         for key, check in self._w_check.items():
             check.stateChanged.connect(lambda v, k=key: on_check(k, v))
+        for key, combo in self._w_combo.items():
+            combo.currentIndexChanged.connect(lambda _, k=key: on_combo(k, self._w_combo[k].currentData()))
 
     def populate(self, s: MotionSystemSettings) -> None:
         for w in self._w_float.values():
@@ -141,6 +157,8 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         for w in self._w_int.values():
             w.blockSignals(True)
         for w in self._w_check.values():
+            w.blockSignals(True)
+        for w in self._w_combo.values():
             w.blockSignals(True)
 
         a = s.z_stack_area_scan
@@ -159,11 +177,17 @@ class AreaScanSettingsWidget(SettingsGroupBase):
         self._w_check["cull_enabled"].setChecked(a.cull_enabled)
         self._w_check["slab_enabled"].setChecked(a.slab_enabled)
 
+        idx = self._w_combo["scan_strategy"].findData(a.scan_strategy)
+        if idx >= 0:
+            self._w_combo["scan_strategy"].setCurrentIndex(idx)
+
         for w in self._w_float.values():
             w.blockSignals(False)
         for w in self._w_int.values():
             w.blockSignals(False)
         for w in self._w_check.values():
+            w.blockSignals(False)
+        for w in self._w_combo.values():
             w.blockSignals(False)
 
     def snapshot(self) -> None:
@@ -182,6 +206,7 @@ class AreaScanSettingsWidget(SettingsGroupBase):
             "a.crop":            self._w_check["crop"].isChecked(),
             "a.cull_enabled":    self._w_check["cull_enabled"].isChecked(),
             "a.slab_enabled":    self._w_check["slab_enabled"].isChecked(),
+            "a.scan_strategy":  self._w_combo["scan_strategy"].currentData(),
         }
 
     def apply_float_to_live(self, key: str, value: float) -> None:
@@ -204,6 +229,12 @@ class AreaScanSettingsWidget(SettingsGroupBase):
             return
         setattr(motion.settings.z_stack_area_scan, key, value != 0)
 
+    def apply_combo_to_live(self, key: str, value: str) -> None:
+        motion = get_app_context().motion
+        if motion is None or motion.settings is None:
+            return
+        setattr(motion.settings.z_stack_area_scan, key, value)
+
     def has_changes(self) -> bool:
         nm_keys = {"x_step_nm", "y_step_nm", "z_step_nm"}
         return (
@@ -223,7 +254,11 @@ class AreaScanSettingsWidget(SettingsGroupBase):
                 self._saved.get(f"a.{k}") != self._w_check[k].isChecked()
                 for k in ("run_focus_stack", "keep_size", "no_align", "crop", "cull_enabled", "slab_enabled")
             )
+            or self._saved.get("a.scan_strategy") != self._w_combo["scan_strategy"].currentData()
         )
 
     def mark_field(self, key: str, value: object) -> None:
         self.mark_label(key, self._saved.get(f"a.{key}") != value)
+
+    def mark_combo_field(self, key: str) -> None:
+        self.mark_label(key, self._saved.get(f"a.{key}") != self._w_combo[key].currentData())

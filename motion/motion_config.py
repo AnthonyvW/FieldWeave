@@ -141,6 +141,10 @@ class AreaScanSettings:
         Default near end of the Z range, in nanometres.
     z_end_nm:
         Default far end of the Z range, in nanometres.
+    scan_strategy:
+        XY traversal order. ``"snake"`` reverses the X direction on every other
+        row so only a single-axis Y move is needed between rows.  ``"line"``
+        always returns to the X start before beginning the next row.
 
     Focus stack parameters
     ----------------------
@@ -152,6 +156,7 @@ class AreaScanSettings:
     x_step_nm: int = 1_000_000
     y_step_nm: int = 1_000_000
     z_step_nm: int = 200_000
+    scan_strategy: str = "snake"
 
     # Focus stack — top-level toggles
     run_focus_stack: bool = True

@@ -77,9 +77,12 @@ def _write_scan_profile(
     total_elapsed_s: float,
     stack_profiles: list[dict],
     total_images_captured: int,
-    xy_settle_ms: int,
+    x_settle_ms: int,
+    y_settle_ms: int,
+    travel_settle_ms: int,
     z_settle_ms: int,
     capture_timeout_ms: int,
+    scan_strategy: str,
 ) -> bool:
     x_count = len(x_positions)
     y_count = len(y_positions)
@@ -106,7 +109,7 @@ def _write_scan_profile(
             f"    XY move:    {mean_xy_move_s:.3f} s  (settle: {mean_xy_settle_s:.3f} s)\n"
             f"    Z move:     {mean_z_move_s:.3f} s  (settle: {mean_z_settle_s:.3f} s)\n"
             f"    Capture:    {mean_capture_s:.3f} s\n"
-            f"  Configured settle times: XY={xy_settle_ms} ms  Z={z_settle_ms} ms\n"
+            f"  Configured settle times: X={x_settle_ms} ms  Y={y_settle_ms} ms  travel={travel_settle_ms} ms  Z={z_settle_ms} ms\n"
             f"  Capture timeout: {capture_timeout_ms} ms"
         )
     else:
@@ -135,6 +138,7 @@ def _write_scan_profile(
         "scan_parameters": {
             "output_folder": str(output_folder),
             "dpi": dpi,
+            "scan_strategy": scan_strategy,
             "x_start_nm": x_start_nm,
             "x_start_mm": x_start_nm / _NM_PER_MM,
             "x_step_nm": x_step_nm,
@@ -151,7 +155,9 @@ def _write_scan_profile(
             "y_positions_count": y_count,
             "z_slices_per_stack": z_positions_count,
             "total_stacks": total_stacks,
-            "xy_settle_ms": xy_settle_ms,
+            "x_settle_ms": x_settle_ms,
+            "y_settle_ms": y_settle_ms,
+            "travel_settle_ms": travel_settle_ms,
             "z_settle_ms": z_settle_ms,
             "capture_timeout_ms": capture_timeout_ms,
         },
@@ -282,6 +288,7 @@ class AreaScan(AutomationRoutine):
         z_step_nm: int,
         output_folder: str | Path,
         focus_stack_config: FocusStackRoutineConfig | None = None,
+        scan_strategy: str = "snake",
     ) -> None:
         super().__init__(motion)
 
@@ -292,6 +299,9 @@ class AreaScan(AutomationRoutine):
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
+
+        if scan_strategy not in ("snake", "line"):
+            raise ValueError(f"scan_strategy must be 'snake' or 'line', got {scan_strategy!r}")
 
         self._x_start_nm = x_start_nm
         self._x_end_nm = x_end_nm
@@ -304,6 +314,7 @@ class AreaScan(AutomationRoutine):
         self._z_step_nm = z_step_nm
         self._output_folder = Path(output_folder)
         self._focus_stack_config = focus_stack_config
+        self._scan_strategy = scan_strategy
 
     # ------------------------------------------------------------------
     # AutomationRoutine implementation
@@ -316,7 +327,9 @@ class AreaScan(AutomationRoutine):
 
         automation = ctx.motion.settings.automation
         capture_timeout_ms = automation.capture_timeout_ms
-        xy_settle_ms = automation.settle_travel_ms
+        x_settle_ms = automation.settle_x_ms
+        y_settle_ms = automation.settle_y_ms
+        travel_settle_ms = automation.settle_travel_ms
         z_settle_ms = automation.settle_z_ms
 
         self._set_activity("Initialising")
@@ -330,10 +343,14 @@ class AreaScan(AutomationRoutine):
         x_positions = _build_axis_positions(self._x_start_nm, self._x_end_nm, self._x_step_nm)
         y_positions = _build_axis_positions(self._y_start_nm, self._y_end_nm, self._y_step_nm)
 
-        # Build the flat list of XY grid points
-        xy_grid: list[tuple[int, int]] = [
-            (x, y) for y in y_positions for x in x_positions
-        ]
+        # Build the flat list of XY grid points.
+        # Snake strategy reverses the X order on every other row so that only a
+        # single Y move is needed between rows. Line strategy always traverses X
+        # in the same direction.
+        xy_grid: list[tuple[int, int]] = []
+        for row_idx, y in enumerate(y_positions):
+            row_x = x_positions if (self._scan_strategy == "line" or row_idx % 2 == 0) else list(reversed(x_positions))
+            xy_grid.extend((x, y) for x in row_x)
         total_stacks = len(xy_grid)
 
         # Build Z positions once; the direction may flip per-stack depending on
@@ -359,7 +376,8 @@ class AreaScan(AutomationRoutine):
             f"  step {self._z_step_nm} nm"
         )
         info(f"[AreaScan] Output folder: {self._output_folder}")
-        info(f"[AreaScan] Settle times: XY={xy_settle_ms} ms  Z={z_settle_ms} ms")
+        info(f"[AreaScan] Scan strategy: {self._scan_strategy}")
+        info(f"[AreaScan] Settle times: X={x_settle_ms} ms  Y={y_settle_ms} ms  travel={travel_settle_ms} ms  Z={z_settle_ms} ms")
         info(f"[AreaScan] Capture timeout: {capture_timeout_ms} ms")
         if self._focus_stack_config is not None:
             ext = self._focus_stack_config.output_extension
@@ -416,8 +434,16 @@ class AreaScan(AutomationRoutine):
                 break
 
             xy_settle_start = time.monotonic()
-            if xy_settle_ms > 0:
-                time.sleep(xy_settle_ms / 1000.0)
+            x_changed = target_x_nm != current_pos.x
+            y_changed = target_y_nm != current_pos.y
+            if x_changed and y_changed:
+                settle_ms = travel_settle_ms
+            elif x_changed:
+                settle_ms = x_settle_ms
+            else:
+                settle_ms = y_settle_ms
+            if settle_ms > 0:
+                time.sleep(settle_ms / 1000.0)
             xy_settle_s = time.monotonic() - xy_settle_start
 
             # ----------------------------------------------------------
@@ -654,9 +680,12 @@ class AreaScan(AutomationRoutine):
             total_elapsed_s=total_elapsed,
             stack_profiles=stack_profiles,
             total_images_captured=total_images_captured,
-            xy_settle_ms=xy_settle_ms,
+            x_settle_ms=x_settle_ms,
+            y_settle_ms=y_settle_ms,
+            travel_settle_ms=travel_settle_ms,
             z_settle_ms=z_settle_ms,
             capture_timeout_ms=capture_timeout_ms,
+            scan_strategy=self._scan_strategy,
         )
 
     # ------------------------------------------------------------------
