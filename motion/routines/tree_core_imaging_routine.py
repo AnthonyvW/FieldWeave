@@ -3,7 +3,21 @@ Tree core imaging automation routine.
 
 Iterates over a caller-supplied list of slots, centres on each slot's
 registration mark, moves to the slot's starting position, then performs
-two imaging sweeps:
+two imaging sweeps.
+
+Two imaging modes are supported, selected via ``focus_mode``:
+
+``"optimal_focus"`` (default)
+    At each position during the forward sweep a fine autofocus pass is run
+    before capturing.  The reverse sweep uses a descent autofocus.  Adaptive
+    re-focus logic handles gaps and large focus drops.
+
+``"focus_stack"``
+    At each position a Z-stack is captured between ``z_near_plane_nm`` and
+    ``z_far_plane_nm`` in ``z_step_nm`` increments, then the stack is queued
+    for focus stacking via :class:`QueuedFocusStackRoutine`.  No autofocus is
+    run during the sweeps; the stage travels to the nearest Z plane end first
+    to minimise total Z travel.
 
 Procedure (per slot)
 --------------------
@@ -14,12 +28,13 @@ Procedure (per slot)
     (main axis = tca.starting_offset_nm, Z = tca.starting_height_nm),
     mirroring _on_goto_start_pos_clicked in slot_calibration.py.
 4.  Wait 1 second.
-5.  Run autofocus descent to find the best Z at the starting position.
-6.  Capture an image at the starting position (no fine autofocus — descent
-    already leaves the stage at best focus).
+5.  Run autofocus descent to find the best Z at the starting position
+    (optimal_focus mode) or move to the near Z plane (focus_stack mode).
+6.  Capture an image (optimal_focus) or Z-stack (focus_stack) at the starting
+    position.
 7.  Forward sweep: step towards tca.mark_reference_nm in overlap-derived
     increments, stopping before any step that would overshoot the mark.
-    Fine autofocus is run at each position before capturing, with adaptive
+    In optimal_focus mode, fine autofocus is run at each position with adaptive
     re-focus logic:
     - If the focus score drops more than 0.35 in a single step the stage has
       likely crossed a gap or the sample end.  The routine continues moving at
@@ -30,14 +45,16 @@ Procedure (per slot)
       to re-acquire focus.  The new score becomes the reference.  If the score
       later recovers to the original descent score the original reference is
       restored.
+    In focus_stack mode a Z-stack is captured at each position.
 8.  Return to the slot's starting position at the focused Z.
 9.  Reverse sweep: step away from tca.mark_reference_nm in the same
     increments until background detection reports bare background.  The
     starting position is skipped (already imaged in step 6).  At each
     new position a background check is performed first; if background is
     detected the sweep stops without running autofocus or capturing.
-    Otherwise a descent autofocus is run from 1 mm above the current Z
-    and the image is captured.
+    In optimal_focus mode a descent autofocus is run from 1 mm above the
+    current Z before capturing.  In focus_stack mode a Z-stack is captured
+    directly.
 
 If ``image_calibration_scale`` is True, the calibration scale bar is imaged
 after all slots are complete.  The routine moves to the saved scale bar
@@ -87,6 +104,12 @@ from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
 from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
 from motion.routines.inspection_calibration_scale_routine import InspectionCalibrationScaleRoutine
 from machine_vision.algorithms.background_detection import is_background_frame
+from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from post_processing.post_processing_manager import PostProcessingManager
+    from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 
 _NM_PER_MM = 1_000_000
 _NM_PER_TICK = 10_000
@@ -185,6 +208,11 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         When True the calibration scale bar is imaged after all slots are
         processed.  Output is saved to ``<output_folder>/calibration_slide/``.
         Requires a saved scale bar position in the machine vision settings.
+    focus_stack_config:
+        When supplied and the imaging mode is ``"focus_stack"``, a
+        :class:`QueuedFocusStackRoutine` is queued for each XY position after
+        its Z-stack images have been saved.  Ignored in ``"optimal_focus"``
+        mode.
 
     Settings read at runtime
     ------------------------
@@ -193,6 +221,14 @@ class TreeCoreImagingRoutine(AutomationRoutine):
     ``ctx.settings.motion.automation.settle_travel_ms``:
         Settle time (ms) inserted after travel moves to the mark position
         and after returning to the slot's starting position.
+    ``ctx.settings.motion.tree_core_automation.focus_mode``:
+        ``"optimal_focus"`` or ``"focus_stack"``.
+    ``ctx.settings.motion.tree_core_automation.z_near_plane_nm``:
+        Near Z plane for focus stacking (used when focus_mode == "focus_stack").
+    ``ctx.settings.motion.tree_core_automation.z_far_plane_nm``:
+        Far Z plane for focus stacking (used when focus_mode == "focus_stack").
+    ``ctx.settings.motion.tree_core_automation.z_step_nm``:
+        Z step between slices (used when focus_mode == "focus_stack").
     """
 
     job_name = "Tree Core Imaging"
@@ -205,12 +241,14 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         slots: list[tuple[int, str]],
         image_overlap: float = 0.4,
         image_calibration_scale: bool = False,
+        focus_stack_config: FocusStackRoutineConfig | None = None,
     ) -> None:
         super().__init__(motion)
         self._output_folder = Path(output_folder)
         self._slots = list(slots)
         self._image_overlap = image_overlap
         self._image_calibration_scale = image_calibration_scale
+        self._focus_stack_config = focus_stack_config
 
     def steps(self) -> Generator[None, None, None]:
         ctx = get_app_context()
@@ -220,6 +258,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         automation = ctx.motion.settings.automation
         capture_timeout_s = automation.capture_timeout_ms / 1000.0
         settle_travel_s = automation.settle_travel_ms / 1000.0
+
+        focus_mode = tca.focus_mode
 
         if not tca.has_been_calibrated:
             error("[TreeCoreImaging] Slot calibration has not been completed — aborting")
@@ -237,6 +277,14 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         if camera is None:
             error("[TreeCoreImaging] No camera available — aborting")
             return
+
+        if focus_mode == "focus_stack":
+            if tca.z_near_plane_nm == tca.z_far_plane_nm:
+                error("[TreeCoreImaging] Focus stack mode requires distinct near and far Z planes — aborting")
+                return
+            if tca.z_step_nm <= 0:
+                error("[TreeCoreImaging] Focus stack mode requires a positive z_step_nm — aborting")
+                return
 
         fformat = camera.settings.fformat.value
         motion_settings = ctx.motion.settings
@@ -279,6 +327,40 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 wait=True,
             )
             info(f"[TreeCoreImaging] Saved {filepath}")
+
+        def _capture_z_stack(xy_pos: Position, stack_folder: Path) -> int:
+            """Capture a Z-stack at the given XY position into stack_folder.
+
+            Returns the number of images successfully captured.
+            """
+            z_near = tca.z_near_plane_nm
+            z_far = tca.z_far_plane_nm
+            z_step = tca.z_step_nm
+
+            current_z = self.motion.get_position().z
+            if abs(current_z - z_near) <= abs(current_z - z_far):
+                z_first, z_last = z_near, z_far
+            else:
+                z_first, z_last = z_far, z_near
+
+            z_direction = 1 if z_last > z_first else -1
+            z_positions: list[int] = []
+            z = z_first
+            while (z_direction == 1 and z <= z_last) or (z_direction == -1 and z >= z_last):
+                z_positions.append(z)
+                z += z_direction * z_step
+
+            captured = 0
+            for z_nm in z_positions:
+                if self._check_stop():
+                    break
+                target = Position(x=xy_pos.x, y=xy_pos.y, z=z_nm)
+                self.motion.move_to_position(target, wait=True)
+                actual_pos = self.motion.get_position()
+                _capture_and_save(stack_folder, actual_pos)
+                captured += 1
+
+            return captured
 
         axis = tca.axis.lower()
         if axis not in ("x", "y"):
@@ -340,6 +422,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             yield
             if self._check_stop():
                 return
+
+        post_processing = ctx.post_processing
 
         for slot_iter, (slot_index, slot_name) in enumerate(self._slots):
             if self._check_stop():
@@ -428,17 +512,29 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 time.sleep(settle_travel_s)
 
             # ------------------------------------------------------------------
-            # Autofocus descent to find best Z at the starting position
+            # Initial focus / Z setup
             # ------------------------------------------------------------------
 
-            _advance(f"Autofocus descent — {slot_label}", slot_iter, 3, 6)
-            info(f"[TreeCoreImaging] Running autofocus descent for {slot_label}")
-            focused_z_nm, descent_score = _run_autofocus_descent(self.motion, self)
-            descent_z_nm = focused_z_nm
-            info(
-                f"[TreeCoreImaging] Autofocus settled at Z={focused_z_nm / _NM_PER_MM:.3f} mm"
-                f"  score={descent_score:.3f} for {slot_label}"
-            )
+            if focus_mode == "focus_stack":
+                _advance(f"Setting up focus stack — {slot_label}", slot_iter, 3, 6)
+                info(
+                    f"[TreeCoreImaging] Focus stack mode: near={tca.z_near_plane_nm / _NM_PER_MM:.3f} mm"
+                    f"  far={tca.z_far_plane_nm / _NM_PER_MM:.3f} mm"
+                    f"  step={tca.z_step_nm / _NM_PER_MM:.4f} mm"
+                )
+                # Use the near plane as the travel Z between XY positions.
+                focused_z_nm = tca.z_near_plane_nm
+                descent_z_nm = focused_z_nm
+                descent_score = 0.0
+            else:
+                _advance(f"Autofocus descent — {slot_label}", slot_iter, 3, 6)
+                info(f"[TreeCoreImaging] Running autofocus descent for {slot_label}")
+                focused_z_nm, descent_score = _run_autofocus_descent(self.motion, self)
+                descent_z_nm = focused_z_nm
+                info(
+                    f"[TreeCoreImaging] Autofocus settled at Z={focused_z_nm / _NM_PER_MM:.3f} mm"
+                    f"  score={descent_score:.3f} for {slot_label}"
+                )
 
             if self._check_stop():
                 return
@@ -495,11 +591,18 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 return 0 <= main_nm <= axis_max_nm
 
             # ------------------------------------------------------------------
-            # Capture at starting position (descent already focused here)
+            # Capture at starting position
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Capturing starting position image for {slot_label}")
-            _capture_and_save(slot_folder, start_pos)
+            if focus_mode == "focus_stack":
+                stack_folder = slot_folder / f"stack_{main_start_nm}"
+                stack_folder.mkdir(parents=True, exist_ok=True)
+                captured = _capture_z_stack(start_pos, stack_folder)
+                if captured > 0 and self._focus_stack_config is not None:
+                    self._enqueue_focus_stack(post_processing, stack_folder, slot_folder)
+            else:
+                _capture_and_save(slot_folder, start_pos)
 
             yield
             if self._check_stop():
@@ -516,13 +619,10 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             current_main_nm = main_start_nm
             forward_span_nm = max(1, abs(tca.mark_reference_nm - main_start_nm))
 
-            # Adaptive focus state.
-            # ref_score is the score we compare against for the >0.2 drop check.
-            # It starts as the descent score and updates after re-acquisition.
-            # If it later recovers back to descent_score, we revert.
-            ref_score = descent_score
-            prev_score = descent_score
-            in_gap = False  # True while crossing a detected gap/end
+            if focus_mode == "optimal_focus":
+                ref_score = descent_score
+                prev_score = descent_score
+                in_gap = False
 
             while True:
                 if self._check_stop():
@@ -530,7 +630,6 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
                 next_main_nm = current_main_nm + direction * step_nm
 
-                # Don't overshoot the mark.
                 if direction > 0 and next_main_nm > tca.mark_reference_nm:
                     break
                 if direction < 0 and next_main_nm < tca.mark_reference_nm:
@@ -559,83 +658,85 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     100,
                 )
 
-                info(f"[TreeCoreImaging] Forward sweep — fine autofocus at {current_main_nm} nm")
-                new_z_nm, new_score = _run_autofocus_fine(self.motion, self)
-
-                if self._check_stop():
-                    return
-
-                step_drop = prev_score - new_score
-
-                if in_gap:
-                    # We were in a gap — check whether focus has recovered.
-                    if new_score >= ref_score - _FOCUS_DROP_REACQUIRE:
-                        info(
-                            f"[TreeCoreImaging] Focus recovered (score={new_score:.3f}) — "
-                            f"exiting gap mode"
-                        )
-                        in_gap = False
-                        focused_z_nm = new_z_nm
-                        prev_score = new_score
-                    else:
-                        info(
-                            f"[TreeCoreImaging] Still in gap (score={new_score:.3f}) — "
-                            f"continuing at Z={focused_z_nm / _NM_PER_MM:.3f} mm"
-                        )
-                        # Don't update focused_z_nm or prev_score while in a gap.
-
-                elif step_drop >= _FOCUS_DROP_GAP:
-                    info(
-                        f"[TreeCoreImaging] Large focus drop {step_drop:.3f} ≥ {_FOCUS_DROP_GAP}"
-                        f" (score {prev_score:.3f}→{new_score:.3f}) — gap/end detected,"
-                        f" continuing at current Z"
-                    )
-                    in_gap = True
-                    # Don't update focused_z_nm; keep moving at current height.
-
-                elif new_score < ref_score - _FOCUS_DROP_REACQUIRE:
-                    info(
-                        f"[TreeCoreImaging] Focus drop {ref_score - new_score:.3f} ≥ {_FOCUS_DROP_REACQUIRE}"
-                        f" below reference {ref_score:.3f} — re-acquiring via descent"
-                    )
-                    reacq_z_nm, reacq_score = _run_autofocus_descent_from_above(
-                        self.motion, self, focused_z_nm, descent_z_nm
-                    )
+                if focus_mode == "focus_stack":
+                    actual_xy = self.motion.get_position()
+                    stack_folder = slot_folder / f"stack_{current_main_nm}"
+                    stack_folder.mkdir(parents=True, exist_ok=True)
+                    captured = _capture_z_stack(actual_xy, stack_folder)
+                    if captured > 0 and self._focus_stack_config is not None:
+                        self._enqueue_focus_stack(post_processing, stack_folder, slot_folder)
+                else:
+                    info(f"[TreeCoreImaging] Forward sweep — fine autofocus at {current_main_nm} nm")
+                    new_z_nm, new_score = _run_autofocus_fine(self.motion, self)
 
                     if self._check_stop():
                         return
 
-                    focused_z_nm = reacq_z_nm
-                    ref_score = reacq_score
-                    prev_score = reacq_score
-                    info(
-                        f"[TreeCoreImaging] Re-acquisition: Z={focused_z_nm / _NM_PER_MM:.3f} mm"
-                        f"  score={ref_score:.3f}"
-                    )
+                    step_drop = prev_score - new_score
 
-                    # If the re-acquired score is back at the original descent level,
-                    # revert the reference so subsequent drops are measured from there.
-                    if reacq_score >= descent_score - _FOCUS_DROP_REACQUIRE:
-                        ref_score = descent_score
+                    if in_gap:
+                        if new_score >= ref_score - _FOCUS_DROP_REACQUIRE:
+                            info(
+                                f"[TreeCoreImaging] Focus recovered (score={new_score:.3f}) — "
+                                f"exiting gap mode"
+                            )
+                            in_gap = False
+                            focused_z_nm = new_z_nm
+                            prev_score = new_score
+                        else:
+                            info(
+                                f"[TreeCoreImaging] Still in gap (score={new_score:.3f}) — "
+                                f"continuing at Z={focused_z_nm / _NM_PER_MM:.3f} mm"
+                            )
+
+                    elif step_drop >= _FOCUS_DROP_GAP:
                         info(
-                            f"[TreeCoreImaging] Score restored to descent level — "
-                            f"reverting reference to descent_score={descent_score:.3f}"
+                            f"[TreeCoreImaging] Large focus drop {step_drop:.3f} ≥ {_FOCUS_DROP_GAP}"
+                            f" (score {prev_score:.3f}→{new_score:.3f}) — gap/end detected,"
+                            f" continuing at current Z"
+                        )
+                        in_gap = True
+
+                    elif new_score < ref_score - _FOCUS_DROP_REACQUIRE:
+                        info(
+                            f"[TreeCoreImaging] Focus drop {ref_score - new_score:.3f} ≥ {_FOCUS_DROP_REACQUIRE}"
+                            f" below reference {ref_score:.3f} — re-acquiring via descent"
+                        )
+                        reacq_z_nm, reacq_score = _run_autofocus_descent_from_above(
+                            self.motion, self, focused_z_nm, descent_z_nm
                         )
 
-                else:
-                    focused_z_nm = new_z_nm
-                    prev_score = new_score
+                        if self._check_stop():
+                            return
 
-                    # Score has drifted back up to descent level — revert reference.
-                    if ref_score < descent_score and new_score >= descent_score - _FOCUS_DROP_REACQUIRE:
-                        ref_score = descent_score
+                        focused_z_nm = reacq_z_nm
+                        ref_score = reacq_score
+                        prev_score = reacq_score
                         info(
-                            f"[TreeCoreImaging] Score organically recovered to descent level"
-                            f" — reverting reference to descent_score={descent_score:.3f}"
+                            f"[TreeCoreImaging] Re-acquisition: Z={focused_z_nm / _NM_PER_MM:.3f} mm"
+                            f"  score={ref_score:.3f}"
                         )
 
-                actual_pos = self.motion.get_position()
-                _capture_and_save(slot_folder, actual_pos)
+                        if reacq_score >= descent_score - _FOCUS_DROP_REACQUIRE:
+                            ref_score = descent_score
+                            info(
+                                f"[TreeCoreImaging] Score restored to descent level — "
+                                f"reverting reference to descent_score={descent_score:.3f}"
+                            )
+
+                    else:
+                        focused_z_nm = new_z_nm
+                        prev_score = new_score
+
+                        if ref_score < descent_score and new_score >= descent_score - _FOCUS_DROP_REACQUIRE:
+                            ref_score = descent_score
+                            info(
+                                f"[TreeCoreImaging] Score organically recovered to descent level"
+                                f" — reverting reference to descent_score={descent_score:.3f}"
+                            )
+
+                    actual_pos = self.motion.get_position()
+                    _capture_and_save(slot_folder, actual_pos)
 
                 yield
                 if self._check_stop():
@@ -648,10 +749,11 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Returning to start position for {slot_label}")
+            return_z = focused_z_nm if focus_mode == "optimal_focus" else tca.z_near_plane_nm
             if axis == "y":
-                focused_start_pos = Position(x=start_pos.x, y=main_start_nm, z=focused_z_nm)
+                focused_start_pos = Position(x=start_pos.x, y=main_start_nm, z=return_z)
             else:
-                focused_start_pos = Position(x=main_start_nm, y=start_pos.y, z=focused_z_nm)
+                focused_start_pos = Position(x=main_start_nm, y=start_pos.y, z=return_z)
             self.motion.move_to_position(focused_start_pos, wait=True)
             if settle_travel_s > 0:
                 time.sleep(settle_travel_s)
@@ -665,8 +767,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             # The starting position itself is skipped — it was already imaged
             # at the top of the forward sweep.
             # Phase 5-6 (last 1/6 of slot share).
-            # Each new position runs a descent autofocus starting 1 mm above
-            # the current Z rather than a fine autofocus.
+            # In optimal_focus mode a descent autofocus is run from 1 mm above
+            # the current Z.  In focus_stack mode a Z-stack is captured directly.
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Beginning reverse sweep for {slot_label}")
@@ -688,10 +790,11 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     )
                     break
 
+                travel_z = focused_z_nm if focus_mode == "optimal_focus" else tca.z_near_plane_nm
                 if axis == "y":
-                    target = Position(x=perp_pos, y=next_main_nm, z=focused_z_nm)
+                    target = Position(x=perp_pos, y=next_main_nm, z=travel_z)
                 else:
-                    target = Position(x=next_main_nm, y=perp_pos, z=focused_z_nm)
+                    target = Position(x=next_main_nm, y=perp_pos, z=travel_z)
 
                 self.motion.move_to_position(target, wait=True)
                 current_main_nm = next_main_nm
@@ -720,7 +823,6 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     info(f"[TreeCoreImaging] Background detected — reverse sweep complete for {slot_label}")
                     break
 
-                info(f"[TreeCoreImaging] Reverse sweep — descent autofocus at {current_main_nm} nm")
                 sweep_frac = abs(current_main_nm - main_start_nm) / reverse_span_nm
                 slot_frac = 5 / 6 + sweep_frac * (1 / 6)
                 self._set_status(
@@ -729,24 +831,67 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     100,
                 )
 
-                # Lift 1 mm above current Z and run a descent autofocus.
-                lift_z = focused_z_nm + int(_REACQUIRE_LIFT_MM * _NM_PER_MM)
-                pos = self.motion.get_position()
-                self.motion.move_to_position(Position(x=pos.x, y=pos.y, z=lift_z), wait=True)
-                focused_z_nm, _ = _run_autofocus_descent(self.motion, self)
+                if focus_mode == "focus_stack":
+                    actual_xy = self.motion.get_position()
+                    stack_folder = slot_folder / f"stack_{current_main_nm}"
+                    stack_folder.mkdir(parents=True, exist_ok=True)
+                    captured = _capture_z_stack(actual_xy, stack_folder)
+                    if captured > 0 and self._focus_stack_config is not None:
+                        self._enqueue_focus_stack(post_processing, stack_folder, slot_folder)
+                else:
+                    info(f"[TreeCoreImaging] Reverse sweep — descent autofocus at {current_main_nm} nm")
+                    lift_z = focused_z_nm + int(_REACQUIRE_LIFT_MM * _NM_PER_MM)
+                    pos = self.motion.get_position()
+                    self.motion.move_to_position(Position(x=pos.x, y=pos.y, z=lift_z), wait=True)
+                    focused_z_nm, _ = _run_autofocus_descent(self.motion, self)
 
-                if self._check_stop():
-                    return
+                    if self._check_stop():
+                        return
 
-                actual_pos = self.motion.get_position()
-                info(f"[TreeCoreImaging] Reverse sweep position: {current_main_nm} nm  Z={focused_z_nm / _NM_PER_MM:.3f} mm")
-                _capture_and_save(slot_folder, actual_pos)
+                    actual_pos = self.motion.get_position()
+                    info(f"[TreeCoreImaging] Reverse sweep position: {current_main_nm} nm  Z={focused_z_nm / _NM_PER_MM:.3f} mm")
+                    _capture_and_save(slot_folder, actual_pos)
 
                 yield
 
             yield
 
+        if focus_mode == "focus_stack" and self._focus_stack_config is not None and post_processing is not None:
+            self._set_status("Waiting for focus stacking to finish", 99, 100)
+            post_processing.wait_for_queue(check_stop=self._check_stop)
+
         self._set_status("Complete", 100, 100)
         info("[TreeCoreImaging] Imaging run complete")
 
         yield
+
+    # ------------------------------------------------------------------
+    # Focus stack helper
+    # ------------------------------------------------------------------
+
+    def _enqueue_focus_stack(
+        self,
+        post_processing: PostProcessingManager | None,
+        stack_folder: Path,
+        output_folder: Path,
+    ) -> None:
+        if post_processing is None:
+            error("[TreeCoreImaging] No post_processing manager available — skipping focus stack")
+            return
+
+        cfg = self._focus_stack_config
+        ext = cfg.output_extension
+        stacked_folder = output_folder / "focus_stacked"
+        stacked_folder.mkdir(parents=True, exist_ok=True)
+        ctx = get_app_context()
+        image_name = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
+        output_path = str(stacked_folder / f"{image_name}.{ext}")
+
+        routine = QueuedFocusStackRoutine(
+            settings=post_processing.settings,
+            input_folder=str(stack_folder),
+            output_path=output_path,
+            config=cfg,
+        )
+        post_processing.queue_routine(routine)
+        info(f"[TreeCoreImaging] Queued focus stack — output: {output_path}")

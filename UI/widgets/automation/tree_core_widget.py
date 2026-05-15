@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -27,6 +29,7 @@ from common.app_context import get_app_context
 from common.logger import error, warning
 from motion.models import Position
 from motion.routines.tree_core_imaging_routine import TreeCoreImagingRoutine
+from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 
 _NM_PER_MM = 1_000_000
@@ -384,6 +387,8 @@ class TreeCoreWidget(QWidget):
         super().__init__(parent)
         self._routine: TreeCoreImagingRoutine | None = None
         self._sample_rows: list[_SampleRowWidget] = []
+        self._z_near_mm: float | None = None
+        self._z_far_mm: float | None = None
 
         # Widgets assigned during _setup_ui and sub-builders
         self._slot_cal_warning: QLabel
@@ -394,6 +399,31 @@ class TreeCoreWidget(QWidget):
         self._poll_timer: QTimer
         self._slot_spin: QSpinBox
         self._start_btn: QPushButton
+
+        # Focus mode group
+        self._optimal_focus_radio: QRadioButton
+        self._focus_stack_radio: QRadioButton
+        self._focus_stack_settings: QWidget
+        self._z_near_label: QLabel
+        self._z_far_label: QLabel
+        self._z_near_mm: float | None
+        self._z_far_mm: float | None
+        self._z_step_spin: QDoubleSpinBox
+
+        # Focus stack algorithm settings
+        self._fs_keep_size_check: QCheckBox
+        self._fs_advanced_toggle: QToolButton
+        self._fs_advanced_widget: QWidget
+        self._fs_no_align_check: QCheckBox
+        self._fs_crop_check: QCheckBox
+        self._fs_sharpness_spin: QDoubleSpinBox
+        self._fs_cull_check: QCheckBox
+        self._fs_cull_threshold_spin: QDoubleSpinBox
+        self._fs_slab_check: QCheckBox
+        self._fs_slab_params_widget: QWidget
+        self._fs_slab_size_spin: QSpinBox
+        self._fs_slab_overlap_spin: QSpinBox
+        self._fs_workers_spin: QSpinBox
 
         # Calibration scale group
         self._inspect_cal_warning: QLabel
@@ -442,6 +472,7 @@ class TreeCoreWidget(QWidget):
         self._output_folder = OutputFolderWidget()
         main_layout.addWidget(self._output_folder)
 
+        main_layout.addWidget(self._build_focus_mode_group())
         main_layout.addWidget(self._build_calibration_scale_group())
 
         main_layout.addWidget(self._build_sample_list_group())
@@ -505,6 +536,327 @@ class TreeCoreWidget(QWidget):
         layout.addWidget(self._start_btn)
 
         return group
+
+    def _build_focus_mode_group(self) -> QGroupBox:
+        group = QGroupBox("Imaging Mode")
+
+        outer_layout = QVBoxLayout(group)
+        outer_layout.setContentsMargins(10, 8, 10, 8)
+        outer_layout.setSpacing(6)
+
+        self._optimal_focus_radio = QRadioButton("Optimal Focus")
+        self._optimal_focus_radio.setChecked(True)
+        self._optimal_focus_radio.setToolTip(
+            "Run autofocus at each position during the sweep. "
+            "Captures a single image per position at the best focus found."
+        )
+        outer_layout.addWidget(self._optimal_focus_radio)
+
+        self._focus_stack_radio = QRadioButton("Focus Stacking")
+        self._focus_stack_radio.setToolTip(
+            "Capture a Z-stack at each position and combine them into a "
+            "fully-focused composite image."
+        )
+        self._focus_stack_radio.toggled.connect(self._on_focus_mode_changed)
+        outer_layout.addWidget(self._focus_stack_radio)
+
+        self._focus_stack_settings = QWidget()
+        fs_layout = QVBoxLayout(self._focus_stack_settings)
+        fs_layout.setContentsMargins(16, 4, 0, 0)
+        fs_layout.setSpacing(6)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setObjectName("SampleDivider")
+        fs_layout.addWidget(divider)
+
+        # Z planes and step
+        near_row = QWidget()
+        near_layout = QHBoxLayout(near_row)
+        near_layout.setContentsMargins(0, 0, 0, 0)
+        near_layout.setSpacing(8)
+        set_near_btn = QPushButton("Set Near Plane")
+        set_near_btn.setFixedHeight(28)
+        set_near_btn.clicked.connect(self._on_set_z_near_clicked)
+        near_layout.addWidget(set_near_btn)
+        self._z_near_label = QLabel("Not set")
+        self._z_near_label.setObjectName("AreaScanAxisReadout")
+        self._z_near_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        near_layout.addWidget(self._z_near_label, 1)
+        fs_layout.addWidget(near_row)
+
+        far_row = QWidget()
+        far_layout = QHBoxLayout(far_row)
+        far_layout.setContentsMargins(0, 0, 0, 0)
+        far_layout.setSpacing(8)
+        set_far_btn = QPushButton("Set Far Plane")
+        set_far_btn.setFixedHeight(28)
+        set_far_btn.clicked.connect(self._on_set_z_far_clicked)
+        far_layout.addWidget(set_far_btn)
+        self._z_far_label = QLabel("Not set")
+        self._z_far_label.setObjectName("AreaScanAxisReadout")
+        self._z_far_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        far_layout.addWidget(self._z_far_label, 1)
+        fs_layout.addWidget(far_row)
+
+        step_row = QWidget()
+        step_layout = QHBoxLayout(step_row)
+        step_layout.setContentsMargins(0, 0, 0, 0)
+        step_layout.setSpacing(8)
+        step_layout.addWidget(QLabel("Z Step (mm):"))
+        self._z_step_spin = QDoubleSpinBox()
+        self._z_step_spin.setFixedHeight(28)
+        self._z_step_spin.setDecimals(4)
+        self._z_step_spin.setSuffix(" mm")
+        printer_step_mm = self._get_printer_step_mm()
+        self._z_step_spin.setMinimum(printer_step_mm)
+        self._z_step_spin.setMaximum(10.0)
+        self._z_step_spin.setSingleStep(printer_step_mm)
+        self._z_step_spin.setValue(0.2)
+        self._z_step_spin.valueChanged.connect(self._on_z_step_changed)
+        step_layout.addWidget(self._z_step_spin)
+        step_layout.addStretch(1)
+        fs_layout.addWidget(step_row)
+
+        # Stacking settings divider
+        stack_divider = QFrame()
+        stack_divider.setFrameShape(QFrame.Shape.HLine)
+        stack_divider.setObjectName("SampleDivider")
+        fs_layout.addWidget(stack_divider)
+
+        # Advanced toggle
+        self._fs_advanced_toggle = QToolButton()
+        self._fs_advanced_toggle.setText("Advanced settings")
+        self._fs_advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._fs_advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._fs_advanced_toggle.setCheckable(True)
+        self._fs_advanced_toggle.setChecked(False)
+        self._fs_advanced_toggle.setObjectName("AdvancedSettingsToggle")
+        self._fs_advanced_toggle.toggled.connect(self._on_fs_advanced_toggled)
+        fs_layout.addWidget(self._fs_advanced_toggle)
+
+        self._fs_advanced_widget = QWidget()
+        self._fs_advanced_widget.setVisible(False)
+        advanced_layout = QVBoxLayout(self._fs_advanced_widget)
+        advanced_layout.setContentsMargins(12, 0, 0, 0)
+        advanced_layout.setSpacing(6)
+
+        # Keep original size (first item in advanced)
+        self._fs_keep_size_check = QCheckBox("Keep original size")
+        self._fs_keep_size_check.setChecked(True)
+        self._fs_keep_size_check.setToolTip(
+            "Keep the output image the same size as the input images. "
+            "Warps are applied in-place rather than expanding the canvas."
+        )
+        self._fs_keep_size_check.stateChanged.connect(
+            lambda v: self._write_tca_check("keep_size", v)
+        )
+        advanced_layout.addWidget(self._fs_keep_size_check)
+
+        self._fs_no_align_check = QCheckBox("Skip alignment")
+        self._fs_no_align_check.setChecked(False)
+        self._fs_no_align_check.setToolTip("Skip ECC alignment. Use when images are already registered.")
+        self._fs_no_align_check.stateChanged.connect(
+            lambda v: self._write_tca_check("no_align", v)
+        )
+        advanced_layout.addWidget(self._fs_no_align_check)
+
+        self._fs_crop_check = QCheckBox("Crop to intersection")
+        self._fs_crop_check.setChecked(False)
+        self._fs_crop_check.setToolTip(
+            "Crop the output to the largest rectangle covered by every frame after "
+            "alignment. Removes border regions but shrinks the output image."
+        )
+        self._fs_crop_check.stateChanged.connect(
+            lambda v: self._write_tca_check("crop", v)
+        )
+        advanced_layout.addWidget(self._fs_crop_check)
+
+        sharpness_row = QWidget()
+        sharpness_layout = QHBoxLayout(sharpness_row)
+        sharpness_layout.setContentsMargins(0, 0, 0, 0)
+        sharpness_layout.setSpacing(8)
+        sharpness_layout.addWidget(QLabel("Sharpness:"))
+        self._fs_sharpness_spin = QDoubleSpinBox()
+        self._fs_sharpness_spin.setFixedHeight(28)
+        self._fs_sharpness_spin.setDecimals(1)
+        self._fs_sharpness_spin.setMinimum(1.0)
+        self._fs_sharpness_spin.setMaximum(8.0)
+        self._fs_sharpness_spin.setSingleStep(0.5)
+        self._fs_sharpness_spin.setValue(4.0)
+        self._fs_sharpness_spin.setToolTip(
+            "Weight sharpness exponent. Higher values favour the sharpest pixel "
+            "more aggressively (approaching hard selection). Lower values blend "
+            "more smoothly. Useful range: 1.0 (soft) to 8.0 (near-hard)."
+        )
+        self._fs_sharpness_spin.valueChanged.connect(
+            lambda v: self._write_tca_float("sharpness", v)
+        )
+        sharpness_layout.addWidget(self._fs_sharpness_spin)
+        sharpness_layout.addStretch(1)
+        advanced_layout.addWidget(sharpness_row)
+
+        cull_row = QWidget()
+        cull_layout = QHBoxLayout(cull_row)
+        cull_layout.setContentsMargins(0, 0, 0, 0)
+        cull_layout.setSpacing(8)
+        self._fs_cull_check = QCheckBox("Cull out-of-focus frames")
+        self._fs_cull_check.setChecked(False)
+        self._fs_cull_check.setToolTip(
+            "Discard frames whose focus score falls below the threshold fraction "
+            "of the sharpest frame. At least the two sharpest frames are always kept."
+        )
+        self._fs_cull_check.stateChanged.connect(
+            lambda v: self._write_tca_check("cull_enabled", v)
+        )
+        cull_layout.addWidget(self._fs_cull_check)
+        self._fs_cull_threshold_spin = QDoubleSpinBox()
+        self._fs_cull_threshold_spin.setFixedHeight(28)
+        self._fs_cull_threshold_spin.setDecimals(2)
+        self._fs_cull_threshold_spin.setMinimum(0.0)
+        self._fs_cull_threshold_spin.setMaximum(1.0)
+        self._fs_cull_threshold_spin.setSingleStep(0.05)
+        self._fs_cull_threshold_spin.setValue(0.6)
+        self._fs_cull_threshold_spin.setToolTip(
+            "Frames scoring below this fraction of the peak score are culled. "
+            "Raise toward 1.0 to cull more aggressively."
+        )
+        self._fs_cull_threshold_spin.valueChanged.connect(
+            lambda v: self._write_tca_float("cull_threshold", v)
+        )
+        cull_layout.addWidget(self._fs_cull_threshold_spin)
+        cull_layout.addStretch(1)
+        advanced_layout.addWidget(cull_row)
+
+        self._fs_slab_check = QCheckBox("Enable slabbing")
+        self._fs_slab_check.setChecked(False)
+        self._fs_slab_check.setToolTip(
+            "Split the image set into overlapping sub-stacks, stack each "
+            "independently, then fuse the results. Reduces peak RAM for large stacks."
+        )
+        self._fs_slab_check.stateChanged.connect(self._on_fs_slab_enabled_changed)
+        self._fs_slab_check.stateChanged.connect(
+            lambda v: self._write_tca_check("slab_enabled", v)
+        )
+        advanced_layout.addWidget(self._fs_slab_check)
+
+        self._fs_slab_params_widget = QWidget()
+        self._fs_slab_params_widget.setVisible(False)
+        slab_params_layout = QHBoxLayout(self._fs_slab_params_widget)
+        slab_params_layout.setContentsMargins(20, 0, 0, 0)
+        slab_params_layout.setSpacing(8)
+        slab_params_layout.addWidget(QLabel("Size:"))
+        self._fs_slab_size_spin = QSpinBox()
+        self._fs_slab_size_spin.setFixedHeight(28)
+        self._fs_slab_size_spin.setMinimum(2)
+        self._fs_slab_size_spin.setMaximum(500)
+        self._fs_slab_size_spin.setValue(20)
+        self._fs_slab_size_spin.setToolTip("Number of images per sub-stack.")
+        self._fs_slab_size_spin.valueChanged.connect(
+            lambda v: self._write_tca_int("slab_size", v)
+        )
+        slab_params_layout.addWidget(self._fs_slab_size_spin)
+        slab_params_layout.addWidget(QLabel("Overlap:"))
+        self._fs_slab_overlap_spin = QSpinBox()
+        self._fs_slab_overlap_spin.setFixedHeight(28)
+        self._fs_slab_overlap_spin.setMinimum(0)
+        self._fs_slab_overlap_spin.setMaximum(499)
+        self._fs_slab_overlap_spin.setValue(5)
+        self._fs_slab_overlap_spin.setToolTip(
+            "Number of images shared between adjacent slabs. Must be less than size."
+        )
+        self._fs_slab_overlap_spin.valueChanged.connect(
+            lambda v: self._write_tca_int("slab_overlap", v)
+        )
+        slab_params_layout.addWidget(self._fs_slab_overlap_spin)
+        slab_params_layout.addStretch(1)
+        advanced_layout.addWidget(self._fs_slab_params_widget)
+
+        workers_row = QWidget()
+        workers_layout = QHBoxLayout(workers_row)
+        workers_layout.setContentsMargins(0, 0, 0, 0)
+        workers_layout.setSpacing(8)
+        workers_layout.addWidget(QLabel("Workers:"))
+        self._fs_workers_spin = QSpinBox()
+        self._fs_workers_spin.setFixedHeight(28)
+        self._fs_workers_spin.setMinimum(0)
+        self._fs_workers_spin.setMaximum(16)
+        self._fs_workers_spin.setValue(3)
+        self._fs_workers_spin.setToolTip(
+            "Number of parallel workers for stacking. 0 = no limit (use all available). "
+            "Higher values are faster but increase peak RAM by ~100 MiB per additional worker."
+        )
+        self._fs_workers_spin.valueChanged.connect(
+            lambda v: self._write_tca_int("workers", v)
+        )
+        workers_layout.addWidget(self._fs_workers_spin)
+        workers_layout.addStretch(1)
+        advanced_layout.addWidget(workers_row)
+
+        fs_layout.addWidget(self._fs_advanced_widget)
+
+        self._focus_stack_settings.setVisible(False)
+        outer_layout.addWidget(self._focus_stack_settings)
+
+        self._populate_focus_mode_from_settings()
+
+        return group
+
+    def _get_printer_step_mm(self) -> float:
+        ctx = get_app_context()
+        motion = ctx.motion if ctx is not None else None
+        if motion is not None and motion.settings is not None:
+            return motion.settings.step_size / _NM_PER_MM
+        return 0.04
+
+    def _populate_focus_mode_from_settings(self) -> None:
+        tca = _get_tca()
+        if tca is None:
+            return
+        if tca.focus_mode == "focus_stack":
+            self._focus_stack_radio.setChecked(True)
+        else:
+            self._optimal_focus_radio.setChecked(True)
+        if tca.z_step_nm > 0:
+            self._z_step_spin.blockSignals(True)
+            self._z_step_spin.setValue(tca.z_step_nm / _NM_PER_MM)
+            self._z_step_spin.blockSignals(False)
+        if tca.z_near_plane_nm != 0:
+            self._z_near_mm = tca.z_near_plane_nm / _NM_PER_MM
+            self._z_near_label.setText(f"Z = {self._z_near_mm:.4f} mm")
+        if tca.z_far_plane_nm != 0:
+            self._z_far_mm = tca.z_far_plane_nm / _NM_PER_MM
+            self._z_far_label.setText(f"Z = {self._z_far_mm:.4f} mm")
+
+        for widget, value in (
+            (self._fs_keep_size_check,  tca.keep_size),
+            (self._fs_no_align_check,   tca.no_align),
+            (self._fs_crop_check,       tca.crop),
+            (self._fs_cull_check,       tca.cull_enabled),
+            (self._fs_slab_check,       tca.slab_enabled),
+        ):
+            widget.blockSignals(True)
+            widget.setChecked(value)
+            widget.blockSignals(False)
+
+        for spin, value in (
+            (self._fs_sharpness_spin,      tca.sharpness),
+            (self._fs_cull_threshold_spin, tca.cull_threshold),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
+        for spin, value in (
+            (self._fs_slab_size_spin,    tca.slab_size),
+            (self._fs_slab_overlap_spin, tca.slab_overlap),
+            (self._fs_workers_spin,      tca.workers),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
+        self._on_fs_slab_enabled_changed()
 
     def _build_calibration_scale_group(self) -> QGroupBox:
         group = QGroupBox("Calibration Scale")
@@ -715,6 +1067,79 @@ class TreeCoreWidget(QWidget):
     # Slots
     # ------------------------------------------------------------------
 
+    def _write_tca_check(self, key: str, value: int) -> None:
+        tca = _get_tca()
+        if tca is not None:
+            setattr(tca, key, value != 0)
+
+    def _write_tca_float(self, key: str, value: float) -> None:
+        tca = _get_tca()
+        if tca is not None:
+            setattr(tca, key, value)
+
+    def _write_tca_int(self, key: str, value: int) -> None:
+        tca = _get_tca()
+        if tca is not None:
+            setattr(tca, key, value)
+
+    def _on_fs_advanced_toggled(self, checked: bool) -> None:
+        self._fs_advanced_widget.setVisible(checked)
+        self._fs_advanced_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+        )
+
+    def _on_fs_slab_enabled_changed(self) -> None:
+        self._fs_slab_params_widget.setVisible(self._fs_slab_check.isChecked())
+
+    def _build_focus_stack_config(self) -> FocusStackRoutineConfig:
+        slab: tuple[int, int] | None = None
+        if self._fs_slab_check.isChecked():
+            slab = (self._fs_slab_size_spin.value(), self._fs_slab_overlap_spin.value())
+        return FocusStackRoutineConfig(
+            no_align=self._fs_no_align_check.isChecked(),
+            keep_size=self._fs_keep_size_check.isChecked(),
+            crop=self._fs_crop_check.isChecked(),
+            sharpness=self._fs_sharpness_spin.value(),
+            cull=self._fs_cull_threshold_spin.value() if self._fs_cull_check.isChecked() else None,
+            workers=self._fs_workers_spin.value(),
+            slab=slab,
+        )
+
+    def _on_focus_mode_changed(self, stack_checked: bool) -> None:
+        self._focus_stack_settings.setVisible(stack_checked)
+        tca = _get_tca()
+        if tca is not None:
+            tca.focus_mode = "focus_stack" if stack_checked else "optimal_focus"
+
+    def _on_set_z_near_clicked(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.motion is None or not ctx.motion.is_ready():
+            warning("TreeCoreWidget: motion controller not ready for Z near plane")
+            return
+        z_mm = ctx.motion.get_position().z / _NM_PER_MM
+        self._z_near_mm = z_mm
+        self._z_near_label.setText(f"Z = {z_mm:.4f} mm")
+        tca = _get_tca()
+        if tca is not None:
+            tca.z_near_plane_nm = round(z_mm * _NM_PER_MM)
+
+    def _on_set_z_far_clicked(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.motion is None or not ctx.motion.is_ready():
+            warning("TreeCoreWidget: motion controller not ready for Z far plane")
+            return
+        z_mm = ctx.motion.get_position().z / _NM_PER_MM
+        self._z_far_mm = z_mm
+        self._z_far_label.setText(f"Z = {z_mm:.4f} mm")
+        tca = _get_tca()
+        if tca is not None:
+            tca.z_far_plane_nm = round(z_mm * _NM_PER_MM)
+
+    def _on_z_step_changed(self, value_mm: float) -> None:
+        tca = _get_tca()
+        if tca is not None:
+            tca.z_step_nm = round(value_mm * _NM_PER_MM)
+
     def _on_cal_scale_toggled(self, checked: bool) -> None:
         self._cal_scale_details.setVisible(checked)
         if checked:
@@ -793,6 +1218,18 @@ class TreeCoreWidget(QWidget):
             ctx.toast.error("Slot calibration has not been completed.")
             return
 
+        focus_stack_config: FocusStackRoutineConfig | None = None
+        if self._focus_stack_radio.isChecked():
+            if self._z_near_mm is None or self._z_far_mm is None:
+                warning("TreeCoreWidget: near and far Z planes must be set for focus stacking")
+                ctx.toast.warning("Set the near and far Z planes before starting.")
+                return
+            if self._z_near_mm == self._z_far_mm:
+                warning("TreeCoreWidget: near and far Z planes must be different")
+                ctx.toast.warning("Near and far Z planes must be different.")
+                return
+            focus_stack_config = self._build_focus_stack_config()
+
         output_path = self._output_folder.resolved_path
         if not OutputFolderWidget.confirm_if_exists(output_path, self):
             return
@@ -819,6 +1256,7 @@ class TreeCoreWidget(QWidget):
             output_folder=output_path,
             slots=slots,
             image_calibration_scale=image_calibration_scale,
+            focus_stack_config=focus_stack_config,
         )
         ctx.motion.start_routine(self._routine)
         self._enter_running_state()
@@ -929,6 +1367,9 @@ class TreeCoreWidget(QWidget):
         self._output_folder.setEnabled(False)
         self._cal_scale_toggle.setEnabled(False)
         self._cal_goto_btn.setEnabled(False)
+        self._optimal_focus_radio.setEnabled(False)
+        self._focus_stack_radio.setEnabled(False)
+        self._focus_stack_settings.setEnabled(False)
         self._pause_resume_btn.setText("Pause")
         self._controls_widget.setVisible(True)
         self._poll_timer.start()
@@ -940,6 +1381,9 @@ class TreeCoreWidget(QWidget):
         self._start_btn.setEnabled(self._is_slot_calibrated())
         self._output_folder.setEnabled(True)
         self._cal_scale_toggle.setEnabled(True)
+        self._optimal_focus_radio.setEnabled(True)
+        self._focus_stack_radio.setEnabled(True)
+        self._focus_stack_settings.setEnabled(True)
         self._controls_widget.setVisible(False)
         self._routine = None
         for row in self._sample_rows:

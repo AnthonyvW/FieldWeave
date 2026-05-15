@@ -76,6 +76,27 @@ class TreeCoreAutomationSettings:
 
     image_name_template: str = "Y{y}_X{x}_Z{z}"
 
+    # Imaging mode: "optimal_focus" uses autofocus at each position;
+    # "focus_stack" captures a Z-stack and stacks the result.
+    focus_mode: str = "optimal_focus"
+
+    # Focus stack parameters (used when focus_mode == "focus_stack").
+    z_step_nm: int = 200_000
+    z_near_plane_nm: int = 0
+    z_far_plane_nm: int = 0
+
+    # Focus stack — advanced
+    keep_size: bool = True
+    no_align: bool = False
+    crop: bool = False
+    sharpness: float = 4.0
+    cull_enabled: bool = True
+    cull_threshold: float = 0.6
+    slab_enabled: bool = False
+    slab_size: int = 20
+    slab_overlap: int = 5
+    workers: int = 3
+
     # Ordered list of slot definitions (defaults to 20 empty slots).
     slots: list[TreeCoreSlot] = field(default_factory=lambda: [TreeCoreSlot() for _ in range(20)])
 
@@ -320,6 +341,20 @@ class MotionSystemSettings:
             raise ValueError("z_stack_scan.slab_overlap must be less than slab_size")
         if not (1 <= self.z_stack_scan.workers <= 16):
             raise ValueError("z_stack_scan.workers must be between 1 and 16")
+        if self.tree_core_automation.focus_mode not in ("optimal_focus", "focus_stack"):
+            raise ValueError("tree_core_automation.focus_mode must be 'optimal_focus' or 'focus_stack'")
+        if self.tree_core_automation.z_step_nm <= 0:
+            raise ValueError("tree_core_automation.z_step_nm must be positive")
+        if not (1.0 <= self.tree_core_automation.sharpness <= 8.0):
+            raise ValueError("tree_core_automation.sharpness must be between 1.0 and 8.0")
+        if not (0.0 <= self.tree_core_automation.cull_threshold <= 1.0):
+            raise ValueError("tree_core_automation.cull_threshold must be between 0.0 and 1.0")
+        if self.tree_core_automation.slab_size < 2:
+            raise ValueError("tree_core_automation.slab_size must be at least 2")
+        if self.tree_core_automation.slab_overlap >= self.tree_core_automation.slab_size:
+            raise ValueError("tree_core_automation.slab_overlap must be less than slab_size")
+        if not (1 <= self.tree_core_automation.workers <= 16):
+            raise ValueError("tree_core_automation.workers must be between 1 and 16")
         if self.z_stack_area_scan.x_step_nm <= 0:
             raise ValueError("z_stack_area_scan.x_step_nm must be positive")
         if self.z_stack_area_scan.y_step_nm <= 0:

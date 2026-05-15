@@ -112,7 +112,15 @@ class AutomationSettingsWidget(QWidget):
         self._group_boxes["Area Scan"] = self._zstack_area
 
         self._tree_core = TreeCoreSettingsWidget()
-        self._tree_core.connect_signals(self._on_run_changed, self._on_slot_changed, self._on_tree_core_line)
+        self._tree_core.connect_signals(
+            self._on_run_changed,
+            self._on_slot_changed,
+            self._on_tree_core_line,
+            self._on_tree_core_fs_float,
+            self._on_tree_core_fs_int,
+            self._on_tree_core_fs_check,
+            self._on_tree_core_fs_combo,
+        )
         self._tree_core.set_slot_mutation_callback(self._recheck_unsaved)
         cl.addWidget(self._tree_core)
         self._group_boxes["Tree Core"] = self._tree_core
@@ -217,6 +225,28 @@ class AutomationSettingsWidget(QWidget):
     def _on_tree_core_line(self, key: str, value: str) -> None:
         self._tree_core.apply_line_to_live(key, value)
         self._tree_core.mark_line_field(key)
+        self._recheck_unsaved()
+
+    def _on_tree_core_fs_float(self, key: str, value: float) -> None:
+        nm_keys = {"z_near_plane_nm", "z_far_plane_nm", "z_step_nm"}
+        stored = round(value * NM_PER_MM) if key in nm_keys else value
+        self._tree_core.apply_fs_float_to_live(key, value)
+        self._tree_core.mark_fs_field(key, stored)
+        self._recheck_unsaved()
+
+    def _on_tree_core_fs_int(self, key: str, value: int) -> None:
+        self._tree_core.apply_fs_int_to_live(key, value)
+        self._tree_core.mark_fs_field(key, value)
+        self._recheck_unsaved()
+
+    def _on_tree_core_fs_check(self, key: str, value: int) -> None:
+        self._tree_core.apply_fs_check_to_live(key, value)
+        self._tree_core.mark_fs_field(key, value != 0)
+        self._recheck_unsaved()
+
+    def _on_tree_core_fs_combo(self, key: str, value: str) -> None:
+        self._tree_core.apply_fs_combo_to_live(key, value)
+        self._tree_core.mark_fs_combo_field(key)
         self._recheck_unsaved()
 
     def _recheck_unsaved(self) -> None:
