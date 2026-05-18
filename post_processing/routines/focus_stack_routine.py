@@ -102,8 +102,6 @@ class FocusStackRoutineConfig:
         Laplacian pyramid levels. 0 = auto-detect from image size.
     sharpness:
         Weight sharpness exponent. Higher = harder winner-take-all selection.
-    dark_threshold:
-        Luminance threshold below which chroma is suppressed toward neutral.
     workers:
         Number of parallel workers for stacking.
     slab:
@@ -131,7 +129,6 @@ class FocusStackRoutineConfig:
     min_shift: float = 5.0
     levels: int = 0
     sharpness: float = 4.0
-    dark_threshold: float = 30.0
     workers: int = 3
     slab: tuple[int, int] | None = None
     recursive_slab: bool = False
@@ -243,7 +240,6 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
             min_shift=cfg.min_shift,
             levels=cfg.levels,
             sharpness=cfg.sharpness,
-            dark_threshold=cfg.dark_threshold,
             workers=cfg.workers,
             slab=cfg.slab,
             only_slab=False,
