@@ -254,7 +254,7 @@ class ZStackScan(AutomationRoutine):
 
             actual_pos = self.motion.get_position()
             image_name = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
-            filepath = self._output_folder / f"{image_name}.jpg"
+            filepath = self._output_folder / f"{image_name}.{get_app_context().camera.settings.fformat.value}"
 
             info(f"[ZStackScan] Capturing image: {filepath}")
 
@@ -382,7 +382,7 @@ class ZStackScan(AutomationRoutine):
 
 
         cfg = self._focus_stack_config
-        ext = cfg.output_extension
+        ext = get_app_context().camera.settings.fformat.value
         ctx = get_app_context()
         name = ctx.motion.settings.z_stack_scan.stacked_name_template
         output_path = str(self._output_folder / f"{name}.{ext}")

@@ -880,12 +880,11 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             return
 
         cfg = self._focus_stack_config
-        ext = cfg.output_extension
         stacked_folder = output_folder / "focus_stacked"
         stacked_folder.mkdir(parents=True, exist_ok=True)
         ctx = get_app_context()
         image_name = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
-        output_path = str(stacked_folder / f"{image_name}.{ext}")
+        output_path = str(stacked_folder / f"{image_name}.{get_app_context().camera.settings.fformat.value}")
 
         routine = QueuedFocusStackRoutine(
             settings=post_processing.settings,

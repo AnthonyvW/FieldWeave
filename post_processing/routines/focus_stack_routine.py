@@ -54,7 +54,10 @@ from focusweave import FocusStackConfig, RunResult, run
 from focusweave.streaming_stack import StreamingFocusStacker
 
 from common.fieldweaveConfig import FieldWeaveSettings
+from common.app_context import get_app_context
+from common.setting_types import FileFormat
 from post_processing.routines.post_processing_routine import PostProcessingRoutine
+from common.logger import info, warning, error
 
 
 # ---------------------------------------------------------------------------
@@ -262,10 +265,9 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        suffix = out_path.suffix.lower().lstrip(".")
-        fmt = "jpeg" if suffix in ("jpg", "jpeg") else suffix.upper()
-        save_kwargs: dict = {"quality": cfg.jpeg_quality} if fmt == "jpeg" else {}
-        Image.fromarray(result.image).save(out_path, fmt, **save_kwargs)
+        fmt = get_app_context().camera.settings.fformat.value
+        save_kwargs: dict = {"quality": cfg.jpeg_quality} if fmt == FileFormat.JPEG or fmt == FileFormat.JPG else {}
+        Image.fromarray(result.image).save(out_path, format=fmt, **save_kwargs)
 
         h, w = result.image.shape[:2]
 
@@ -470,10 +472,9 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        suffix = out_path.suffix.lower().lstrip(".")
-        fmt = "jpeg" if suffix in ("jpg", "jpeg") else suffix.upper()
-        save_kwargs: dict = {"quality": cfg.jpeg_quality} if fmt == "jpeg" else {}
-        Image.fromarray(result.image).save(out_path, fmt, **save_kwargs)
+        fmt = get_app_context().camera.settings.fformat.value
+        save_kwargs: dict = {"quality": cfg.jpeg_quality} if fmt == FileFormat.JPEG or fmt == FileFormat.JPG else {}
+        Image.fromarray(result.image).save(out_path, format=fmt, **save_kwargs)
 
         h, w = result.image.shape[:2]
 
