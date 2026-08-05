@@ -356,6 +356,16 @@ class _SampleRowWidget(QWidget):
         """Programmatically set the sample name (used for multi-line paste)."""
         self._name_edit.setText(text)
 
+    def focus_name_edit(self) -> None:
+        """Focus the name field and select its contents."""
+        self._name_edit.setFocus()
+        self._name_edit.selectAll()
+
+    def connect_return_to_next(self, next_row: "_SampleRowWidget | None") -> None:
+        """Wire Enter in the name field to move focus to the next row's name field."""
+        if next_row is not None:
+            self._name_edit.returnPressed.connect(next_row.focus_name_edit)
+
     def set_interactive(self, enabled: bool) -> None:
         """Enable or disable all interactive elements in this row."""
         self._toggle.setEnabled(enabled)
@@ -975,6 +985,10 @@ class TreeCoreWidget(QWidget):
                 sep.setFrameShape(QFrame.Shape.HLine)
                 sep.setObjectName("SampleSeparator")
                 self._sample_list_layout.addWidget(sep)
+
+        for i, row in enumerate(self._sample_rows):
+            next_row = self._sample_rows[i + 1] if i + 1 < len(self._sample_rows) else None
+            row.connect_return_to_next(next_row)
 
         self._slot_spin.setMaximum(num_slots)
 
