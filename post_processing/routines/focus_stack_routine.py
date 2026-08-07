@@ -60,6 +60,21 @@ from post_processing.routines.post_processing_routine import PostProcessingRouti
 from common.logger import info, warning, error
 
 
+def _save_stack_result(image: np.ndarray, out_path: Path, fmt: FileFormat, jpeg_quality: int) -> bool:
+    # Let Pillow infer the format from out_path's extension instead of passing
+    # a format string ourselves -- avoids the FileFormat/Pillow name mismatch
+    # entirely (e.g. "jpg" vs the "JPEG" identifier Pillow expects).
+    save_kwargs: dict = {"quality": jpeg_quality} if fmt in (FileFormat.JPEG, FileFormat.JPG) else {}
+
+    try:
+        Image.fromarray(image).save(out_path, **save_kwargs)
+    except OSError as exc:
+        error(f"Failed to save stacked image to {out_path}: {exc}")
+        return False
+
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Shared configuration dataclass
 # ---------------------------------------------------------------------------
@@ -265,9 +280,10 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fmt = get_app_context().camera.settings.fformat.value
-        save_kwargs: dict = {"quality": cfg.jpeg_quality} if fmt == FileFormat.JPEG or fmt == FileFormat.JPG else {}
-        Image.fromarray(result.image).save(out_path, format=fmt, **save_kwargs)
+        fmt = get_app_context().camera.settings.fformat
+        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality):
+            self._set_result(success=False)
+            return
 
         h, w = result.image.shape[:2]
 
@@ -472,9 +488,10 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fmt = get_app_context().camera.settings.fformat.value
-        save_kwargs: dict = {"quality": cfg.jpeg_quality} if fmt == FileFormat.JPEG or fmt == FileFormat.JPG else {}
-        Image.fromarray(result.image).save(out_path, format=fmt, **save_kwargs)
+        fmt = get_app_context().camera.settings.fformat
+        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality):
+            self._set_result(success=False)
+            return
 
         h, w = result.image.shape[:2]
 
