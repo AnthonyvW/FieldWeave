@@ -1,16 +1,9 @@
 ./input/
 output/
-misc/stats/output/
-misc/stats/samples/
-misc/input/
-misc/qttest/
-misc/test_img/
 config/cameras/
+*.safetensors
 
-misc/test_img/
 misc/input/
-misc/stats/samples/
-misc/stats/output/
 
 *.pth
 .vs/
