@@ -3,107 +3,102 @@
 [![Windows](https://custom-icon-badges.demolab.com/badge/Windows-0078D6?logo=windows11&logoColor=white)](#)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](#)
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/AnthonyvW)
+[![Ko-fi](https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/procerand)
 
+FieldWeave is an open-source, gigapixel imaging system built on a modified off-the-shelf 3D printer. It automates sample capture, focus stacking, and DPI calibration, producing high resolution images across a wide range of fields. See it in action on the [FieldWeave website](https://www.fieldweave.com), which includes an interactive gallery for browsing full-resolution scans.
 
-FieldWeave is an opensource, gigapixel imaging system designed to scan tree core samples with high precision. Built upon a modified off the shelf 3D printer, it automates the imaging of multiple samples, producing high resolution images suitable for dendrochronology and related research. 
-
-
-
+**If FieldWeave is useful to you, please consider supporting its development. See [Support FieldWeave](#support-fieldweave) below.**
 
 ## Features
 
 * **Automated Scanning**: Utilizes 3D printer mechanics for precise, repeatable sample movement.
-* **High-Resolution Imaging**: Captures gigapixel images of tree core samples.
-* **Image Processing**: Includes tools for stitching captured images.
-* **Modular Design**: Easily adaptable to different sample types and imaging requirements.
+* **High-Resolution Imaging**: Captures gigapixel images across dendrochronology, geology, life sciences, museum, manufacturing, and forensic use cases.
+* **Focus Stacking**: Built-in stacking via FocusWeave.
+* **Automated DPI Calibration**: Calibrates scan resolution automatically against a compatible micrometer slide.
+* **Modular Design**: Easily adaptable to different sample types, lenses, and imaging requirements.
 
 
 ## Examples
 
+### [Browse the full gallery at fieldweave.com/gallery](https://www.fieldweave.com/gallery)
+
+
 <table>
   <tr>
-    <td width="37%">
-      <a href="media/DeveloperForge.jpg">
-        <img src="media/DeveloperForge.jpg" width="100%" alt="A picture of FieldWeave using a heavily moddeed Ender 3 3D printer.">
+    <td width="33%">
+      <a href="https://www.fieldweave.com/gallery/image/cross-section-1">
+        <img src="assets/media/examples/cross-section-1.webp" width="100%" alt="Cross section of a black spruce tree core, click to view full resolution on the FieldWeave gallery">
       </a>
     </td>
-    <td width="50%">
-      <a href="media/GUI.png">
-        <img src="media/GUI.png" width="100%" alt="GUI">
+    <td width="33%">
+      <a href="https://www.fieldweave.com/gallery/image/western-hemlock-core">
+        <img src="assets/media/examples/western-hemlock-core.webp" width="100%" alt="Western hemlock tree core, click to view full resolution on the FieldWeave gallery">
+      </a>
+    </td>
+    <td width="33%">
+      <a href="https://www.fieldweave.com/gallery/image/basswood-stem-cs">
+        <img src="assets/media/examples/basswood-stem-cs.webp" width="100%" alt="Cross section of a basswood stem, click to view full resolution on the FieldWeave gallery">
       </a>
     </td>
   </tr>
 	<tr>
-    <th>FieldWeave on a heavily modded Ender 3 3D printer.</th>
-    <th>FieldWeave's GUI</th>
+    <th>Black spruce tree core cross section</th>
+    <th>Western hemlock tree core</th>
+    <th>Basswood stem cross section</th>
 	</tr>
   <tr>
-    <td width="37%">
-      <a href="media/WoodExample.jpg">
-        <img src="media/WoodExample.jpg" width="100%" alt="An example of a single image taken using FieldWeave">
+    <td width="33%">
+      <a href="https://www.fieldweave.com/gallery/image/rusty-7-16-drill-bit">
+        <img src="assets/media/examples/rusty-7-16-drill-bit.webp" width="100%" alt="A rusty 7/16 drill bit, click to view full resolution on the FieldWeave gallery">
       </a>
     </td>
-    <td width="50%">
-      <a href="media/M2HeatsetInsert.jpeg">
-        <img src="media/M2HeatsetInsert.jpeg" width="100%" alt="A M2 Heatset insert tip imaged using FieldWeave and then stitched using an external program.">
+    <td width="33%">
+      <a href="https://www.fieldweave.com/gallery/image/us-dime-back">
+        <img src="assets/media/examples/us-dime-back.webp" width="100%" alt="Back of a US dime, click to view full resolution on the FieldWeave gallery">
+      </a>
+    </td>
+    <td width="33%">
+      <a href="https://www.fieldweave.com/gallery/image/9mm-1">
+        <img src="assets/media/examples/9mm-1.webp" width="100%" alt="Spent 9mm bullet casing, click to view full resolution on the FieldWeave gallery">
       </a>
     </td>
   </tr>
 	<tr>
-    <th>The end of a tree core sample taken using a MU1000 HS camera</th>
-    <th>A M2 Heatset Insert Tip taken using a MU500 Camera. Typical FieldWeave outputs for tree core samples are significantly larger. Click to view full resolution</th>
+    <th>A rusty 7/16 drill bit</th>
+    <th>Back of a US dime</th>
+    <th>Spent 9mm bullet casing</th>
 	</tr>
 </table>
 
-## FieldWeave for Reflected Light Microscopy
-> **Reflected Light Microscopy (alternate lens configuration)**  
-   These images were captured using FieldWeave with a different lens and illumination setup. The same capture pipeline was used, with image stacking and stitching currently performed using external tools.  
-   FieldWeave does not officially support high magnification imaging yet, but it is being worked on. See github issue [#45](https://github.com/AnthonyvW/FORGE/issues/45)
-<table>
-  <tr>
-    <td width="50%">
-      <a href="media/penny.jpg">
-        <img src="media/penny.jpg" width="100%" alt="Stitched image of the date '2021' on a penny">
-      </a>
-    </td>
-    <td width="20%">
-      <a href="media/Dust.png">
-        <img src="media/Dust.jpg" width="100%" alt="a small section of a tree core taken using an experimental lens setup">
-      </a>
-    </td>
-    <td width="14%">
-      <a href="media/2Penny.jpg">
-        <img src="media/2Penny.jpg" width="100%" alt="Stitched images of the left half of a 2 on a penny taken with a 10x magnification lens">
-      </a>
-    </td>
-  </tr>
-	<tr>
-		<th>A series of stitched images covering the date on a penny taken at 5x magnification</th>
-    <th>Stiched section of a tree core taken using an experimental lens setup</th>
-    <th>The 2 on a penny at 10x magnification</th>
-	</tr>
-</table>
-<table>
-  <tr>
-    <td width="50%">
-      <a href="media/TreeCoreMagnified.jpg">
-        <img src="media/TreeCoreMagnified.jpg" width="100%" alt="Picture of the full width of a tree core sample taken using FieldWeave and a 10x microscope objective.">
-      </a>
-    </td>
-  </tr>
-	<tr>
-		<th>A series of stitched images covering the full width of a tree core sample taken at 10x magnification. Click to view full resolution.</th>
-	</tr>
-</table>
+## Support FieldWeave
+
+FieldWeave is free and GPL-licensed, and stays that way through community support. If it's useful to your lab, workflow, or project, consider chipping in. Funding goes directly toward hardware, testing, and development time.
+
+* **GitHub Sponsors**: [github.com/sponsors/AnthonyvW](https://github.com/sponsors/AnthonyvW)
+* **Ko-fi**: [ko-fi.com/procerand](https://ko-fi.com/procerand)
+
+Have a specific feature your lab needs? [Commission a feature](https://www.fieldweave.com/contact) it gets built for you and becomes available to everyone.
 
 ## Getting Started
 
 ### Prerequisites
 
-* **Hardware**: A [compatible 3D printer](#3d-printer-compatibility) modified for imaging purposes, a light, and a [compatible camera](#confirmed-compatible-cameras). The 3D printer may also require an additional cable to connect your PC to the printer.
+* **Hardware**: A [compatible 3D printer](#3d-printer-compatibility) modified for imaging purposes, a light, and a [compatible camera](#confirmed-compatible-cameras). The 3D printer may also require an additional cable to connect your PC to the printer. Note that this modification will likely void the warranty if you disconnect any cables, so test the 3D printer to ensure the motion system works before doing this.
   * For the light I recommend using the [Amscope 144 led ring light](https://www.amazon.com/dp/B00JZJO7YC). If you use this, make sure to 3D print the light pads to prevent scratching the lens.
   * If using an Amscope camera, I highly recommend using this ([100x Microscope Lens for Raspberry Pi](https://www.amazon.com/100X-Microscope-Lens-Magnification-Compatible/dp/B0C1CC79TX)) industrial lens as it provides minimal distortion around the edges.
   * Not required, but is recommended is a thumbscrew for holding the camera in place. I use thumbscrews from [this 16 piece set](https://www.amazon.com/dp/B0DQPM68KJ) from Amazon.
+  * For the automated DPI calibration to work, a compatible micrometer calibration slide is required. It is confirmed to work with the [Amscope MR400 Stage Micrometer Calibration Slide with 4-Scales](https://amscope.com/products/mr400). I am interested in adding support for additional scales.
+  * If you do not have access to a 3D printer capable of printing in at least 2 colors and wish to image tree core samples, then a roll of red electrical tape to denote the center of slots.
+* **High Magnification Imaging Hardware**
+  * Note: This is a more expensive version that achieves far greater magnification than most other setups, however it requires additional modifications. Instead of using the 100x lens listed above, use the following parts instead for the optics.
+  * To successfully do this version with 10x objective it will require upgrading the leadscrews to [350mm Tr8X2 2mm lead](https://www.amazon.com/dp/B095M8SQQV?th=1) with the appropriate [anti backlash nuts](https://www.amazon.com/dp/B085GGMCVG?th=1)
+  * For the tube lense I recommend using the [Raynox DCR 250 Lens](https://www.amazon.com/Raynox-DCR-250-Super-Macro-Snap/dp/B000A1SZ2Y/) as there are 3D models present that use that.
+  * [M49 to RMS Adapter](https://www.amazon.com/dp/B0FHN8FQ7T) for connecting the microscope objective to the tube lens
+  * [C Mount to M42 Adapter](https://www.amazon.com/dp/B0812QPHWN) for connecting the camera to the high magnification setup.
+  * For the high magnification setup, 1/4" thumbscrews are required to hold the camera in place. I use thumbscrews from [this 16 piece set](https://www.amazon.com/dp/B0DQPM68KJ) from Amazon.
+  * For the microscope objective I recommend either the [Amscope 4x Metallurgic objective](https://amscope.com/products/pl4x-inf-v300) or the [Amscope 10x metallurgic objective](https://amscope.com/products/pl10x-inf-v300) both objectives are infinity plan achromatic objectives. Using anything above 10x is not recommended due to the depth of field becoming shallower than what the machine is capable of moving.
+  * Due to the depth of the holes on the 3D printed parts I recommend getting a set of longer than usual metric hex keys so you can screw everything in properly. I use [this set.](https://www.amazon.com/dp/B0000CBJDV) 
 * **Software**: Python 3.x and Git
 * **Operating System**: Linux, Windows 10, or Windows 11
 
@@ -116,15 +111,23 @@ Before using FieldWeave, your 3D printer must be modified to mount the camera sy
 Before modifying your printer, you must 3D print the following components:
 
 - **Camera Mount** - Ender 3 Camera Mount.3mf – Attaches to the existing print head carriage  
+- **High Resolution Camera Mount Files** - high_magnification folder
+  * These are only for if you are going with the high magnification version of FieldWeave.
+  * MicroscopeObjectiveMount.3mf - Attaches to print head carriage
+  * Light Baffles.3mf - Insert to objective mount after screwing the mount in.
+  * Amscope Mount.3mf - Attaches to the print head carriage to hold camera in place
+  * RaynoxRingLightBuffer.3mf - Use if using the amscope ring light with it. You will need 3 of these. These help hold the ring light still.
 - **Z-Axis Spacer** - ZAxisSpacer.3mf – Raises the Z-axis endstop to accommodate the new camera height  
     - If you are proficient with working with electronics, I suggest replacing the Z axis end stop wires with longer ones instead and mounting the Z axis limit switch higher.
-- **Sample Clips** – Secure core samples to the print bed without manual alignment
-    - SampleHolderEnd.3mf
-    - SampleHolderFooter.3mf
-    - SampleHolderMiddle.3mf - You will need 3 of these. I suggest printing one of these off and ensuring that it properly fits before printing off the rest of the parts.
 
 > files for these parts will be provided in the `hardware/` folder of this repository.
 
+### Optional Printed Parts
+- **Calibration Slide Tray** - If using a micrometer calibration slide, this tray holds it stationary on the bed of the machine while providing a solid colored background.
+- **Sample Clips** – Secure tree core samples to the print bed without manual alignment
+    - SampleHolderEnd.3mf
+    - SampleHolderFooter.3mf - If printing the multicolor version ensure that all the tick marks are printed in a red filament.
+    - SampleHolderMiddle.3mf - You will need 3 of these. I suggest printing one of these off and ensuring that it properly fits before printing off the rest of the parts.
 ---
 
 ### Modification Instructions
@@ -146,21 +149,24 @@ Before modifying your printer, you must 3D print the following components:
 5. **Insert Z-Axis Spacer**  
    Add the printed Z-axis spacer on the Z endstop, so the camera does not crash while homing.
 
-6. **Install Camera and Lens**  
+6. **Insert sample clips**
+   If you choose to use sample clips then this is the stage where you would want to slide them onto the print bed. If you printed the footer in single color you will also want to mark the center of the slots (above the slot not in the slot) with a red mark. I recommend using red electrical tape as it doesn't fade.
+
+7. **Install Camera and Lens**  
    - Insert your digital microscope or Amscope camera into the printed mount.  
    - Screw on the imaging lens securely.  
    
-7. **Install Light**  
+8. **Install Light**  
    Install the light you will be using with FieldWeave. 
    > If using the Amscope ring light, place the light pads onto the metal tips of the screws that hold the light in place before putting the light on the lens.
 
-8. **Plug Everything in**  
+9. **Plug Everything in**  
    - Plug the 3D printer back into the wall
    - Plug the 3D printer into your computer via USB for motion control.  
    - Plug in the camera using its USB interface for image capture.
    - Plug in the Light
 
-9. **Done**
+10. **Done**
 
 ### Installation
 
@@ -172,8 +178,8 @@ Prerequisites\. Ensure you have the latest version of python installed, and you 
 1\. Clone the repository:
 
    ```bash
-   git clone https://github.com/AnthonyvW/FORGE.git
-   cd FORGE
+   git clone https://github.com/AnthonyvW/FieldWeave.git
+   cd FieldWeave
    ```
 
 
@@ -187,12 +193,25 @@ Prerequisites\. Ensure you have the latest version of python installed, and you 
 
 3\.2\. Move the downloaded zipped folder into 3rd_party_imports
 
-4\. Configure the camera settings using `amscope_camera_configuration.yaml`. For now, you can copy settings from TRIM until I get around to properly implementing this functionality into FieldWeave.
+4\. Run the install scripts:
 
-5\. Run the main application:
-  
+  Windows
   ```bash
-  python main.py
+  windows_install.bat
+  ```
+  Linux
+  ```bash
+  ./ubuntu_install.sh
+  ```
+5\. Start FieldWeave
+
+  Windows
+  ```bash
+  windows_start.bat
+  ```
+  Linux
+  ```bash
+  ./ubuntu_start.sh
   ```
 
 ---
@@ -202,12 +221,12 @@ FieldWeave supports USB cameras through a modular driver architecture.
 | Camera Model            | Notes                       |
 |-------------------------|-----------------------------|
 | Amscope MU500           | Fully tested and supported  |
-| Amscope MU1000          | Fully tested and supported  |
-| Amscope MU1000 HS       | Fully tested and supported  |
+| Amscope MU1000          | Fully tested, the automatic DPI calibration might not work due to it being tested at a lower resolution than this camera's max resolution |
+| Amscope MU1000 HS       | Fully tested, the automatic DPI calibration might not work due to it being tested at a lower resolution than this camera's max resolution |
+| Generic USB Camera      | This was tested with 2 different USB cameras and is supported  |
+| Other Amscope Cameras   | They should work, but are not tested. Camera mount might need to be modfied for them to fit. |
 
-⚠️ Amscope's SDK for the MU1000 HS is currently out of date as of 1/6/2026, but according to support should be updated in a few days.
-
-> Support for generic USB cameras is planned, but not yet implemented
+⚠️ Amscope's SDK on their website is currently out of date as of 8/15/2026. If you contact Amscope support an up to date version can be provided. The SDK version I use is Version: 59.30149.20251130
 
 ### Adding Support for New Cameras
 
@@ -215,7 +234,7 @@ Users are encouraged to contribute new camera interfaces by implementing the Fie
 
 If your camera is not currently supported or you would like to contribute an interfaces, please open an issue or submit a pull request.
 
-Due to the complexity of hardware integration—especially with cameras requiring proprietary APIs or SDKs full support often requires physical access to the device for development and testing. If you would like me to implement support for your camera, please be prepared to ship the device or provide access to equivalent hardware.
+Due to the complexity of hardware integration, especially with cameras requiring proprietary APIs or SDKs full support often requires physical access to the device for development and testing. If you would like me to implement support for your camera, please be prepared to ship the device or provide access to equivalent hardware.
 
 Alternatively, contributions of driver implementations with thorough documentation and test instructions are highly appreciated.
 
@@ -231,29 +250,18 @@ FieldWeave is designed to run on 3D printers using **Marlin firmware**, which su
 | Printer Model           | Firmware | Build Volume (mm) | Notes                                                  |
 |-------------------------|----------|-------------------|--------------------------------------------------------|
 | Ender 3 v1              | Marlin   | 220 × 220 × 250   | Fully tested and supported. It is highly recommended that you use the official linear rail upgrade kit provided by Creality for the increased camera stability.                             |
-| Creality CR-10S Pro v2  | Marlin   | 300 × 300 × 400   | Fully tested; camera mount file not available.          |
-| Anycubic Kobra Max v1      | Marlin   | 400 × 400 × 450   | Fully tested; camera mount file not available.          |
+| Creality CR-10S Pro v2  | Marlin   | 300 × 300 × 400   | Fully tested; camera mount file not available.         |
+| Anycubic Kobra Max v1   | Marlin   | 400 × 400 × 450   | Fully tested; camera mount file not available.         |
 ---
 
-## ⚠️ Incompatible or Unverified Setups
-
-| Printer / Firmware                | Status        | Reason                                                                 |
-|----------------------------------|---------------|------------------------------------------------------------------------|
-| **Klipper-based printers**       | ❓ Unverified  | Serial responses (e.g., `ok`, `M400`) may differ. Needs testing.       |
-| **RepRapFirmware (e.g., Duet)**  | ❌ Incompatible | Different G-code syntax; not supported by FieldWeave                        |
-| **Sailfish Firmware (e.g., FlashForge)** | ❌ Incompatible | Proprietary, non-standard G-code                                       |
-| **Proprietary OEM firmware**     | ❌ Incompatible | Often locked or limited (e.g., XYZprinting); lacks serial G-code input |
-| **Non-G-code motion platforms**  | ❌ Incompatible | FieldWeave requires G-code over USB for motion control                      |
-
 > Want to help verify compatibility with other printers, firmware, or cameras?  
-> [Open an issue](https://github.com/AnthonyvW/FORGE/issues) with your setup details and test results!
+> [Open an issue](https://github.com/AnthonyvW/FieldWeave/issues) with your setup details and test results!
 
-### ❌ Confirmed Incompatible Printers
+## Confirmed Incompatible Printers
 
-| Printer Model           | Firmware | Build Volume (mm) | Notes                                                    |
-|-------------------------|----------|-------------------|----------------------------------------------------------|
-| Bambulab A1             | Marlin   | 220 × 220 × 250   | Properietary Firmware, cannot send gcode directly to it  |
-| Anycubic Kobra Max 3    | Klipper  | 400 × 400 × 450   | Uses Klipper                                             |
+| Printer Model           | Build Volume (mm) | Notes                                                    |
+|-------------------------|-------------------|----------------------------------------------------------|
+| Bambulab A1             | 220 × 220 × 250   | Properietary Firmware, cannot send gcode directly to it  |
 
 ---
 
@@ -261,7 +269,12 @@ FieldWeave is designed to run on 3D printers using **Marlin firmware**, which su
 
 Contributions are welcome! Please fork the repository and submit a pull request with your enhancements. For major changes, open an issue first to discuss your proposed modifications.
 
+Not able to contribute code? Financial support is just as valuable; see [Support FieldWeave](#support-fieldweave) above ([GitHub Sponsors](https://github.com/sponsors/AnthonyvW) / [Ko-fi](https://ko-fi.com/procerand)).
+
 ## Troubleshooting
 
 **Camera freezes when taking pictures**
 - Sometimes the serial drivers conflict with the camera drivers, to fix this, plug in the camera and the 3D printer into two different sides of the computer. This forces them to be on different usb controllers which fixes any conflicts they might have.
+
+**My Camera isn't found**
+- Make sure that you have the camera drivers installed. If your camera was previously found, but is no longer found, try unplugging it and plugging it back in and ensuring the OS detects that it is plugged in as it might be a bad cable.
