@@ -204,8 +204,8 @@ def auto_detect_ca(
     red_scale, red_tx, red_ty, red_dx_pred, red_dy_pred = fit_channel(red_dx_obs, red_dy_obs)
     blue_scale, blue_tx, blue_ty, blue_dx_pred, blue_dy_pred = fit_channel(blue_dx_obs, blue_dy_obs)
 
-    red_scale = max(0.990, min(1.010, red_scale))
-    blue_scale = max(0.990, min(1.010, blue_scale))
+    red_scale = max(0.980, min(1.020, red_scale))
+    blue_scale = max(0.980, min(1.020, blue_scale))
     # Shifts were measured in half-res pixels; multiply by 2 for full-res
     red_shift = (max(-10.0, min(10.0, red_tx * 2)), max(-10.0, min(10.0, red_ty * 2)))
     blue_shift = (max(-10.0, min(10.0, blue_tx * 2)), max(-10.0, min(10.0, blue_ty * 2)))
@@ -501,8 +501,8 @@ class CAApp(tk.Tk):
             var.trace_add("write", on_change)
 
         section("RADIAL SCALE")
-        slider_row("red_scale",  "Red",  0.990, 1.010, 1.0, 0.0001)
-        slider_row("blue_scale", "Blue", 0.990, 1.010, 1.0, 0.0001)
+        slider_row("red_scale",  "Red",  0.980, 1.020, 1.0, 0.0001)
+        slider_row("blue_scale", "Blue", 0.980, 1.020, 1.0, 0.0001)
 
         section("RED SHIFT (px)")
         slider_row("red_dx", "X", -10.0, 10.0, 0.0, 0.1)
