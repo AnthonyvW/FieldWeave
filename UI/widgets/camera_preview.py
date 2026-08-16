@@ -125,6 +125,24 @@ class OverlayLabel(QLabel):
         """Register the overlay that should receive drag-to-pan events."""
         self._zoom_handler = handler
 
+    def _display_rect(self, pixmap: QPixmap) -> QRect:
+        """
+        Return the rect overlays should draw and interact against.
+
+        While zoom preview is enabled, this is ``ZoomPreviewOverlay
+        .display_rect()`` — the rect its current crop actually fills
+        within the widget, which shrinks toward the letterboxed rect at
+        low zoom and grows to fill the widget entirely once the crop's
+        aspect ratio catches up (see ``ZoomPreviewOverlay._crop_size``).
+        Otherwise it's the plain pixmap's aspect-correct-fit sub-rect
+        within the widget (``_image_rect``).
+        """
+        if self._zoom_handler is not None and self._zoom_handler.enabled:
+            display_rect = self._zoom_handler.display_rect(self.rect())
+            if display_rect is not None:
+                return display_rect
+        return self._image_rect(pixmap)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if (
             self._zoom_handler is not None
@@ -143,7 +161,7 @@ class OverlayLabel(QLabel):
             and self.pixmap() is not None
             and not self.pixmap().isNull()
         ):
-            image_rect = self._image_rect(self.pixmap())
+            image_rect = self._display_rect(self.pixmap())
             parent = self.parent()
             full_w = getattr(parent, "_current_full_width", 0)
             full_h = getattr(parent, "_current_full_height", 0)
@@ -180,8 +198,7 @@ class OverlayLabel(QLabel):
                     self._zoom_handler.begin_drag(self._zoom_press_pos)
 
             if self._zoom_dragging:
-                image_rect = self._image_rect(self.pixmap())
-                self._zoom_handler.drag_to(pos, image_rect)
+                self._zoom_handler.drag_to(pos, self.rect())
                 self.update()
 
             event.accept()
@@ -203,14 +220,14 @@ class OverlayLabel(QLabel):
                 and self.pixmap() is not None
                 and not self.pixmap().isNull()
             ):
-                image_rect = self._image_rect(self.pixmap())
-                if image_rect.contains(self._zoom_press_pos):
+                display_rect = self._display_rect(self.pixmap())
+                if display_rect.contains(self._zoom_press_pos):
                     full_pixel = self._zoom_handler.widget_pos_to_full_pixel(
-                        self._zoom_press_pos, image_rect
+                        self._zoom_press_pos, self.rect()
                     )
                     if full_pixel is not None:
                         full_px, full_py, full_w, full_h = full_pixel
-                        ref = self._zoom_handler.current_view_center_full_pixel()
+                        ref = self._zoom_handler.current_view_center_full_pixel(self.rect())
                         ref_x, ref_y = ref if ref is not None else (None, None)
                         self._click_handler.handle_full_pixel_click(
                             full_px, full_py, full_w, full_h, ref_x, ref_y
@@ -244,7 +261,7 @@ class OverlayLabel(QLabel):
         if pixmap.width() == 0 or pixmap.height() == 0:
             return
 
-        image_rect = self._image_rect(pixmap)
+        display_rect = self._display_rect(pixmap)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -253,9 +270,30 @@ class OverlayLabel(QLabel):
         pen.setWidth(2)
         painter.setPen(pen)
 
+        transform = self._zoom_handler.paint_transform(display_rect) if self._zoom_handler is not None else None
+
+        for overlay in self._overlays:
+            if not overlay.enabled:
+                continue
+            if transform is None or overlay is self._zoom_handler:
+                overlay.draw(painter, display_rect)
+            else:
+                painter.save()
+                # Clip before applying the transform: other overlays draw
+                # as if display_rect were the full un-zoomed frame, so the
+                # transform's zoom scale-up can otherwise paint past
+                # display_rect's edges. Clipping first (in the untransformed
+                # coordinate system) keeps that spillover out of the
+                # letterbox bars, exactly like ZoomPreviewOverlay's own
+                # image never draws past display_rect either.
+                painter.setClipRect(display_rect)
+                painter.setTransform(transform, True)
+                overlay.draw(painter, display_rect)
+                painter.restore()
+
         for overlay in self._overlays:
             if overlay.enabled:
-                overlay.draw(painter, image_rect)
+                overlay.draw_foreground(painter, self.rect())
 
         painter.end()
 
@@ -793,7 +831,7 @@ class CameraPreview(QFrame):
         direction = 1 if delta > 0 else -1
 
         if self._zoom_preview_overlay.enabled:
-            self._zoom_preview_overlay.zoom(direction)
+            self._zoom_preview_overlay.zoom(direction, self._video_label.rect())
             self._video_label.update()
             event.accept()
             return

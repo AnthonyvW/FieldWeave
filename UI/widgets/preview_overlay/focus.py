@@ -137,16 +137,16 @@ class FocusOverlay(Overlay):
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
         """
-        Paint the heatmap and score text into *rect* on the preview label.
+        Paint the heatmap and region rectangle into *rect*.
 
-        *rect* is the pixel-accurate bounding box of the camera image within
-        the label (letterboxed), as computed by OverlayLabel._image_rect().
+        *rect* is the current display rect, as computed by
+        ``OverlayLabel._display_rect()``.
 
         In region mode the heatmap is clipped to the focus region bounds and
         the surrounding area is dimmed.  In full-frame mode the heatmap fills
         the entire rect.
         """
-        if not self.enabled or self._result_pixmap is None:
+        if self._result_pixmap is None:
             return
 
         scaled = self._result_pixmap.scaled(
@@ -174,6 +174,7 @@ class FocusOverlay(Overlay):
 
         self._draw_region_rect(painter, rect)
 
+    def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
         if self._scores_text:
             painter.save()
             font = painter.font()

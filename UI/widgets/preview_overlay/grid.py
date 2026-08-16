@@ -12,6 +12,9 @@ class GridOverlay(Overlay):
     """Draws a 3x3 rule-of-thirds grid over the image."""
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
+        pass
+
+    def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
 
         for i in range(1, 3):

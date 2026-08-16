@@ -12,6 +12,9 @@ class CrosshairOverlay(Overlay):
     """Draws a small crosshair at the centre of the image."""
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
+        pass
+
+    def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
         center_x = rect.x() + rect.width() // 2
         center_y = rect.y() + rect.height() // 2
         line_length = min(rect.width(), rect.height()) // 24

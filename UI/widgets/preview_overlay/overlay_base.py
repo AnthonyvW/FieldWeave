@@ -50,3 +50,13 @@ class Overlay(ABC):
     @abstractmethod
     def draw(self, painter: QPainter, rect: QRect) -> None:
         """Called during paintEvent when this overlay is enabled."""
+
+    def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
+        """
+        Called during paintEvent, once every enabled overlay's ``draw`` has
+        run. Use this only for chrome that must stay visible above every
+        other overlay regardless of draw order — e.g.
+        ``ZoomPreviewOverlay``'s viewport minimap, which would otherwise be
+        painted over by later overlays like ``FocusOverlay``'s heatmap.
+        Defaults to a no-op.
+        """

@@ -16,10 +16,6 @@ class FocusStackPreviewOverlay(Overlay):
     arrives from :class:`~post_processing.routines.focus_stack_routine.StreamingFocusStackRoutine`.
     Calling :meth:`clear` removes the overlay and resumes the normal camera display.
 
-    The frame is scaled to fill the image rect (preserving aspect ratio) and
-    drawn over the camera feed, so no changes to the camera preview pipeline
-    are needed.
-
     Position tracking
     -----------------
     When :meth:`show_frame` is called with ``track_position=True`` the current
@@ -86,9 +82,7 @@ class FocusStackPreviewOverlay(Overlay):
         scaled = self._pixmap.scaled(
             rect.width(),
             rect.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        x = rect.x() + (rect.width() - scaled.width()) // 2
-        y = rect.y() + (rect.height() - scaled.height()) // 2
-        painter.drawPixmap(x, y, scaled)
+        painter.drawPixmap(rect.topLeft(), scaled)
