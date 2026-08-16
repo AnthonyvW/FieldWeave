@@ -7,6 +7,8 @@ RIGHT_SIDEBAR_WIDTH = 380
 OUTER_MARGIN = 10
 CAL_LEFT_WIDTH = 260
 
+ZOOM_PREVIEW_VIEWPORT_COLOR = QColor(255, 210, 0)
+
 def apply_style(app: QApplication) -> None:
     palette = app.palette()
 
@@ -220,7 +222,7 @@ def apply_style(app: QApplication) -> None:
         }}
 
         /* Camera Preview Overlay Buttons */
-        QPushButton#OverlayButton, QPushButton#CrosshairButton, QPushButton#FocusButton, QPushButton#ChannelButton {{
+        QPushButton#OverlayButton, QPushButton#CrosshairButton, QPushButton#FocusButton, QPushButton#ChannelButton, QPushButton#ZoomPreviewButton {{
             background-color: rgba(240, 240, 240, 180);
             color: #000;
             border: 1px solid rgba(200, 200, 200, 255);
@@ -228,10 +230,10 @@ def apply_style(app: QApplication) -> None:
             font-size: 18px;
             font-weight: bold;
         }}
-        QPushButton#OverlayButton:hover, QPushButton#CrosshairButton:hover, QPushButton#FocusButton:hover, QPushButton#ChannelButton:hover {{
+        QPushButton#OverlayButton:hover, QPushButton#CrosshairButton:hover, QPushButton#FocusButton:hover, QPushButton#ChannelButton:hover, QPushButton#ZoomPreviewButton:hover {{
             background-color: rgba(255, 255, 255, 200);
         }}
-        QPushButton#OverlayButton:checked, QPushButton#CrosshairButton:checked, QPushButton#FocusButton:checked, QPushButton#ChannelButton:checked {{
+        QPushButton#OverlayButton:checked, QPushButton#CrosshairButton:checked, QPushButton#FocusButton:checked, QPushButton#ChannelButton:checked, QPushButton#ZoomPreviewButton:checked {{
             background-color: rgba(100, 150, 200, 200);
             color: white;
             border: 2px solid rgba(150, 200, 255, 255);

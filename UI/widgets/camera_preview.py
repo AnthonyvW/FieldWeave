@@ -20,6 +20,7 @@ from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
 from UI.widgets.preview_overlay.background_detection import BackgroundDetectionOverlay
 from UI.widgets.preview_overlay.focus_stack_preview import FocusStackPreviewOverlay
+from UI.widgets.preview_overlay.zoom_preview import ZoomPreviewButton, ZoomPreviewOverlay
 
 
 class EyeToggleButton(QPushButton):
@@ -97,6 +98,7 @@ class OverlayLabel(QLabel):
         super().__init__(parent)
         self._overlays: list[Overlay] = []
         self._click_handler: ClickToMoveOverlay | None = None
+        self._zoom_handler: ZoomPreviewOverlay | None = None
 
     def add_overlay(self, overlay: Overlay) -> None:
         self._overlays.append(overlay)
@@ -115,7 +117,20 @@ class OverlayLabel(QLabel):
             else Qt.CursorShape.ArrowCursor
         )
 
+    def set_zoom_handler(self, handler: ZoomPreviewOverlay | None) -> None:
+        """Register the overlay that should receive drag-to-pan events."""
+        self._zoom_handler = handler
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._zoom_handler is not None
+            and self._zoom_handler.enabled
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._zoom_handler.begin_drag(event.position().toPoint())
+            event.accept()
+            return
+
         if (
             self._click_handler is not None
             and self._click_handler.enabled
@@ -138,6 +153,32 @@ class OverlayLabel(QLabel):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._zoom_handler is not None
+            and self._zoom_handler.enabled
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and self.pixmap() is not None
+            and not self.pixmap().isNull()
+        ):
+            image_rect = self._image_rect(self.pixmap())
+            self._zoom_handler.drag_to(event.position().toPoint(), image_rect)
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._zoom_handler is not None
+            and self._zoom_handler.enabled
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._zoom_handler.end_drag()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def notify_full(self, frame: np.ndarray) -> None:
         """Forward the full-resolution frame to every enabled overlay."""
@@ -268,6 +309,16 @@ class OverlayController:
         self._preview._video_label.update()
 
     @property
+    def zoom_preview(self) -> bool:
+        return self._preview._zoom_preview_overlay.enabled
+
+    @zoom_preview.setter
+    def zoom_preview(self, enabled: bool) -> None:
+        self._preview._zoom_preview_button.setChecked(enabled)
+        self._preview._zoom_preview_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    @property
     def focus_stack_preview(self) -> FocusStackPreviewOverlay:
         """Direct access to the focus stack preview overlay."""
         return self._preview._focus_stack_preview_overlay
@@ -359,6 +410,7 @@ class CameraPreview(QFrame):
         self._channel_overlay = ChannelOverlay()
         self._click_to_move_overlay = ClickToMoveOverlay()
         self._focus_stack_preview_overlay = FocusStackPreviewOverlay()
+        self._zoom_preview_overlay = ZoomPreviewOverlay()
 
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
@@ -368,6 +420,7 @@ class CameraPreview(QFrame):
         self._video_label.add_overlay(self._background_overlay)
         self._video_label.add_overlay(self._click_to_move_overlay)
         self._video_label.add_overlay(self._focus_stack_preview_overlay)
+        self._video_label.add_overlay(self._zoom_preview_overlay)
 
         self._crosshair_button = CrosshairButton(self)
         self._crosshair_button.move(10, 10)
@@ -398,9 +451,16 @@ class CameraPreview(QFrame):
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
+        self._zoom_preview_button = ZoomPreviewButton(self)
+        self._zoom_preview_button.move(10, 185)
+        self._zoom_preview_button.raise_()
+        self._zoom_preview_button.toggled_zoom_preview.connect(self._zoom_preview_overlay.set_enabled)
+        self._zoom_preview_button.toggled_zoom_preview.connect(self._video_label.update)
+
         self._overlays = OverlayController(self)
 
         self._video_label.set_click_handler(self._click_to_move_overlay)
+        self._video_label.set_zoom_handler(self._zoom_preview_overlay)
 
         self._focus_overlay._relay.result_ready.connect(self._video_label.update)
         self._inspect_calibration_overlay._relay.result_ready.connect(self._video_label.update)
@@ -675,18 +735,25 @@ class CameraPreview(QFrame):
     _SCROLL_STEP_NM: int = 40_000
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        ctx = get_app_context()
-        if ctx.motion is None:
-            warning("CameraPreview: scroll Z ignored — motion controller not ready")
-            event.accept()
-            return
-
         delta = event.angleDelta().y()
         if delta == 0:
             event.accept()
             return
 
         direction = 1 if delta > 0 else -1
+
+        if self._zoom_preview_overlay.enabled:
+            self._zoom_preview_overlay.zoom(direction)
+            self._video_label.update()
+            event.accept()
+            return
+
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("CameraPreview: scroll Z ignored - motion controller not ready")
+            event.accept()
+            return
+
         ctx.motion.move("z", self._SCROLL_STEP_NM * direction)
         event.accept()
 
