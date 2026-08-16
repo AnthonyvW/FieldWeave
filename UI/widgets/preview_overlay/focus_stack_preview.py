@@ -12,14 +12,14 @@ class FocusStackPreviewOverlay(Overlay):
     """
     Displays partial focus stack preview frames on top of the camera feed.
 
-    Activated by calling :meth:`show_frame` with each new preview array as it
+    Activated by calling  `show_frame` with each new preview array as it
     arrives from :class:`~post_processing.routines.focus_stack_routine.StreamingFocusStackRoutine`.
-    Calling :meth:`clear` removes the overlay and resumes the normal camera display.
+    Calling  `clear` removes the overlay and resumes the normal camera display.
 
     Position tracking
     -----------------
-    When :meth:`show_frame` is called with ``track_position=True`` the current
-    stage position is recorded. On each subsequent camera frame :meth:`update_full`
+    When  `show_frame` is called with ``track_position=True`` the current
+    stage position is recorded. On each subsequent camera frame  `update_full`
     checks whether the stage has moved; if it has the overlay clears itself
     automatically, matching the behaviour of the original ``show_static_image``
     mechanism. Position tracking is only active for the final stacked result —

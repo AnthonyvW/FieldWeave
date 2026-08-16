@@ -6,7 +6,7 @@ a stable public API for the rest of the application.
 
 Mirrors the pattern of :class:`MotionControllerManager`: the manager is the
 stable surface callers hold; routines are swappable payloads passed to
-:meth:`start_routine`.  Settings are loaded from and saved back to the shared
+ `start_routine`.  Settings are loaded from and saved back to the shared
 :class:`FieldWeaveSettingsManager` so post-processing config lives in the
 application-wide config file.
 
@@ -68,17 +68,17 @@ class PostProcessingManager:
 
     State change notifications
     --------------------------
-    Register a callable with :meth:`add_routine_state_listener` to receive
+    Register a callable with  `add_routine_state_listener` to receive
     live job/activity/progress updates from whatever routine is currently
     active.
 
     Queued execution
     ----------------
-    Call :meth:`queue_routine` to add a routine to a FIFO queue that is drained
+    Call  `queue_routine` to add a routine to a FIFO queue that is drained
     by an internal worker thread.  Queued routines run one at a time in
     submission order, concurrently with whatever the caller is doing.  Use
-    :meth:`wait_for_queue` to block until the queue is empty, or
-    :meth:`clear_queue` to discard pending jobs.
+     `wait_for_queue` to block until the queue is empty, or
+     `clear_queue` to discard pending jobs.
 
     Typical usage
     -------------
@@ -271,7 +271,7 @@ class PostProcessingManager:
         """Add *routine* to the FIFO queue.
 
         A worker thread is started on the first call and keeps running until
-        :meth:`shutdown` is called.  Queued routines execute one at a time in
+         `shutdown` is called.  Queued routines execute one at a time in
         submission order.  The caller is never blocked.
         """
         self._queue.put(routine)

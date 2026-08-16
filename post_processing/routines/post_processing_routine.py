@@ -7,16 +7,16 @@ Mirrors :class:`AutomationRoutine` from the motion subsystem: each routine
 runs on its own daemon thread, communicates pause / resume / stop signals
 through threading primitives, and reports live status through a callback.
 
-Subclasses implement :meth:`steps` as a generator, yielding after each
+Subclasses implement  `steps` as a generator, yielding after each
 logical step.  This keeps all of a routine's logic in one place without
 resorting to complex state machines.
 
 Subclasses should set the class-level :attr:`job_name` and call
-:meth:`_set_activity` / :meth:`_set_progress` during execution to push
+ `_set_activity` /  `_set_progress` during execution to push
 human-readable status to the UI.
 
-Subclasses that produce a meaningful result should call :meth:`_set_result`
-before returning from :meth:`steps`.  The result is then available via the
+Subclasses that produce a meaningful result should call  `_set_result`
+before returning from  `steps`.  The result is then available via the
 :attr:`result` property and forwarded to any registered :attr:`on_complete`
 callback when the routine finishes.
 
@@ -66,7 +66,7 @@ class RoutineResult:
         usable output.
     data:
         Arbitrary key-value payload set by the routine.  Each routine
-        documents the keys it populates.  Use :meth:`get` to retrieve values
+        documents the keys it populates.  Use  `get` to retrieve values
         with a default.
     """
 
@@ -82,17 +82,17 @@ class PostProcessingRoutine(ABC):
     """
     Abstract base class for all post-processing routines.
 
-    Subclasses must implement :meth:`steps`, a generator that yields between
+    Subclasses must implement  `steps`, a generator that yields between
     logical steps.  The runner thread advances the generator, honouring pause
     and stop requests between each yield.
 
     Set the class-level :attr:`job_name` (or override in ``__init__``) to give
     the routine a human-readable display name.  During execution call
-    :meth:`_set_activity` and :meth:`_set_progress` to push live status to any
+     `_set_activity` and  `_set_progress` to push live status to any
     registered :attr:`on_state_changed` callback.
 
-    Routines that produce a meaningful result should call :meth:`_set_result`
-    before returning from :meth:`steps`.  The result is exposed via the
+    Routines that produce a meaningful result should call  `_set_result`
+    before returning from  `steps`.  The result is exposed via the
     :attr:`result` property and forwarded to any registered :attr:`on_complete`
     callback when the routine finishes.
 
@@ -148,13 +148,13 @@ class PostProcessingRoutine(ABC):
     def _set_result(self, *, success: bool, **data: Any) -> None:
         """Record the outcome of this routine.
 
-        Should be called by subclasses before returning from :meth:`steps`,
+        Should be called by subclasses before returning from  `steps`,
         both on successful completion and on detected failure.  If never
         called, :attr:`result` will reflect a generic failure.
 
         Any keyword arguments beyond *success* are stored in
         :attr:`RoutineResult.data` and can be retrieved via
-        :meth:`RoutineResult.get`.  Each routine should document the keys it
+         `RoutineResult.get`.  Each routine should document the keys it
         populates.
 
         Parameters
@@ -206,8 +206,8 @@ class PostProcessingRoutine(ABC):
     ) -> None:
         """Update activity and progress atomically in a single notification.
 
-        Prefer this over calling :meth:`_set_activity` and
-        :meth:`_set_progress` separately to avoid the UI briefly seeing a
+        Prefer this over calling  `_set_activity` and
+         `_set_progress` separately to avoid the UI briefly seeing a
         mismatched pair.
         """
         self._activity = activity

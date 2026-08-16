@@ -11,7 +11,7 @@ Two implementations are provided:
   long imaging sessions).
 
 - :class:`StreamingFocusStackRoutine` — accepts images fed incrementally via
-  :meth:`~StreamingFocusStackRoutine.add_image`, performing alignment and
+   `~StreamingFocusStackRoutine.add_image`, performing alignment and
   culling upfront as each frame arrives.  Slower overall for already-captured
   images but reduces total wall time when images can be pushed in as they are
   acquired.
@@ -164,7 +164,7 @@ class FocusStackResult:
     Produced by either focus stack routine on successful completion.
 
     Retrieved via ``routine.result.get("focus_stack")`` after
-    :meth:`~PostProcessingRoutine.wait` returns, or from the
+     `~PostProcessingRoutine.wait` returns, or from the
     :class:`RoutineResult` passed to the ``on_complete`` callback.
     """
 
@@ -308,7 +308,7 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
 
 class StreamingFocusStackRoutine(PostProcessingRoutine):
     """
-    Focus-stack images fed incrementally via :meth:`add_image`.
+    Focus-stack images fed incrementally via  `add_image`.
 
     Alignment and culling are performed upfront as each frame arrives, reducing
     the work left to do at finalisation time.  This is slower than
@@ -330,10 +330,10 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
 
         routine.finish()
 
-    :meth:`add_image` is safe to call from any thread (including the acquisition
-    thread) while the routine is running.  :meth:`finish` signals that no more
+     `add_image` is safe to call from any thread (including the acquisition
+    thread) while the routine is running.   `finish` signals that no more
     images are coming and blocks until the stacker finalises and saves the result.
-    Do not call :meth:`add_image` after :meth:`finish`.
+    Do not call  `add_image` after  `finish`.
 
     Parameters
     ----------
@@ -394,7 +394,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
         must be a uint8 or uint16 RGB ndarray with the dimensions matching
         *reference_size*.
 
-        Do not call after :meth:`finish`.
+        Do not call after  `finish`.
         """
         with self._queue_lock:
             self._image_queue.append(image)
@@ -405,7 +405,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
 
         The routine will drain any remaining queued images, call
         ``stacker.finish()``, save the result, and complete.  This method
-        returns immediately; use :meth:`~PostProcessingRoutine.wait` to block
+        returns immediately; use  `~PostProcessingRoutine.wait` to block
         until the routine has fully finished.
         """
         self._finish_requested.set()

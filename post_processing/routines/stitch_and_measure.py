@@ -824,7 +824,7 @@ class StitchAndMeasureRoutine(PostProcessingRoutine):
     - ``image_height`` (:class:`int`): panorama height in pixels.
     - ``stitched_rgb`` (:class:`numpy.ndarray`): final panorama in RGB888 order,
       shape ``(H, W, 3)``, dtype ``uint8``.  Safe to wrap in QImage directly on
-      the GUI thread after :meth:`~PostProcessingRoutine.wait` returns.
+      the GUI thread after  `~PostProcessingRoutine.wait` returns.
 
     Parameters
     ----------
