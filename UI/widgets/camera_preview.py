@@ -357,8 +357,7 @@ class OverlayController:
     @zoom_preview.setter
     def zoom_preview(self, enabled: bool) -> None:
         self._preview._zoom_preview_button.setChecked(enabled)
-        self._preview._zoom_preview_overlay.set_enabled(enabled)
-        self._preview._video_label.update()
+        self._preview._on_zoom_preview_toggled(enabled)
 
     @property
     def focus_stack_preview(self) -> FocusStackPreviewOverlay:
@@ -496,8 +495,7 @@ class CameraPreview(QFrame):
         self._zoom_preview_button = ZoomPreviewButton(self)
         self._zoom_preview_button.move(10, 185)
         self._zoom_preview_button.raise_()
-        self._zoom_preview_button.toggled_zoom_preview.connect(self._zoom_preview_overlay.set_enabled)
-        self._zoom_preview_button.toggled_zoom_preview.connect(self._video_label.update)
+        self._zoom_preview_button.toggled_zoom_preview.connect(self._on_zoom_preview_toggled)
 
         self._overlays = OverlayController(self)
 
@@ -572,6 +570,16 @@ class CameraPreview(QFrame):
         self._inspect_calibration_overlay.set_enabled(scale)
         self._background_overlay.set_enabled(background)
         self._video_label.update()
+
+    def _on_zoom_preview_toggled(self, enabled: bool) -> None:
+        self._zoom_preview_overlay.set_enabled(enabled)
+        self._video_label.update()
+        if enabled:
+            get_app_context().toast.info(
+                "Zoom preview enabled : scroll to zoom in, drag to pan. "
+                "Scroll-to-move the Z axis is temporarily disabled.",
+                duration=8000,
+            )
 
     def _toggle_preview_visibility(self) -> None:
         if self._preview_hidden:
