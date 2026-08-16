@@ -15,15 +15,24 @@ class ZoomPreviewOverlay(Overlay):
     Displays a scroll-zoomable, click-and-drag-pannable crop of the camera
     feed over the normal display.
 
-    Latches onto the full-resolution frame via ``update_full`` and draws a
-    scaled crop of it in ``draw``. Zoom and pan are driven externally by
-    ``zoom()`` and ``begin_drag`` / ``drag_to`` / ``end_drag``, which
-    ``OverlayLabel`` calls only while this overlay is ``enabled`` — the
-    same enabled check is what ``CameraPreview`` uses to suppress z-axis
-    scroll while zoom preview is active. Click-to-move remains active in
-    this mode: ``OverlayLabel`` distinguishes a click from a drag by
-    movement distance and, for a click, maps it to a full-resolution pixel
-    via ``widget_pos_to_full_pixel`` instead of the plain un-zoomed scale.
+    Latches onto the full-resolution frame via ``update_full``, which
+    ``OverlayLabel`` calls unconditionally so a frame is always available
+    for ``zoom()`` regardless of interactive mode, and draws a scaled crop
+    of it in ``draw``.
+
+    ``enabled`` (toggled by ``ZoomPreviewButton``) means interactive
+    scroll-to-zoom mode: the mouse wheel zooms the view instead of moving
+    the z axis, which ``CameraPreview.wheelEvent`` gates on it directly.
+    ``ZoomStepButton`` instead calls ``zoom()`` directly and works whether
+    or not this mode is on. ``active`` (enabled OR zoomed) is the broader
+    flag: it's what actually drives drawing the crop and minimap — see
+    ``display_rect`` / ``paint_transform`` / ``draw_foreground`` — and
+    what ``OverlayLabel`` gates click-and-drag panning on, so panning and
+    the zoomed view both work whether the zoom came from scrolling or
+    from the step buttons. Click-to-move remains active in both cases:
+    ``OverlayLabel`` distinguishes a click from a drag by movement
+    distance and, for a click, maps it to a full-resolution pixel via
+    ``widget_pos_to_full_pixel`` instead of the plain un-zoomed scale.
     """
 
     _MIN_ZOOM: float = 1.0
@@ -44,9 +53,30 @@ class ZoomPreviewOverlay(Overlay):
         self._crop: tuple[int, int, int, int] | None = None
 
     def set_enabled(self, enabled: bool) -> None:
+        """
+        Toggle interactive scroll-to-zoom mode (mouse wheel zooms instead
+        of moving the z axis — see ``CameraPreview.wheelEvent``).
+
+        Click-and-drag panning and the zoomed view itself are governed by
+        ``active`` instead, not this flag, so they keep working from
+        whatever zoom the step buttons left the view at. This no longer
+        resets the zoom level: turning this mode off only cancels a drag
+        in progress.
+        """
         super().set_enabled(enabled)
         if not enabled:
-            self.reset()
+            self._dragging = False
+            self._drag_last = None
+
+    @property
+    def zoomed(self) -> bool:
+        """True once zoomed in past the fully-zoomed-out level, whether that came from the step buttons or interactive scroll-to-zoom."""
+        return self._zoom > self._MIN_ZOOM
+
+    @property
+    def active(self) -> bool:
+        """True whenever the crop/zoom viewport should be drawn and panned — interactive scroll-to-zoom mode is on, or the view is zoomed via the step buttons."""
+        return self.enabled or self.zoomed
 
     def reset(self) -> None:
         self._zoom = self._MIN_ZOOM
@@ -186,7 +216,7 @@ class ZoomPreviewOverlay(Overlay):
         case callers should fall back to the plain, un-zoomed letterboxed
         display.
         """
-        if not self.enabled:
+        if not self.active:
             self._crop = None
             return None
         self._crop = self._current_crop(widget_rect)
@@ -209,7 +239,7 @@ class ZoomPreviewOverlay(Overlay):
         there's no frame yet, in which case ``OverlayLabel`` should skip
         applying any transform.
         """
-        if not self.enabled or self._crop is None:
+        if not self.active or self._crop is None:
             return None
 
         x0, y0, crop_w, crop_h = self._crop
@@ -290,8 +320,11 @@ class ZoomPreviewOverlay(Overlay):
         output — see ``Overlay.draw_foreground``. Without this, an overlay
         drawn after this one (e.g. FocusOverlay's heatmap) would paint
         over the minimap.
+
+        Only shown once actually zoomed in: at the fully-zoomed-out level
+        the viewport box would cover the whole minimap anyway.
         """
-        if self._crop is None:
+        if self._crop is None or not self.zoomed:
             return
         x0, y0, crop_w, crop_h = self._crop
         h, w = self._frame.shape[:2]
@@ -384,8 +417,56 @@ class ZoomPreviewButton(QPushButton):
 
         cx, cy, r = 13.0, 13.5, 6.0
         painter.drawEllipse(QPointF(cx, cy), r, r)
-        painter.drawLine(QPointF(cx, cy - 2.3), QPointF(cx, cy + 2.3))
+
+        diag = 0.7071
+        handle_start = QPointF(cx + r * diag, cy + r * diag)
+        handle_end = QPointF(cx + (r + 5.5) * diag, cy + (r + 5.5) * diag)
+        painter.drawLine(handle_start, handle_end)
+
+        painter.end()
+
+
+class ZoomStepButton(QPushButton):
+    """
+    Plain button that steps the camera zoom in or out by one increment.
+
+    Drives ``ZoomPreviewOverlay.zoom()`` directly, independent of the
+    interactive pan/zoom toggle — see ``ZoomPreviewOverlay.active``. Does
+    not take keyboard focus on click, so the video label keeps it and the
+    +/- keyboard shortcuts keep working right after a button press.
+    """
+
+    zoom_step = Signal(int)
+
+    def __init__(self, step: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._step = step
+        self.setObjectName("ZoomStepButton")
+        self.setFixedSize(30, 30)
+        self.setToolTip("Zoom In" if step > 0 else "Zoom Out")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.clicked.connect(self._on_clicked)
+
+    def _on_clicked(self) -> None:
+        self.zoom_step.emit(self._step)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        pen = QPen(QColor(0, 0, 0))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        cx, cy, r = 13.0, 13.5, 6.0
+        painter.drawEllipse(QPointF(cx, cy), r, r)
         painter.drawLine(QPointF(cx - 2.3, cy), QPointF(cx + 2.3, cy))
+        if self._step > 0:
+            painter.drawLine(QPointF(cx, cy - 2.3), QPointF(cx, cy + 2.3))
 
         diag = 0.7071
         handle_start = QPointF(cx + r * diag, cy + r * diag)
