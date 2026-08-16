@@ -18,9 +18,12 @@ class ZoomPreviewOverlay(Overlay):
     Latches onto the full-resolution frame via ``update_full`` and draws a
     scaled crop of it in ``draw``. Zoom and pan are driven externally by
     ``zoom()`` and ``begin_drag`` / ``drag_to`` / ``end_drag``, which
-    ``OverlayLabel`` and ``CameraPreview`` call only while this overlay is
-    ``enabled`` — the same enabled check is what those callers use to
-    suppress z-axis scroll and click-to-move while zoom preview is active.
+    ``OverlayLabel`` calls only while this overlay is ``enabled`` — the
+    same enabled check is what ``CameraPreview`` uses to suppress z-axis
+    scroll while zoom preview is active. Click-to-move remains active in
+    this mode: ``OverlayLabel`` distinguishes a click from a drag by
+    movement distance and, for a click, maps it to a full-resolution pixel
+    via ``widget_pos_to_full_pixel`` instead of the plain un-zoomed scale.
     """
 
     _MIN_ZOOM: float = 1.0
@@ -92,24 +95,68 @@ class ZoomPreviewOverlay(Overlay):
         self._center_x = min(1.0 - half_w, max(half_w, self._center_x))
         self._center_y = min(1.0 - half_h, max(half_h, self._center_y))
 
-    def draw(self, painter: QPainter, rect: QRect) -> None:
+    def _current_crop(self) -> tuple[int, int, int, int] | None:
+        """Return (x0, y0, crop_w, crop_h) of the current viewport in full-frame pixel space."""
         if self._frame is None:
-            return
+            return None
 
         h, w = self._frame.shape[:2]
         if w == 0 or h == 0:
-            return
+            return None
 
         crop_w = int(w / self._zoom)
         crop_h = int(h / self._zoom)
         if crop_w <= 0 or crop_h <= 0:
-            return
+            return None
 
         x0 = min(max(int(self._center_x * w - crop_w / 2), 0), w - crop_w)
         y0 = min(max(int(self._center_y * h - crop_h / 2), 0), h - crop_h)
-        crop = np.ascontiguousarray(self._frame[y0:y0 + crop_h, x0:x0 + crop_w])
+        return x0, y0, crop_w, crop_h
 
-        q_image = QImage(crop.data, crop_w, crop_h, crop_w * 3, QImage.Format.Format_RGB888).copy()
+    def widget_pos_to_full_pixel(self, pos: QPoint, rect: QRect) -> tuple[float, float, int, int] | None:
+        """
+        Map a widget-space position within ``rect`` to a full camera-
+        resolution pixel coordinate, accounting for the current pan/zoom
+        viewport. Returns ``(full_px, full_py, full_width, full_height)``,
+        or None if there is no frame yet or ``rect`` has no area.
+        """
+        crop = self._current_crop()
+        if crop is None or rect.width() <= 0 or rect.height() <= 0:
+            return None
+
+        x0, y0, crop_w, crop_h = crop
+        h, w = self._frame.shape[:2]
+
+        rel_x = (pos.x() - rect.x()) / rect.width()
+        rel_y = (pos.y() - rect.y()) / rect.height()
+
+        full_px = x0 + rel_x * crop_w
+        full_py = y0 + rel_y * crop_h
+        return full_px, full_py, w, h
+
+    def current_view_center_full_pixel(self) -> tuple[float, float] | None:
+        """
+        Return the full-resolution pixel currently shown at the centre of
+        the display — the click-to-move reference centre while zoom
+        preview is panned/zoomed, since that's what the operator is
+        actually looking at rather than the sensor's absolute centre.
+        """
+        crop = self._current_crop()
+        if crop is None:
+            return None
+        x0, y0, crop_w, crop_h = crop
+        return x0 + crop_w / 2, y0 + crop_h / 2
+
+    def draw(self, painter: QPainter, rect: QRect) -> None:
+        crop = self._current_crop()
+        if crop is None:
+            return
+        x0, y0, crop_w, crop_h = crop
+        h, w = self._frame.shape[:2]
+
+        crop_arr = np.ascontiguousarray(self._frame[y0:y0 + crop_h, x0:x0 + crop_w])
+
+        q_image = QImage(crop_arr.data, crop_w, crop_h, crop_w * 3, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(q_image)
         scaled = pixmap.scaled(
             rect.width(),

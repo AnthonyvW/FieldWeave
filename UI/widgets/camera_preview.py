@@ -94,11 +94,15 @@ class EyeToggleButton(QPushButton):
 class OverlayLabel(QLabel):
     """QLabel that drives a list of Overlay instances on each paint and frame."""
 
+    _ZOOM_DRAG_THRESHOLD_PX: int = 4
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._overlays: list[Overlay] = []
         self._click_handler: ClickToMoveOverlay | None = None
         self._zoom_handler: ZoomPreviewOverlay | None = None
+        self._zoom_press_pos: QPoint | None = None
+        self._zoom_dragging: bool = False
 
     def add_overlay(self, overlay: Overlay) -> None:
         self._overlays.append(overlay)
@@ -127,7 +131,8 @@ class OverlayLabel(QLabel):
             and self._zoom_handler.enabled
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            self._zoom_handler.begin_drag(event.position().toPoint())
+            self._zoom_press_pos = event.position().toPoint()
+            self._zoom_dragging = False
             event.accept()
             return
 
@@ -159,12 +164,26 @@ class OverlayLabel(QLabel):
             self._zoom_handler is not None
             and self._zoom_handler.enabled
             and event.buttons() & Qt.MouseButton.LeftButton
+            and self._zoom_press_pos is not None
             and self.pixmap() is not None
             and not self.pixmap().isNull()
         ):
-            image_rect = self._image_rect(self.pixmap())
-            self._zoom_handler.drag_to(event.position().toPoint(), image_rect)
-            self.update()
+            pos = event.position().toPoint()
+
+            if not self._zoom_dragging:
+                delta = pos - self._zoom_press_pos
+                if (
+                    abs(delta.x()) > self._ZOOM_DRAG_THRESHOLD_PX
+                    or abs(delta.y()) > self._ZOOM_DRAG_THRESHOLD_PX
+                ):
+                    self._zoom_dragging = True
+                    self._zoom_handler.begin_drag(self._zoom_press_pos)
+
+            if self._zoom_dragging:
+                image_rect = self._image_rect(self.pixmap())
+                self._zoom_handler.drag_to(pos, image_rect)
+                self.update()
+
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -175,7 +194,30 @@ class OverlayLabel(QLabel):
             and self._zoom_handler.enabled
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            self._zoom_handler.end_drag()
+            if self._zoom_dragging:
+                self._zoom_handler.end_drag()
+            elif (
+                self._click_handler is not None
+                and self._click_handler.enabled
+                and self._zoom_press_pos is not None
+                and self.pixmap() is not None
+                and not self.pixmap().isNull()
+            ):
+                image_rect = self._image_rect(self.pixmap())
+                if image_rect.contains(self._zoom_press_pos):
+                    full_pixel = self._zoom_handler.widget_pos_to_full_pixel(
+                        self._zoom_press_pos, image_rect
+                    )
+                    if full_pixel is not None:
+                        full_px, full_py, full_w, full_h = full_pixel
+                        ref = self._zoom_handler.current_view_center_full_pixel()
+                        ref_x, ref_y = ref if ref is not None else (None, None)
+                        self._click_handler.handle_full_pixel_click(
+                            full_px, full_py, full_w, full_h, ref_x, ref_y
+                        )
+
+            self._zoom_press_pos = None
+            self._zoom_dragging = False
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -412,6 +454,7 @@ class CameraPreview(QFrame):
         self._focus_stack_preview_overlay = FocusStackPreviewOverlay()
         self._zoom_preview_overlay = ZoomPreviewOverlay()
 
+        self._video_label.add_overlay(self._zoom_preview_overlay)
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
         self._video_label.add_overlay(self._focus_overlay)
@@ -420,7 +463,6 @@ class CameraPreview(QFrame):
         self._video_label.add_overlay(self._background_overlay)
         self._video_label.add_overlay(self._click_to_move_overlay)
         self._video_label.add_overlay(self._focus_stack_preview_overlay)
-        self._video_label.add_overlay(self._zoom_preview_overlay)
 
         self._crosshair_button = CrosshairButton(self)
         self._crosshair_button.move(10, 10)
@@ -750,7 +792,7 @@ class CameraPreview(QFrame):
 
         ctx = get_app_context()
         if ctx.motion is None:
-            warning("CameraPreview: scroll Z ignored - motion controller not ready")
+            warning("CameraPreview: scroll Z ignored — motion controller not ready")
             event.accept()
             return
 
