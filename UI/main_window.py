@@ -17,6 +17,7 @@ from UI.tabs.project_tab import ProjectTab
 from UI.tabs.navigate_tab import NavigateTab
 from UI.tabs.calibration_tab import CalibrationTab
 from UI.widgets.camera_preview import CameraPreview
+from UI.widgets.update_notifier import UpdateNotifier
 from UI.settings.settings_main import SettingsButton, SettingsDialog
 
 from common.app_context import get_app_context
@@ -86,6 +87,10 @@ class MainWindow(QMainWindow):
 
         self._wire_motion_state()
         self._start_state_flush_timer()
+
+        if self.app_context.updater is not None:
+            self._update_notifier = UpdateNotifier(self.app_context.updater, self)
+            self.app_context.register_update_notifier(self._update_notifier)
 
     # ------------------------------------------------------------------
     # Motion state wiring

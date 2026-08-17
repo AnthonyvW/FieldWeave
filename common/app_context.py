@@ -16,11 +16,13 @@ from common.fieldweaveConfig import FieldWeaveSettingsManager, FieldWeaveSetting
 from common.image_name_formatter import ImageNameFormatter
 from motion.motion_controller_manager import MotionControllerManager
 from motion.motion_controller_manager import MotionState
+from common.updater import Updater
 
 if TYPE_CHECKING:
     from UI.settings.settings_main import SettingsDialog
     from UI.widgets.toast_widget import ToastManager
     from UI.widgets.camera_preview import CameraPreview
+    from UI.widgets.update_notifier import UpdateNotifier
 
 FIELDWEAVE_VERSION = "1.2"
 
@@ -51,6 +53,8 @@ class AppContext:
         self._machine_vision_manager: MachineVisionManager | None = None
         self._post_processing_manager: PostProcessingManager | None = None
         self._camera_preview: CameraPreview | None = None
+        self._updater: Updater | None = None
+        self._update_notifier: UpdateNotifier | None = None
         self._initialized = True
         self._cleaned_up: bool = False
 
@@ -61,6 +65,7 @@ class AppContext:
         self._initialize_camera_manager()
         self._initialize_machine_vision_manager()
         self._initialize_post_processing_manager()
+        self._initialize_updater()
 
         app = QApplication.instance()
         if app is not None:
@@ -146,6 +151,22 @@ class AppContext:
                 raise RuntimeError("AppContext has already been cleaned up")
             self._initialize_post_processing_manager()
         return self._post_processing_manager
+
+    # ------------------------------------------------------------------
+    # Updater
+    # ------------------------------------------------------------------
+
+    @property
+    def updater(self) -> Updater | None:
+        return self._updater
+
+    @property
+    def update_notifier(self) -> UpdateNotifier | None:
+        return self._update_notifier
+
+    def register_update_notifier(self, notifier: UpdateNotifier) -> None:
+        """Register the application-wide update notifier widget."""
+        self._update_notifier = notifier
 
     # ------------------------------------------------------------------
     # Settings
@@ -255,6 +276,11 @@ class AppContext:
             error(f"Failed to start post-processing manager: {e}")
             self._post_processing_manager = None
 
+    def _initialize_updater(self) -> None:
+        if self._updater is not None:
+            return
+        self._updater = Updater()
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -282,6 +308,8 @@ class AppContext:
         self._machine_vision_manager = None
         self._post_processing_manager = None
         self._camera_preview = None
+        self._updater = None
+        self._update_notifier = None
         self._settings_dialog = None
         self._settings_manager = None
         self._settings = None

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QVBoxLayout,
+    QHBoxLayout,
     QWidget,
     QGroupBox,
     QLabel,
+    QPushButton,
 )
 
-from common.app_context import FIELDWEAVE_VERSION
+from common.app_context import FIELDWEAVE_VERSION, get_app_context
 
 WEBSITE_URL = "https://www.fieldweave.com/"
 CONTACT_URL = "https://www.fieldweave.com/contact"
@@ -26,6 +28,42 @@ def _link_label(html: str) -> QLabel:
     return label
 
 
+def _check_updates_row(parent: QWidget) -> QWidget:
+    """Button that triggers a manual update check, reusing the app-wide Updater/UpdateNotifier."""
+    row = QWidget()
+    row_layout = QHBoxLayout(row)
+    row_layout.setContentsMargins(0, 0, 0, 0)
+
+    button = QPushButton("Check for Updates")
+    row_layout.addWidget(button)
+    row_layout.addStretch()
+
+    # Polls just to re-enable the button once the check finishes; the
+    # UpdateNotifier itself (on the main thread) is what reads Updater
+    # state and shows the resulting popup or toast.
+    poll_timer = QTimer(parent)
+    poll_timer.setInterval(300)
+
+    def on_poll() -> None:
+        updater = get_app_context().updater
+        if updater is None or not updater.is_busy():
+            poll_timer.stop()
+            button.setEnabled(True)
+
+    def on_click() -> None:
+        notifier = get_app_context().update_notifier
+        if notifier is None:
+            return
+        if notifier.check_for_updates(manual=True):
+            button.setEnabled(False)
+            poll_timer.start()
+
+    poll_timer.timeout.connect(on_poll)
+    button.clicked.connect(on_click)
+
+    return row
+
+
 def about_page() -> QWidget:
     w = QWidget()
     layout = QVBoxLayout(w)
@@ -38,6 +76,7 @@ def about_page() -> QWidget:
         "Created by Anthony van Weel."
     ))
     top_layout.addWidget(_link_label(f'Visit FieldWeave\'s Website at <a href="{WEBSITE_URL}">{WEBSITE_URL}</a>'))
+    top_layout.addWidget(_check_updates_row(w))
     layout.addWidget(top)
 
     support = QGroupBox("Support FieldWeave")
