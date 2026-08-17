@@ -40,13 +40,13 @@ class MotionControllerManager:
 
     State change notifications
     --------------------------
-    Register a callable with :meth:`add_state_listener` to be notified
+    Register a callable with  `add_state_listener` to be notified
     whenever the controller's :class:`MotionState` changes.
 
-    Register a callable with :meth:`add_routine_state_listener` to receive
+    Register a callable with  `add_routine_state_listener` to receive
     live job/activity/progress updates from the active routine.
 
-    Register a callable with :meth:`add_interaction_listener` to be notified
+    Register a callable with  `add_interaction_listener` to be notified
     whenever the user issues a direct motion command (jog, home, move, etc.).
     This is used by the UI to clear the COMPLETE latch on the status bar.
 
@@ -54,8 +54,8 @@ class MotionControllerManager:
     ---------------
     The result of the most recently completed routine is stored in
     :attr:`last_routine_result`.  This is overwritten each time a routine
-    finishes and is available immediately after :meth:`stop_routine` returns
-    or after :meth:`AutomationRoutine.wait` unblocks.  A child routine can
+    finishes and is available immediately after  `stop_routine` returns
+    or after  `AutomationRoutine.wait` unblocks.  A child routine can
     therefore start a sub-routine, wait for it, then inspect
     ``self.motion.last_routine_result`` to act on what it found.
 

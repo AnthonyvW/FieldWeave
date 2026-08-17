@@ -21,7 +21,7 @@ class OutputFolderWidget(QWidget):
     A reusable group box containing a text field and Browse button for
     selecting an output folder.
 
-    If the user leaves the field empty, :py:meth:`resolved_path` returns
+    If the user leaves the field empty, :py `resolved_path` returns
     ``./output/<timestamp>``.  A relative path is rooted under ``./output/``.
     An absolute path is returned as-is.
     """
@@ -136,7 +136,7 @@ class OutputFolderWidget(QWidget):
 class ViewImageWidget(QWidget):
     """
     A reusable row with an "Open Folder" button and a configurable
-    "View Image" button. Hidden by default; call :py:meth:`show_result` to
+    "View Image" button. Hidden by default; call :py `show_result` to
     reveal it after a routine completes.
 
     Parameters

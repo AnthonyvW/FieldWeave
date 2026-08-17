@@ -30,6 +30,8 @@ _COL_ABSENT   = QColor(255, 0, 0)
 _COL_TEXT     = QColor(255, 255, 255, 220)
 _COL_SHADOW   = QColor(0, 0, 0, 200)
 
+_TEXT_LEFT_MARGIN = 50
+
 
 def _draw_text_shadowed(
     painter: QPainter,
@@ -58,6 +60,9 @@ class InspectCalibrationOverlay(Overlay):
 
     A status line is drawn in the bottom-left corner showing the detected
     axis, tick count, end-cap presence, axis-state mode, and elapsed time.
+    The detection geometry (baseline, ticks, end-cap labels) tracks zoom
+    preview's pan/zoom transform via ``draw``; the status readout is fixed
+    screen-space chrome drawn in ``draw_foreground`` instead.
     """
 
     def __init__(self) -> None:
@@ -119,13 +124,13 @@ class InspectCalibrationOverlay(Overlay):
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
         """
-        Paint the detection geometry and status text into *rect*.
+        Paint the detection geometry into *rect*.
 
-        *rect* is the pixel-accurate bounding box of the camera image within
-        the label (letterboxed), as computed by OverlayLabel._image_rect().
-        All source-space coordinates are scaled to display-space here.
+        *rect* is the current display rect, as computed by
+        ``OverlayLabel._display_rect()``. All source-space coordinates are
+        scaled to display-space here.
         """
-        if not self.enabled or self._detection is None:
+        if self._detection is None:
             return
 
         d = self._detection
@@ -164,7 +169,6 @@ class InspectCalibrationOverlay(Overlay):
             end_col   = _COL_PRESENT if d.end_present   else _COL_ABSENT
             _draw_text_shadowed(painter, tx(bst) + 4,  ty(bl) - 14, "END" if d.start_present else "OPEN", start_col)
             _draw_text_shadowed(painter, tx(ben) - 36, ty(bl) - 14, "END" if d.end_present   else "OPEN", end_col)
-            _draw_text_shadowed(painter, rx + 8, ry + 28, "HORIZONTAL")
         else:
             painter.setPen(QPen(_COL_BASELINE, 2))
             painter.drawLine(tx(bl), ty(bst), tx(bl), ty(ben))
@@ -178,12 +182,36 @@ class InspectCalibrationOverlay(Overlay):
             end_col   = _COL_PRESENT if d.end_present   else _COL_ABSENT
             _draw_text_shadowed(painter, tx(bl) + 8, ty(bst) + 20, "END" if d.start_present else "OPEN", start_col)
             _draw_text_shadowed(painter, tx(bl) + 8, ty(ben) - 8,  "END" if d.end_present   else "OPEN", end_col)
-            _draw_text_shadowed(painter, rx + 8, ry + 28, "VERTICAL")
 
-        _draw_text_shadowed(painter, rx + 8, ry + 48, f"ticks: {d.tick_count}")
-        _draw_text_shadowed(painter, rx + 8, ry + 64, f"vision: {d.elapsed_ms:.1f}ms")
-        _draw_text_shadowed(painter, rx + 8, ry + 80, f"mode: {d.mode}")
-        _draw_text_shadowed(painter, rx + 8, ry + 96, f"ds: {s}x")
+        painter.restore()
+
+    def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
+        """
+        Paint the status readout into *rect*.
+
+        Fixed screen-space chrome rather than a marker of real image
+        content, so it's drawn here, unaffected by zoom preview's pan/zoom
+        transform, instead of in ``draw``.
+        """
+        if self._detection is None:
+            return
+
+        d = self._detection
+        s = d._downsample
+        rx = rect.left()
+        ry = rect.top()
+
+        painter.save()
+
+        font = QFont(painter.font())
+        font.setPointSize(8)
+        painter.setFont(font)
+
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, ry + 28, "HORIZONTAL" if d.axis == "horizontal" else "VERTICAL")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, ry + 48, f"ticks: {d.tick_count}")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, ry + 64, f"vision: {d.elapsed_ms:.1f}ms")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, ry + 80, f"mode: {d.mode}")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, ry + 96, f"ds: {s}x")
 
         if self._status_text:
             painter.setPen(QPen(_COL_SHADOW))

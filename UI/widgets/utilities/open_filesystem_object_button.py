@@ -14,7 +14,7 @@ class OpenFolderButton(QPushButton):
     """
     A button that opens a folder in the system file explorer.
 
-    Hidden by default.  Call :meth:`set_folder` to assign a path and make
+    Hidden by default.  Call  `set_folder` to assign a path and make
     it visible.  If the folder no longer exists when clicked, a warning is
     logged and an error toast is shown instead of attempting to open it.
 
@@ -60,7 +60,7 @@ class OpenFileButton(QPushButton):
     """
     A button that opens a file in its default application.
 
-    Hidden by default.  Call :meth:`set_file` to assign a path and make it
+    Hidden by default.  Call  `set_file` to assign a path and make it
     visible; the button is automatically hidden again if the file does not
     exist at that point.  If the file has been deleted by the time the user
     clicks, a warning is logged and an error toast is shown.

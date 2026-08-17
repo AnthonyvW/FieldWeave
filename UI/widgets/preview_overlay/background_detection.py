@@ -34,6 +34,7 @@ _COL_TEXT       = QColor(255, 255, 255, 220)
 _COL_SHADOW     = QColor(0, 0, 0, 200)
 
 _BORDER_WIDTH = 4
+_TEXT_LEFT_MARGIN = 50
 
 
 def _draw_text_shadowed(
@@ -60,10 +61,13 @@ class BackgroundDetectionOverlay(Overlay):
     Detection is performed by MachineVisionWorker off-thread.  This class
     stores the latest BackgroundDetectionResult and redraws on the GUI thread.
 
-    A coloured border is drawn around the image rect — green when background
-    is detected, red-orange when foreground is present.  A status readout in
-    the top-left shows the classification, mean brightness, mean saturation,
-    and elapsed processing time.
+    A coloured border is drawn around the display rect — green when
+    background is detected, red-orange when foreground is present. A
+    status readout in the top-left shows the classification, mean
+    brightness, mean saturation, and elapsed processing time. Both are
+    pure status chrome with no in-image location, so they're drawn in
+    ``draw_foreground``, screen space unaffected by zoom preview's
+    pan/zoom transform.
     """
 
     def __init__(self) -> None:
@@ -87,7 +91,18 @@ class BackgroundDetectionOverlay(Overlay):
         self._result = result
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
-        if not self.enabled or self._result is None:
+        pass
+
+    def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
+        """
+        Draw the classification border and status readout into *rect*.
+
+        Background detection applies to the whole frame with no specific
+        in-image location, so this is pure status chrome — drawn here in
+        screen space, unaffected by zoom preview's pan/zoom transform,
+        rather than in ``draw``.
+        """
+        if self._result is None:
             return
 
         r = self._result
@@ -113,12 +128,12 @@ class BackgroundDetectionOverlay(Overlay):
         rx, ry = rect.left(), rect.top()
         label = "background" if r.is_background else "foreground"
         y_cursor = ry + 28
-        _draw_text_shadowed(painter, rx + 8, y_cursor, f"frame: {label}", color)
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"frame: {label}", color)
         y_cursor += 16
-        _draw_text_shadowed(painter, rx + 8, y_cursor, f"val median: {r.val_median:.1f}")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"val median: {r.val_median:.1f}")
         y_cursor += 16
-        _draw_text_shadowed(painter, rx + 8, y_cursor, f"val std: {r.val_std:.1f}")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"val std: {r.val_std:.1f}")
         y_cursor += 16
-        _draw_text_shadowed(painter, rx + 8, y_cursor, f"vision: {r.elapsed_ms:.1f} ms")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"vision: {r.elapsed_ms:.1f} ms")
 
         painter.restore()

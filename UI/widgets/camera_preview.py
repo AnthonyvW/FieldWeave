@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Slot, QRect, QPoint, QRectF
+from PySide6.QtCore import Qt, Slot, QRect, QPoint, QRectF, QEvent
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent, QMouseEvent, QPainterPath
 from PySide6.QtWidgets import (
-    QFrame, QLabel, QPushButton, QVBoxLayout, QWidget, QSizePolicy,
+    QAbstractSpinBox, QApplication, QComboBox, QFrame, QLabel, QLineEdit, QPlainTextEdit,
+    QPushButton, QTextEdit, QVBoxLayout, QWidget, QSizePolicy,
 )
 
 from common.app_context import get_app_context
@@ -20,6 +21,7 @@ from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
 from UI.widgets.preview_overlay.background_detection import BackgroundDetectionOverlay
 from UI.widgets.preview_overlay.focus_stack_preview import FocusStackPreviewOverlay
+from UI.widgets.preview_overlay.zoom_preview import ZoomPreviewOverlay, ZoomResetButton, ZoomStepButton
 
 
 class EyeToggleButton(QPushButton):
@@ -91,12 +93,23 @@ class EyeToggleButton(QPushButton):
 
 
 class OverlayLabel(QLabel):
-    """QLabel that drives a list of Overlay instances on each paint and frame."""
+    """
+    QLabel that drives a list of Overlay instances on each paint and frame.
+
+    Click-and-drag panning of the zoom overlay is available whenever it's
+    ``active`` — zoomed in via either the step buttons or ctrl+scroll —
+    see ``ZoomPreviewOverlay.active``.
+    """
+
+    _ZOOM_DRAG_THRESHOLD_PX: int = 4
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._overlays: list[Overlay] = []
         self._click_handler: ClickToMoveOverlay | None = None
+        self._zoom_handler: ZoomPreviewOverlay | None = None
+        self._zoom_press_pos: QPoint | None = None
+        self._zoom_dragging: bool = False
 
     def add_overlay(self, overlay: Overlay) -> None:
         self._overlays.append(overlay)
@@ -115,7 +128,52 @@ class OverlayLabel(QLabel):
             else Qt.CursorShape.ArrowCursor
         )
 
+    def set_zoom_handler(self, handler: ZoomPreviewOverlay | None) -> None:
+        """Register the overlay that should receive drag-to-pan events."""
+        self._zoom_handler = handler
+
+    def _overlay_active(self, overlay: Overlay) -> bool:
+        """
+        Whether *overlay* should currently draw.
+
+        Every overlay but the zoom overlay uses its plain ``enabled``
+        flag. The zoom overlay instead uses ``active``, which is true
+        whenever the view is zoomed — see ``ZoomPreviewOverlay.active``.
+        """
+        if overlay is self._zoom_handler:
+            return overlay.active
+        return overlay.enabled
+
+    def _display_rect(self, pixmap: QPixmap) -> QRect:
+        """
+        Return the rect overlays should draw and interact against.
+
+        While the zoom overlay is active (zoomed via the step buttons or
+        ctrl+scroll), this is ``ZoomPreviewOverlay.display_rect()`` —
+        the rect its current crop actually fills within the widget,
+        which shrinks toward the letterboxed rect at low zoom and grows
+        to fill the widget entirely once the crop's aspect ratio catches
+        up (see ``ZoomPreviewOverlay._crop_size``). Otherwise it's the
+        plain pixmap's aspect-correct-fit sub-rect within the widget
+        (``_image_rect``).
+        """
+        if self._zoom_handler is not None and self._zoom_handler.active:
+            display_rect = self._zoom_handler.display_rect(self.rect())
+            if display_rect is not None:
+                return display_rect
+        return self._image_rect(pixmap)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._zoom_handler is not None
+            and self._zoom_handler.active
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._zoom_press_pos = event.position().toPoint()
+            self._zoom_dragging = False
+            event.accept()
+            return
+
         if (
             self._click_handler is not None
             and self._click_handler.enabled
@@ -123,7 +181,7 @@ class OverlayLabel(QLabel):
             and self.pixmap() is not None
             and not self.pixmap().isNull()
         ):
-            image_rect = self._image_rect(self.pixmap())
+            image_rect = self._display_rect(self.pixmap())
             parent = self.parent()
             full_w = getattr(parent, "_current_full_width", 0)
             full_h = getattr(parent, "_current_full_height", 0)
@@ -139,9 +197,80 @@ class OverlayLabel(QLabel):
                 return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._zoom_handler is not None
+            and self._zoom_handler.active
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and self._zoom_press_pos is not None
+            and self.pixmap() is not None
+            and not self.pixmap().isNull()
+        ):
+            pos = event.position().toPoint()
+
+            if not self._zoom_dragging:
+                delta = pos - self._zoom_press_pos
+                if (
+                    abs(delta.x()) > self._ZOOM_DRAG_THRESHOLD_PX
+                    or abs(delta.y()) > self._ZOOM_DRAG_THRESHOLD_PX
+                ):
+                    self._zoom_dragging = True
+                    self._zoom_handler.begin_drag(self._zoom_press_pos)
+
+            if self._zoom_dragging:
+                self._zoom_handler.drag_to(pos, self.rect())
+                self.update()
+
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._zoom_handler is not None
+            and self._zoom_handler.active
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            if self._zoom_dragging:
+                self._zoom_handler.end_drag()
+            elif (
+                self._click_handler is not None
+                and self._click_handler.enabled
+                and self._zoom_press_pos is not None
+                and self.pixmap() is not None
+                and not self.pixmap().isNull()
+            ):
+                display_rect = self._display_rect(self.pixmap())
+                if display_rect.contains(self._zoom_press_pos):
+                    full_pixel = self._zoom_handler.widget_pos_to_full_pixel(
+                        self._zoom_press_pos, self.rect()
+                    )
+                    if full_pixel is not None:
+                        full_px, full_py, full_w, full_h = full_pixel
+                        ref = self._zoom_handler.current_view_center_full_pixel(self.rect())
+                        ref_x, ref_y = ref if ref is not None else (None, None)
+                        self._click_handler.handle_full_pixel_click(
+                            full_px, full_py, full_w, full_h, ref_x, ref_y
+                        )
+
+            self._zoom_press_pos = None
+            self._zoom_dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def notify_full(self, frame: np.ndarray) -> None:
-        """Forward the full-resolution frame to every enabled overlay."""
+        """
+        Forward the full-resolution frame to every enabled overlay.
+
+        The zoom overlay always gets the frame, even while it's not
+        zoomed, so ``ZoomStepButton`` has a frame to zoom against.
+        """
+        if self._zoom_handler is not None:
+            self._zoom_handler.update_full(frame)
         for overlay in self._overlays:
+            if overlay is self._zoom_handler:
+                continue
             if overlay.enabled:
                 overlay.update_full(frame)
 
@@ -161,7 +290,7 @@ class OverlayLabel(QLabel):
         if pixmap.width() == 0 or pixmap.height() == 0:
             return
 
-        image_rect = self._image_rect(pixmap)
+        display_rect = self._display_rect(pixmap)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -170,9 +299,30 @@ class OverlayLabel(QLabel):
         pen.setWidth(2)
         painter.setPen(pen)
 
+        transform = self._zoom_handler.paint_transform(display_rect) if self._zoom_handler is not None else None
+
         for overlay in self._overlays:
-            if overlay.enabled:
-                overlay.draw(painter, image_rect)
+            if not self._overlay_active(overlay):
+                continue
+            if transform is None or overlay is self._zoom_handler:
+                overlay.draw(painter, display_rect)
+            else:
+                painter.save()
+                # Clip before applying the transform: other overlays draw
+                # as if display_rect were the full un-zoomed frame, so the
+                # transform's zoom scale-up can otherwise paint past
+                # display_rect's edges. Clipping first (in the untransformed
+                # coordinate system) keeps that spillover out of the
+                # letterbox bars, exactly like ZoomPreviewOverlay's own
+                # image never draws past display_rect either.
+                painter.setClipRect(display_rect)
+                painter.setTransform(transform, True)
+                overlay.draw(painter, display_rect)
+                painter.restore()
+
+        for overlay in self._overlays:
+            if self._overlay_active(overlay):
+                overlay.draw_foreground(painter, self.rect())
 
         painter.end()
 
@@ -359,7 +509,9 @@ class CameraPreview(QFrame):
         self._channel_overlay = ChannelOverlay()
         self._click_to_move_overlay = ClickToMoveOverlay()
         self._focus_stack_preview_overlay = FocusStackPreviewOverlay()
+        self._zoom_preview_overlay = ZoomPreviewOverlay()
 
+        self._video_label.add_overlay(self._zoom_preview_overlay)
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
         self._video_label.add_overlay(self._focus_overlay)
@@ -398,9 +550,25 @@ class CameraPreview(QFrame):
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
+        self._zoom_in_button = ZoomStepButton(1, self)
+        self._zoom_in_button.move(10, 185)
+        self._zoom_in_button.raise_()
+        self._zoom_in_button.zoom_step.connect(self._on_zoom_step)
+
+        self._zoom_out_button = ZoomStepButton(-1, self)
+        self._zoom_out_button.move(10, 220)
+        self._zoom_out_button.raise_()
+        self._zoom_out_button.zoom_step.connect(self._on_zoom_step)
+
+        self._zoom_reset_button = ZoomResetButton(self)
+        self._zoom_reset_button.move(10, 255)
+        self._zoom_reset_button.raise_()
+        self._zoom_reset_button.reset_zoom.connect(self._on_zoom_reset)
+
         self._overlays = OverlayController(self)
 
         self._video_label.set_click_handler(self._click_to_move_overlay)
+        self._video_label.set_zoom_handler(self._zoom_preview_overlay)
 
         self._focus_overlay._relay.result_ready.connect(self._video_label.update)
         self._inspect_calibration_overlay._relay.result_ready.connect(self._video_label.update)
@@ -408,6 +576,7 @@ class CameraPreview(QFrame):
         self._background_overlay._relay.result_ready.connect(self._video_label.update)
 
         self._connect_to_camera_manager()
+        QApplication.instance().installEventFilter(self)
 
     @property
     def overlays(self) -> OverlayController:
@@ -469,6 +638,14 @@ class CameraPreview(QFrame):
         self._red_mark_overlay.set_enabled(red_mark)
         self._inspect_calibration_overlay.set_enabled(scale)
         self._background_overlay.set_enabled(background)
+        self._video_label.update()
+
+    def _on_zoom_step(self, direction: int) -> None:
+        self._zoom_preview_overlay.zoom(direction, self._video_label.rect())
+        self._video_label.update()
+
+    def _on_zoom_reset(self) -> None:
+        self._zoom_preview_overlay.reset()
         self._video_label.update()
 
     def _toggle_preview_visibility(self) -> None:
@@ -675,23 +852,59 @@ class CameraPreview(QFrame):
     _SCROLL_STEP_NM: int = 40_000
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        ctx = get_app_context()
-        if ctx.motion is None:
-            warning("CameraPreview: scroll Z ignored — motion controller not ready")
-            event.accept()
-            return
-
         delta = event.angleDelta().y()
         if delta == 0:
             event.accept()
             return
 
         direction = 1 if delta > 0 else -1
+        ctrl_held = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+        if ctrl_held:
+            anchor = self._video_label.mapFrom(self, event.position().toPoint())
+            self._zoom_preview_overlay.zoom(direction, self._video_label.rect(), anchor)
+            self._video_label.update()
+            event.accept()
+            return
+
+        ctx = get_app_context()
+        if ctx.motion is None:
+            warning("CameraPreview: scroll Z ignored — motion controller not ready")
+            event.accept()
+            return
+
         ctx.motion.move("z", self._SCROLL_STEP_NM * direction)
         event.accept()
 
+    _TEXT_INPUT_TYPES = (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
+
+    def eventFilter(self, obj, event) -> bool:
+        """
+        Application-wide +/- zoom shortcut.
+
+        Installed on the QApplication instance rather than handled per-
+        widget so it fires no matter which widget in the window has
+        focus, not just the video label — as long as this preview is
+        visible and the focused widget isn't a text field the person
+        could be typing into.
+        """
+        if event.type() == QEvent.Type.KeyPress and self.isVisible():
+            key = event.key()
+            if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal, Qt.Key.Key_Minus) and not self._text_input_focused():
+                self._on_zoom_step(-1 if key == Qt.Key.Key_Minus else 1)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _text_input_focused(self) -> bool:
+        widget = QApplication.focusWidget()
+        if isinstance(widget, self._TEXT_INPUT_TYPES):
+            return True
+        return isinstance(widget, QComboBox) and widget.isEditable()
+
     def cleanup(self) -> None:
         info("Preview: cleanup starting...")
+
+        QApplication.instance().removeEventFilter(self)
 
         ctx = get_app_context()
         camera_manager = ctx.camera_manager

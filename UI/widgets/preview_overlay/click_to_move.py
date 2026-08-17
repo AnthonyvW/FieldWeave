@@ -40,7 +40,8 @@ class ClickToMoveOverlay(Overlay):
         full_height: int,
     ) -> None:
         """
-        Process a mouse click from ``OverlayLabel``.
+        Process a mouse click from ``OverlayLabel`` at the normal (un-zoomed)
+        display scale.
 
         Parameters
         ----------
@@ -51,13 +52,53 @@ class ClickToMoveOverlay(Overlay):
             currently occupies, as returned by ``OverlayLabel._image_rect()``.
         full_width, full_height:
             Full camera-sensor resolution of the current frame.  Used to
-            scale the display-space delta to calibration-image space before
-            passing it to ``CameraCalibration.pixel_to_world_delta()``.
+            scale the display-space delta to full-resolution pixel space.
         """
-        # Ignore clicks outside the image area.
         if not image_rect.contains(QPoint(widget_x, widget_y)):
             return
 
+        disp_w = image_rect.width()
+        disp_h = image_rect.height()
+        if disp_w <= 0 or disp_h <= 0:
+            return
+
+        rel_x = widget_x - image_rect.x()
+        rel_y = widget_y - image_rect.y()
+        scale_x = full_width / disp_w
+        scale_y = full_height / disp_h
+
+        self.handle_full_pixel_click(rel_x * scale_x, rel_y * scale_y, full_width, full_height)
+
+    def handle_full_pixel_click(
+        self,
+        full_px: float,
+        full_py: float,
+        full_width: int,
+        full_height: int,
+        reference_x: float | None = None,
+        reference_y: float | None = None,
+    ) -> None:
+        """
+        Move to the machine-vision position for a full camera-resolution
+        pixel coordinate.
+
+        This is the shared entry point ``handle_click`` uses once it has
+        resolved a widget click to full-resolution pixel space. Callers
+        that already have that mapping — such as ``ZoomPreviewOverlay``,
+        which maps through its own pan/zoom crop instead of the plain
+        display-to-full-resolution scale — can call it directly.
+
+        reference_x, reference_y:
+            The full-resolution pixel currently shown at the centre of the
+            display. Defaults to the sensor's true centre
+            (full_width / 2, full_height / 2), which is correct for the
+            normal, un-zoomed view. When the display is panned/zoomed, the
+            centre of the visible crop is passed instead, so the move is
+            relative to what the operator is actually looking at rather
+            than the sensor's absolute centre — otherwise the stage would
+            recentre on the sensor's optical axis instead of on the
+            operator's current view, landing the click somewhere else.
+        """
         ctx = get_app_context()
         mv = ctx.machine_vision
 
@@ -78,35 +119,27 @@ class ClickToMoveOverlay(Overlay):
             warning(f"ClickToMoveOverlay: click ignored — motion state is {state}")
             return
 
-        cal = mv.calibration  # CameraCalibration
-
-        # ----------------------------------------------------------------
-        # Convert widget click → full-resolution pixel coordinate
-        # ----------------------------------------------------------------
-        disp_w = image_rect.width()
-        disp_h = image_rect.height()
-
-        if disp_w <= 0 or disp_h <= 0:
+        if full_width <= 0 or full_height <= 0:
             return
 
-        # Click position relative to the top-left of the displayed image.
-        rel_x = widget_x - image_rect.x()
-        rel_y = widget_y - image_rect.y()
+        cal = mv.calibration  # CameraCalibration
 
-        # Scale to full camera resolution.
-        scale_x = full_width / disp_w
-        scale_y = full_height / disp_h
-        full_px = rel_x * scale_x
-        full_py = rel_y * scale_y
+        if reference_x is None:
+            reference_x = full_width / 2
+        if reference_y is None:
+            reference_y = full_height / 2
 
         # ----------------------------------------------------------------
-        # Convert to world delta and move
+        # Offset from what's currently centred on screen, then re-expressed
+        # as an absolute calibration-image pixel around the calibration
+        # centre. pixel_to_world_delta subtracts that centre back out, so
+        # this nets out to a delta from the on-screen centre, not the
+        # sensor's absolute centre.
         # ----------------------------------------------------------------
-        # Remap the click into calibration-image pixel space so that the
-        # centre subtraction and M_inv multiply in pixel_to_world_delta
-        # operate in a consistent space.
-        cal_px = full_px * (cal.image_width / full_width)
-        cal_py = full_py * (cal.image_height / full_height)
+        offset_x = full_px - reference_x
+        offset_y = full_py - reference_y
+        cal_px = cal.image_width / 2 + offset_x * (cal.image_width / full_width)
+        cal_py = cal.image_height / 2 + offset_y * (cal.image_height / full_height)
 
         dx_ticks, dy_ticks = cal.pixel_to_world_delta(cal_px, cal_py)
 
@@ -120,8 +153,7 @@ class ClickToMoveOverlay(Overlay):
         )
 
         info(
-            f"ClickToMove: display=({rel_x:.1f}, {rel_y:.1f})  "
-            f"full=({full_px:.1f}, {full_py:.1f})  "
+            f"ClickToMove: full=({full_px:.1f}, {full_py:.1f})  "
             f"cal=({cal_px:.1f}, {cal_py:.1f})  "
             f"delta=({dx_ticks:.2f}, {dy_ticks:.2f}) ticks  "
             f"target=({target.x}, {target.y}) nm"

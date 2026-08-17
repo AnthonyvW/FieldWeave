@@ -34,6 +34,8 @@ _COL_REF     = QColor(255, 220, 0, 80)
 _COL_TEXT    = QColor(255, 255, 255, 220)
 _COL_SHADOW  = QColor(0, 0, 0, 200)
 
+_TEXT_LEFT_MARGIN = 50
+
 
 def _paint_mask(
     painter: QPainter,
@@ -93,10 +95,13 @@ class RedMarkDetectionOverlay(Overlay):
     Detected mark centroids are drawn as small circles (green = accepted,
     red = filtered out).  A stabilized reference line is drawn across the
     full display width or height depending on the detected mark orientation.
-    A dimmer line shows the true image centre for comparison.
+    A dimmer line shows the true image centre for comparison. This geometry
+    is drawn in ``draw``, so it tracks zoom preview's pan/zoom transform.
 
     Status text in the top-left shows mark counts, the active line axis,
-    the stabilized position, offset from centre, and elapsed processing time.
+    the stabilized position, offset from centre, and elapsed processing
+    time. This is fixed screen-space chrome, so it's drawn in
+    ``draw_foreground`` instead, unaffected by that transform.
     """
 
     def __init__(self) -> None:
@@ -150,18 +155,18 @@ class RedMarkDetectionOverlay(Overlay):
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
         """
-        Paint the detection geometry and status text into *rect*.
+        Paint the detection geometry into *rect*.
 
-        *rect* is the pixel-accurate bounding box of the camera image within
-        the label (letterboxed), as computed by OverlayLabel._image_rect().
-        All source-space coordinates are scaled to display-space here.
+        *rect* is the current display rect, as computed by
+        ``OverlayLabel._display_rect()``. All source-space coordinates are
+        scaled to display-space here.
 
         Blob footprints are painted as semi-transparent colour fills by
         converting the valid/filtered pixel masks to scaled QImages, matching
         the main.py standalone tool behaviour.  Centroid crosshairs are drawn
         on top.
         """
-        if not self.enabled or self._result is None:
+        if self._result is None:
             return
 
         r = self._result
@@ -179,10 +184,6 @@ class RedMarkDetectionOverlay(Overlay):
             return ry + int(src_y * sy)
 
         painter.save()
-
-        font = QFont(painter.font())
-        font.setPointSize(8)
-        painter.setFont(font)
 
         if r.filtered_mask.any():
             _paint_mask(painter, r.filtered_mask, rect, _COL_INVALID)
@@ -209,29 +210,52 @@ class RedMarkDetectionOverlay(Overlay):
                 painter.setPen(QPen(_COL_LINE, 2))
                 painter.drawLine(tx(r.stabilized_x), ry, tx(r.stabilized_x), ry + dh)
 
+        painter.restore()
+
+    def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
+        """
+        Paint the status text readout into *rect*.
+
+        A fixed screen-space status readout rather than a marker of real
+        image content, so it's drawn here, unaffected by zoom preview's
+        pan/zoom transform, instead of in ``draw``.
+        """
+        if self._result is None:
+            return
+
+        r = self._result
+        rx = rect.left()
+        ry = rect.top()
+
+        painter.save()
+
+        font = QFont(painter.font())
+        font.setPointSize(8)
+        painter.setFont(font)
+
         y_cursor = ry + 28
-        _draw_text_shadowed(painter, rx + 8, y_cursor, f"marks: {len(r.valid_centers)} valid  {len(r.filtered_centers)} filtered")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"marks: {len(r.valid_centers)} valid  {len(r.filtered_centers)} filtered")
         y_cursor += 16
-        _draw_text_shadowed(painter, rx + 8, y_cursor, f"axis: {r.line_orientation}")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"axis: {r.line_orientation}")
         y_cursor += 16
 
         if r.line_orientation == "horizontal" and r.stabilized_y is not None and r.image_center_y is not None:
             offset = r.stabilized_y - r.image_center_y
             direction = "down" if offset >= 0 else "up"
             pct = abs(offset) / r.image_center_y * 100.0 if r.image_center_y > 0 else 0.0
-            _draw_text_shadowed(painter, rx + 8, y_cursor, f"Y stable: {r.stabilized_y:.1f} px")
+            _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"Y stable: {r.stabilized_y:.1f} px")
             y_cursor += 16
-            _draw_text_shadowed(painter, rx + 8, y_cursor, f"offset: {abs(offset):.1f} px ({pct:.1f}% {direction})")
+            _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"offset: {abs(offset):.1f} px ({pct:.1f}% {direction})")
             y_cursor += 16
         elif r.line_orientation == "vertical" and r.stabilized_x is not None and r.image_center_x is not None:
             offset = r.stabilized_x - r.image_center_x
             direction = "right" if offset >= 0 else "left"
             pct = abs(offset) / r.image_center_x * 100.0 if r.image_center_x > 0 else 0.0
-            _draw_text_shadowed(painter, rx + 8, y_cursor, f"X stable: {r.stabilized_x:.1f} px")
+            _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"X stable: {r.stabilized_x:.1f} px")
             y_cursor += 16
-            _draw_text_shadowed(painter, rx + 8, y_cursor, f"offset: {abs(offset):.1f} px ({pct:.1f}% {direction})")
+            _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"offset: {abs(offset):.1f} px ({pct:.1f}% {direction})")
             y_cursor += 16
 
-        _draw_text_shadowed(painter, rx + 8, y_cursor, f"vision: {r.elapsed_ms:.1f} ms")
+        _draw_text_shadowed(painter, rx + _TEXT_LEFT_MARGIN, y_cursor, f"vision: {r.elapsed_ms:.1f} ms")
 
         painter.restore()
