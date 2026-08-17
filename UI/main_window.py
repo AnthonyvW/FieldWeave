@@ -16,6 +16,8 @@ from UI.tabs.logs_tab import LogsTab
 from UI.tabs.project_tab import ProjectTab
 from UI.tabs.navigate_tab import NavigateTab
 from UI.tabs.calibration_tab import CalibrationTab
+from UI.tabs.measure_tab import MeasurementTab
+
 from UI.widgets.camera_preview import CameraPreview
 from UI.widgets.update_notifier import UpdateNotifier
 from UI.widgets.changelog_dialog import ChangelogDialog
@@ -77,8 +79,10 @@ class MainWindow(QMainWindow):
         self.tabs.setDocumentMode(True)
 
         self.navigate_tab = NavigateTab()
+        self.measure_tab = MeasurementTab()
         self.project_tab = ProjectTab()
         self.tabs.addTab(self.navigate_tab, "Navigate")
+        self.tabs.addTab(self.measure_tab, "Measurement")
         self.tabs.addTab(self.project_tab, "Project")
         self.tabs.addTab(CalibrationTab(), "Calibration")
         self.tabs.addTab(LogsTab(), "Logs")
