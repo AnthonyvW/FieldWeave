@@ -5,6 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/AnthonyvW)
 [![Ko-fi](https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/procerand)
+[![Discord](https://img.shields.io/badge/Chat-Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/nZh4uWUV4b)
 
 FieldWeave is an open-source, gigapixel imaging system built on a modified off-the-shelf 3D printer. It automates sample capture, focus stacking, and DPI calibration, producing high resolution images across a wide range of fields. See it in action on the [FieldWeave website](https://www.fieldweave.com), which includes an interactive gallery for browsing full-resolution scans.
 
