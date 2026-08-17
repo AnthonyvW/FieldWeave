@@ -21,7 +21,7 @@ from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
 from UI.widgets.preview_overlay.background_detection import BackgroundDetectionOverlay
 from UI.widgets.preview_overlay.focus_stack_preview import FocusStackPreviewOverlay
-from UI.widgets.preview_overlay.zoom_preview import ZoomPreviewButton, ZoomPreviewOverlay, ZoomStepButton
+from UI.widgets.preview_overlay.zoom_preview import ZoomPreviewOverlay, ZoomResetButton, ZoomStepButton
 
 
 class EyeToggleButton(QPushButton):
@@ -97,10 +97,8 @@ class OverlayLabel(QLabel):
     QLabel that drives a list of Overlay instances on each paint and frame.
 
     Click-and-drag panning of the zoom overlay is available whenever it's
-    ``active`` (zoomed in, from either the step buttons or interactive
-    scroll-to-zoom) — see ``ZoomPreviewOverlay.active``. The overlay's own
-    ``enabled`` flag only gates whether the mouse wheel zooms the view
-    instead of moving the z axis (``CameraPreview.wheelEvent``).
+    ``active`` — zoomed in via either the step buttons or ctrl+scroll —
+    see ``ZoomPreviewOverlay.active``.
     """
 
     _ZOOM_DRAG_THRESHOLD_PX: int = 4
@@ -139,9 +137,8 @@ class OverlayLabel(QLabel):
         Whether *overlay* should currently draw.
 
         Every overlay but the zoom overlay uses its plain ``enabled``
-        flag. The zoom overlay also stays active while zoomed via
-        ``ZoomStepButton``, even when its own interactive pan/zoom toggle
-        is off — see ``ZoomPreviewOverlay.active``.
+        flag. The zoom overlay instead uses ``active``, which is true
+        whenever the view is zoomed — see ``ZoomPreviewOverlay.active``.
         """
         if overlay is self._zoom_handler:
             return overlay.active
@@ -151,9 +148,9 @@ class OverlayLabel(QLabel):
         """
         Return the rect overlays should draw and interact against.
 
-        While the zoom overlay is active (interactive mode, or zoomed via
-        the step buttons), this is ``ZoomPreviewOverlay.display_rect()``
-        — the rect its current crop actually fills within the widget,
+        While the zoom overlay is active (zoomed via the step buttons or
+        ctrl+scroll), this is ``ZoomPreviewOverlay.display_rect()`` —
+        the rect its current crop actually fills within the widget,
         which shrinks toward the letterboxed rect at low zoom and grows
         to fill the widget entirely once the crop's aspect ratio catches
         up (see ``ZoomPreviewOverlay._crop_size``). Otherwise it's the
@@ -266,9 +263,8 @@ class OverlayLabel(QLabel):
         """
         Forward the full-resolution frame to every enabled overlay.
 
-        The zoom overlay always gets the frame, even while its
-        interactive toggle is off, so ``ZoomStepButton`` has a frame to
-        zoom against.
+        The zoom overlay always gets the frame, even while it's not
+        zoomed, so ``ZoomStepButton`` has a frame to zoom against.
         """
         if self._zoom_handler is not None:
             self._zoom_handler.update_full(frame)
@@ -422,15 +418,6 @@ class OverlayController:
         self._preview._video_label.update()
 
     @property
-    def zoom_preview(self) -> bool:
-        return self._preview._zoom_preview_overlay.enabled
-
-    @zoom_preview.setter
-    def zoom_preview(self, enabled: bool) -> None:
-        self._preview._zoom_preview_button.setChecked(enabled)
-        self._preview._on_zoom_preview_toggled(enabled)
-
-    @property
     def focus_stack_preview(self) -> FocusStackPreviewOverlay:
         """Direct access to the focus stack preview overlay."""
         return self._preview._focus_stack_preview_overlay
@@ -563,20 +550,20 @@ class CameraPreview(QFrame):
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
-        self._zoom_preview_button = ZoomPreviewButton(self)
-        self._zoom_preview_button.move(10, 185)
-        self._zoom_preview_button.raise_()
-        self._zoom_preview_button.toggled_zoom_preview.connect(self._on_zoom_preview_toggled)
-
         self._zoom_in_button = ZoomStepButton(1, self)
-        self._zoom_in_button.move(10, 220)
+        self._zoom_in_button.move(10, 185)
         self._zoom_in_button.raise_()
         self._zoom_in_button.zoom_step.connect(self._on_zoom_step)
 
         self._zoom_out_button = ZoomStepButton(-1, self)
-        self._zoom_out_button.move(10, 255)
+        self._zoom_out_button.move(10, 220)
         self._zoom_out_button.raise_()
         self._zoom_out_button.zoom_step.connect(self._on_zoom_step)
+
+        self._zoom_reset_button = ZoomResetButton(self)
+        self._zoom_reset_button.move(10, 255)
+        self._zoom_reset_button.raise_()
+        self._zoom_reset_button.reset_zoom.connect(self._on_zoom_reset)
 
         self._overlays = OverlayController(self)
 
@@ -653,18 +640,12 @@ class CameraPreview(QFrame):
         self._background_overlay.set_enabled(background)
         self._video_label.update()
 
-    def _on_zoom_preview_toggled(self, enabled: bool) -> None:
-        self._zoom_preview_overlay.set_enabled(enabled)
-        self._video_label.update()
-        if enabled:
-            get_app_context().toast.info(
-                "Zoom preview enabled : scroll to zoom in, drag to pan. "
-                "Scroll-to-move the Z axis is temporarily disabled.",
-                duration=8000,
-            )
-
     def _on_zoom_step(self, direction: int) -> None:
         self._zoom_preview_overlay.zoom(direction, self._video_label.rect())
+        self._video_label.update()
+
+    def _on_zoom_reset(self) -> None:
+        self._zoom_preview_overlay.reset()
         self._video_label.update()
 
     def _toggle_preview_visibility(self) -> None:
@@ -877,9 +858,11 @@ class CameraPreview(QFrame):
             return
 
         direction = 1 if delta > 0 else -1
+        ctrl_held = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
-        if self._zoom_preview_overlay.enabled:
-            self._zoom_preview_overlay.zoom(direction, self._video_label.rect())
+        if ctrl_held:
+            anchor = self._video_label.mapFrom(self, event.position().toPoint())
+            self._zoom_preview_overlay.zoom(direction, self._video_label.rect(), anchor)
             self._video_label.update()
             event.accept()
             return

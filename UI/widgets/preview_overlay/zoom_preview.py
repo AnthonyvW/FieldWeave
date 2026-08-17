@@ -1,37 +1,34 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import QPushButton, QWidget
 
-from common.logger import info
 from UI.style import ZOOM_PREVIEW_VIEWPORT_COLOR
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
 
 class ZoomPreviewOverlay(Overlay):
     """
-    Displays a scroll-zoomable, click-and-drag-pannable crop of the camera
-    feed over the normal display.
+    Displays a zoomable, click-and-drag-pannable crop of the camera feed
+    over the normal display.
 
     Latches onto the full-resolution frame via ``update_full``, which
     ``OverlayLabel`` calls unconditionally so a frame is always available
-    for ``zoom()`` regardless of interactive mode, and draws a scaled crop
-    of it in ``draw``.
+    for ``zoom()`` regardless of zoom state, and draws a scaled crop of
+    it in ``draw``.
 
-    ``enabled`` (toggled by ``ZoomPreviewButton``) means interactive
-    scroll-to-zoom mode: the mouse wheel zooms the view instead of moving
-    the z axis, which ``CameraPreview.wheelEvent`` gates on it directly.
-    ``ZoomStepButton`` instead calls ``zoom()`` directly and works whether
-    or not this mode is on. ``active`` (enabled OR zoomed) is the broader
-    flag: it's what actually drives drawing the crop and minimap — see
-    ``display_rect`` / ``paint_transform`` / ``draw_foreground`` — and
-    what ``OverlayLabel`` gates click-and-drag panning on, so panning and
-    the zoomed view both work whether the zoom came from scrolling or
-    from the step buttons. Click-to-move remains active in both cases:
-    ``OverlayLabel`` distinguishes a click from a drag by movement
-    distance and, for a click, maps it to a full-resolution pixel via
+    ``zoom()`` is driven by ``ZoomStepButton`` and by ctrl+scroll (see
+    ``CameraPreview.wheelEvent``). ``active`` is true once zoomed past
+    the fully-zoomed-out level: it's what actually drives drawing the
+    crop and minimap — see ``display_rect`` / ``paint_transform`` /
+    ``draw_foreground`` — and what ``OverlayLabel`` gates click-and-drag
+    panning on. Click-to-move remains active too: ``OverlayLabel``
+    distinguishes a click from a drag by movement distance and, for a
+    click, maps it to a full-resolution pixel via
     ``widget_pos_to_full_pixel`` instead of the plain un-zoomed scale.
     """
 
@@ -52,31 +49,15 @@ class ZoomPreviewOverlay(Overlay):
         self._drag_last: QPoint | None = None
         self._crop: tuple[int, int, int, int] | None = None
 
-    def set_enabled(self, enabled: bool) -> None:
-        """
-        Toggle interactive scroll-to-zoom mode (mouse wheel zooms instead
-        of moving the z axis — see ``CameraPreview.wheelEvent``).
-
-        Click-and-drag panning and the zoomed view itself are governed by
-        ``active`` instead, not this flag, so they keep working from
-        whatever zoom the step buttons left the view at. This no longer
-        resets the zoom level: turning this mode off only cancels a drag
-        in progress.
-        """
-        super().set_enabled(enabled)
-        if not enabled:
-            self._dragging = False
-            self._drag_last = None
-
     @property
     def zoomed(self) -> bool:
-        """True once zoomed in past the fully-zoomed-out level, whether that came from the step buttons or interactive scroll-to-zoom."""
+        """True once zoomed in past the fully-zoomed-out level."""
         return self._zoom > self._MIN_ZOOM
 
     @property
     def active(self) -> bool:
-        """True whenever the crop/zoom viewport should be drawn and panned — interactive scroll-to-zoom mode is on, or the view is zoomed via the step buttons."""
-        return self.enabled or self.zoomed
+        """True whenever the crop/zoom viewport should be drawn and panned — i.e. whenever the view is zoomed."""
+        return self.zoomed
 
     def reset(self) -> None:
         self._zoom = self._MIN_ZOOM
@@ -89,12 +70,34 @@ class ZoomPreviewOverlay(Overlay):
     def update_full(self, frame: np.ndarray) -> None:
         self._frame = frame
 
-    def zoom(self, steps: int, widget_rect: QRect) -> None:
-        """Zoom in (steps > 0) or out (steps < 0) around the current center."""
+    def zoom(self, steps: int, widget_rect: QRect, anchor: QPoint | None = None) -> None:
+        """
+        Zoom in (steps > 0) or out (steps < 0).
+
+        Without an anchor, the current center stays fixed — used by the
+        step buttons and keyboard shortcut. With an anchor — a
+        widget-space position, e.g. the mouse position for ctrl+scroll —
+        the full-resolution pixel under that position is kept fixed on
+        screen instead, so zooming feels like it's happening at the
+        cursor rather than recentering.
+        """
         if steps == 0 or self._frame is None:
             return
+
+        anchor_state = self._pos_to_full_pixel_and_rel(anchor, widget_rect) if anchor is not None else None
+
         factor = self._ZOOM_STEP ** steps
         self._zoom = min(self._MAX_ZOOM, max(self._MIN_ZOOM, self._zoom * factor))
+
+        if anchor_state is not None:
+            full_px, full_py, rel_x, rel_y, _, _ = anchor_state
+            size = self._crop_size(widget_rect)
+            if size is not None:
+                crop_w, crop_h = size
+                h, w = self._frame.shape[:2]
+                self._center_x = (full_px - crop_w * (rel_x - 0.5)) / w
+                self._center_y = (full_py - crop_h * (rel_y - 0.5)) / h
+
         self._clamp_center(widget_rect)
 
     def begin_drag(self, pos: QPoint) -> None:
@@ -267,6 +270,23 @@ class ZoomPreviewOverlay(Overlay):
         ``(full_px, full_py, full_width, full_height)``, or None if there
         is no frame yet.
         """
+        state = self._pos_to_full_pixel_and_rel(pos, widget_rect)
+        if state is None:
+            return None
+        full_px, full_py, _, _, full_w, full_h = state
+        return full_px, full_py, full_w, full_h
+
+    def _pos_to_full_pixel_and_rel(
+        self, pos: QPoint, widget_rect: QRect
+    ) -> tuple[float, float, float, float, int, int] | None:
+        """
+        Map a widget-space position to a full-resolution pixel under the
+        crop shown right now, plus that same position's fraction across
+        the on-screen display rect. Returns
+        ``(full_px, full_py, rel_x, rel_y, full_width, full_height)``, or
+        None if there is no frame yet. Shared by ``widget_pos_to_full_pixel``
+        (click-to-move) and ``zoom``'s anchor handling.
+        """
         crop = self._current_crop(widget_rect)
         if crop is None:
             return None
@@ -282,7 +302,7 @@ class ZoomPreviewOverlay(Overlay):
 
         full_px = x0 + rel_x * crop_w
         full_py = y0 + rel_y * crop_h
-        return full_px, full_py, w, h
+        return full_px, full_py, rel_x, rel_y, w, h
 
     def current_view_center_full_pixel(self, widget_rect: QRect) -> tuple[float, float] | None:
         """
@@ -380,60 +400,13 @@ class ZoomPreviewOverlay(Overlay):
         painter.restore()
 
 
-class ZoomPreviewButton(QPushButton):
-    """
-    Checkable overlay button that toggles pan/zoom preview mode.
-
-    Draws a magnifier-with-crosshair icon via QPainter, the same approach
-    ``EyeToggleButton`` uses, so the icon renders identically everywhere
-    instead of depending on a font glyph.
-    """
-
-    toggled_zoom_preview = Signal(bool)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("ZoomPreviewButton")
-        self.setCheckable(True)
-        self.setFixedSize(30, 30)
-        self.setToolTip("Toggle Zoom Preview")
-        self.clicked.connect(self._on_clicked)
-
-    def _on_clicked(self, checked: bool) -> None:
-        info(f"Preview: Zoom preview {'enabled' if checked else 'disabled'}")
-        self.toggled_zoom_preview.emit(checked)
-
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        pen = QPen(QColor(0, 0, 0))
-        pen.setWidth(2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-
-        cx, cy, r = 13.0, 13.5, 6.0
-        painter.drawEllipse(QPointF(cx, cy), r, r)
-
-        diag = 0.7071
-        handle_start = QPointF(cx + r * diag, cy + r * diag)
-        handle_end = QPointF(cx + (r + 5.5) * diag, cy + (r + 5.5) * diag)
-        painter.drawLine(handle_start, handle_end)
-
-        painter.end()
-
-
 class ZoomStepButton(QPushButton):
     """
     Plain button that steps the camera zoom in or out by one increment.
 
-    Drives ``ZoomPreviewOverlay.zoom()`` directly, independent of the
-    interactive pan/zoom toggle — see ``ZoomPreviewOverlay.active``. Does
-    not take keyboard focus on click, so the video label keeps it and the
-    +/- keyboard shortcuts keep working right after a button press.
+    Drives ``ZoomPreviewOverlay.zoom()`` directly. Does not take keyboard
+    focus on click, so the video label keeps it and the +/- keyboard
+    shortcuts keep working right after a button press.
     """
 
     zoom_step = Signal(int)
@@ -443,7 +416,7 @@ class ZoomStepButton(QPushButton):
         self._step = step
         self.setObjectName("ZoomStepButton")
         self.setFixedSize(30, 30)
-        self.setToolTip("Zoom In" if step > 0 else "Zoom Out")
+        self.setToolTip("Zoom In (+)" if step > 0 else "Zoom Out (-)")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.clicked.connect(self._on_clicked)
 
@@ -467,6 +440,83 @@ class ZoomStepButton(QPushButton):
         painter.drawLine(QPointF(cx - 2.3, cy), QPointF(cx + 2.3, cy))
         if self._step > 0:
             painter.drawLine(QPointF(cx, cy - 2.3), QPointF(cx, cy + 2.3))
+
+        diag = 0.7071
+        handle_start = QPointF(cx + r * diag, cy + r * diag)
+        handle_end = QPointF(cx + (r + 5.5) * diag, cy + (r + 5.5) * diag)
+        painter.drawLine(handle_start, handle_end)
+
+        painter.end()
+
+
+class ZoomResetButton(QPushButton):
+    """
+    Plain button that resets zoom and pan back to the fully zoomed-out,
+    centered view.
+
+    Drives ``ZoomPreviewOverlay.reset()`` directly. Drawn as a magnifier
+    whose lens is an open arc with a counter-clockwise arrowhead at its
+    end, rather than a closed circle, so the glyph reads as "reset"
+    instead of plain zoom in/out.
+    """
+
+    _ARC_START_DEG: float = -144.0
+    _ARC_GAP_DEG: float = 57
+    _ARROW_LENGTH: float = 4.3
+    _ARROW_BOTTOM_ANGLE_DEG: float = 58.6
+    _ARROW_TOP_ANGLE_DEG: float = 32.8
+
+    reset_zoom = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ZoomStepButton")
+        self.setFixedSize(30, 30)
+        self.setToolTip("Reset Zoom")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.clicked.connect(self._on_clicked)
+
+    def _on_clicked(self) -> None:
+        self.reset_zoom.emit()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        pen = QPen(QColor(0, 0, 0))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        cx, cy, r = 13.0, 13.5, 6.0
+        lens_rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        arc_end_deg = self._ARC_START_DEG + (360.0 - self._ARC_GAP_DEG)
+        painter.drawArc(lens_rect, int(self._ARC_START_DEG * 16), int((arc_end_deg - self._ARC_START_DEG) * 16))
+
+        theta = math.radians(arc_end_deg)
+        e_x = cx + r * math.cos(theta)
+        e_y = cy - r * math.sin(theta)
+        backward_x, backward_y = math.sin(theta), math.cos(theta)
+        outward_x, outward_y = -backward_y, backward_x
+
+        bottom_angle = math.radians(self._ARROW_BOTTOM_ANGLE_DEG)
+        top_angle = math.radians(self._ARROW_TOP_ANGLE_DEG)
+
+        bottom_dir_x = backward_x * math.cos(bottom_angle) + outward_x * math.sin(bottom_angle)
+        bottom_dir_y = backward_y * math.cos(bottom_angle) + outward_y * math.sin(bottom_angle)
+        top_dir_x = backward_x * math.cos(top_angle) - outward_x * math.sin(top_angle)
+        top_dir_y = backward_y * math.cos(top_angle) - outward_y * math.sin(top_angle)
+
+        e = QPointF(e_x, e_y)
+        bottom_end = QPointF(e_x + bottom_dir_x * self._ARROW_LENGTH, e_y + bottom_dir_y * self._ARROW_LENGTH)
+        top_end = QPointF(e_x + top_dir_x * self._ARROW_LENGTH, e_y + top_dir_y * self._ARROW_LENGTH)
+
+        painter.drawLine(bottom_end, e)
+        painter.drawLine(top_end, e)
 
         diag = 0.7071
         handle_start = QPointF(cx + r * diag, cy + r * diag)
