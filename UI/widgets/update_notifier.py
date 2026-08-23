@@ -65,6 +65,11 @@ class UpdateNotifier(QWidget):
             self._notify_check_failed()
             self._manual = False
 
+        elif status == UpdateStatus.NO_UPSTREAM:
+            self._poll_timer.stop()
+            self._notify_no_upstream()
+            self._manual = False
+
         elif status == UpdateStatus.UPDATING and self._updating_dialog is None:
             self._show_updating_dialog()
 
@@ -162,6 +167,14 @@ class UpdateNotifier(QWidget):
             )
         else:
             self._toast_success("FieldWeave is up to date")
+
+    def _notify_no_upstream(self) -> None:
+        if self._manual:
+            QMessageBox.information(
+                self.parentWidget(),
+                "Update Check Skipped",
+                "The current branch is not tracking a remote, so update checking is unavailable.",
+            )
 
     def _notify_check_failed(self) -> None:
         message = f"Failed to check for updates: {self._updater.error_message}"

@@ -192,7 +192,7 @@ class ConfigManager(Generic[S], ABC):
     
     def _extract_metadata(
         self, data: dict[str, Any]
-    ) -> tuple[str | None, str | None, dict[str, Any]]:
+    ) -> tuple[str | None, str | None, dict[str, Any], bool]:
         """
         Extract metadata and migrate if needed.
         
@@ -200,13 +200,15 @@ class ConfigManager(Generic[S], ABC):
             data: Dictionary loaded from YAML
         
         Returns:
-            Tuple of (config_type, config_version, remaining_data)
-            The remaining_data will be migrated if version mismatch detected
+            Tuple of (config_type, config_version, remaining_data, migrated)
+            remaining_data will be migrated if a version mismatch was detected;
+            migrated is True only when migrate() actually ran and succeeded.
         """
         data = data.copy()  # Don't modify the original
         
         config_type = data.pop("config_type", None)
         config_version = data.pop("config_version", None)
+        migrated = False
         
         # Validate config_type matches if present
         if config_type is not None and config_type != self.config_type:
@@ -221,19 +223,20 @@ class ConfigManager(Generic[S], ABC):
             
             if config_version != current_version and current_version != "unknown":
                 info(
-                    f"Config version mismatch: file has v{config_version}, "
+                    f"Config version mismatch for '{self.config_type}': file has v{config_version}, "
                     f"current is v{current_version}. Running migration..."
                 )
                 try:
                     data = self.migrate(data, config_version, current_version)
-                    info("Migration completed successfully")
+                    migrated = True
+                    info(f"Migration completed successfully for '{self.config_type}'")
                 except Exception as e:
-                    error(f"Migration failed: {e}")
+                    error(f"Migration failed for '{self.config_type}': {e}")
                     # Continue with unmigrated data - child class should handle it
             else:
-                debug(f"Config version matches: v{config_version}")
+                debug(f"Config version matches for '{self.config_type}': v{config_version}")
         
-        return config_type, config_version, data
+        return config_type, config_version, data, migrated
 
     def _load_dict_from_file(self, path: Path) -> dict[str, Any]:
         """
@@ -368,10 +371,12 @@ class ConfigManager(Generic[S], ABC):
         if ap.exists():
             try:
                 data_dict = self._load_dict_from_file(ap)
-                _, _, clean_data = self._extract_metadata(data_dict)
+                _, _, clean_data, migrated = self._extract_metadata(data_dict)
                 settings = self.from_dict(clean_data)
                 self._validate(settings, "active settings")
                 info(f"Loaded active settings from {ap.name}")
+                if migrated:
+                    self.save(settings)
                 return settings
             except ConfigValidationError:
                 raise
@@ -403,7 +408,7 @@ class ConfigManager(Generic[S], ABC):
         p = Path(path)
         try:
             data_dict = self._load_dict_from_file(p)
-            file_config_type, _, clean_data = self._extract_metadata(data_dict)
+            file_config_type, _, clean_data, _ = self._extract_metadata(data_dict)
             
             # Check if config_type matches
             if file_config_type is not None and file_config_type != self.config_type:

@@ -18,6 +18,7 @@ from pathlib import Path
 from common.logger import info, warning, error
 
 _ERROR_MESSAGE_LIMIT = 500
+_NO_UPSTREAM_MARKER = "no upstream configured"
 
 
 class UpdateStatus:
@@ -29,6 +30,7 @@ class UpdateStatus:
     UPDATING = "updating"
     UPDATE_COMPLETE = "update_complete"
     UPDATE_FAILED = "update_failed"
+    NO_UPSTREAM = "no_upstream"
 
 
 class Updater:
@@ -115,12 +117,19 @@ class Updater:
             return
 
         local = self._git_rev_parse("HEAD")
-        remote = self._git_rev_parse("@{u}")
+        if not local:
+            self._fail_check("Could not determine local commit")
+            return
 
-        if not local or not remote:
-            self._fail_check(
-                "Could not determine local/remote commit - is the current branch tracking a remote?"
-            )
+        success, remote, stderr = self._run_git(["rev-parse", "@{u}"], timeout=10, log_errors=False)
+        if not success:
+            if _NO_UPSTREAM_MARKER in stderr.lower():
+                info("Current branch has no upstream - skipping update check")
+                with self._lock:
+                    self._status = UpdateStatus.NO_UPSTREAM
+                return
+            warning(f"git rev-parse @{{u}} failed: {stderr}")
+            self._fail_check("Could not determine remote commit - is the current branch tracking a remote?")
             return
 
         behind = self._git_commits_behind(local, remote)
@@ -158,7 +167,7 @@ class Updater:
     def _is_git_checkout(self) -> bool:
         return (self._repo_dir / ".git").exists()
 
-    def _run_git(self, args: list[str], timeout: int) -> tuple[bool, str, str]:
+    def _run_git(self, args: list[str], timeout: int, log_errors: bool = True) -> tuple[bool, str, str]:
         """Returns (success, stdout, stderr). On launch failure, stderr holds the reason."""
         command = " ".join(["git", *args])
 
@@ -180,7 +189,7 @@ class Updater:
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
 
-        if result.returncode != 0:
+        if result.returncode != 0 and log_errors:
             error(f"'{command}' exited {result.returncode}\nstdout: {stdout}\nstderr: {stderr}")
 
         return result.returncode == 0, stdout, stderr

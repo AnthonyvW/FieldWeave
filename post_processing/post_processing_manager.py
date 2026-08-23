@@ -6,9 +6,9 @@ a stable public API for the rest of the application.
 
 Mirrors the pattern of :class:`MotionControllerManager`: the manager is the
 stable surface callers hold; routines are swappable payloads passed to
- `start_routine`.  Settings are loaded from and saved back to the shared
-:class:`FieldWeaveSettingsManager` so post-processing config lives in the
-application-wide config file.
+ `start_routine`.  Settings are sourced from the shared
+:class:`AppContext` so post-processing config is always the same live
+instance the rest of the application reads and writes.
 
 Typical usage — immediate start::
 
@@ -35,11 +35,7 @@ from queue import Queue
 from typing import Callable, TYPE_CHECKING
 
 from common.logger import info, error, warning
-from common.fieldweaveConfig import (
-    FieldWeaveSettings,
-    FieldWeaveSettingsManager,
-    PostProcessingSettings,
-)
+from common.fieldweaveConfig import FieldWeaveSettings, PostProcessingSettings
 
 if TYPE_CHECKING:
     from post_processing.routines.post_processing_routine import PostProcessingRoutine, RoutineResult
@@ -62,7 +58,8 @@ class PostProcessingManager:
     only need to subscribe once here rather than re-subscribing each time a
     new routine is created.
 
-    Settings are owned here and persisted via :class:`FieldWeaveSettingsManager`.
+    Settings are owned by :class:`AppContext` and read live from there via
+    the :attr:`settings` property, so this manager never holds its own copy.
     Pass the current ``settings`` to each routine at construction time so the
     routine always reads from the live values.
 
@@ -96,13 +93,7 @@ class PostProcessingManager:
         manager.shutdown()
     """
 
-    def __init__(
-        self,
-        settings_manager: FieldWeaveSettingsManager | None = None,
-    ) -> None:
-        self._settings_manager = settings_manager or FieldWeaveSettingsManager()
-        self._settings: FieldWeaveSettings = self._load_settings()
-
+    def __init__(self) -> None:
         self._active_routine: PostProcessingRoutine | None = None
         self._routine_state_listeners: list[RoutineStateCallback] = []
         self._routine_complete_listeners: list[RoutineCompleteCallback] = []
@@ -120,29 +111,30 @@ class PostProcessingManager:
     @property
     def settings(self) -> FieldWeaveSettings:
         """The current application settings (including post-processing config)."""
-        return self._settings
+        from common.app_context import get_app_context
+        return get_app_context().settings
 
     @property
     def post_processing_settings(self) -> PostProcessingSettings:
         """Convenience accessor for the post-processing section of settings."""
-        return self._settings.post_processing
+        return self.settings.post_processing
 
     def apply_settings(self, settings: FieldWeaveSettings) -> None:
         """Replace the current settings without saving to disk."""
-        try:
-            settings.validate()
-        except ValueError as exc:
-            error(f"PostProcessingManager: invalid settings — {exc}")
-            return
-        self._settings = settings
+        from common.app_context import get_app_context
+        get_app_context().apply_settings(settings)
 
     def save_settings(self) -> None:
         """Persist the current settings to the FieldWeave config file."""
-        try:
-            self._settings_manager.save(self._settings)
+        from common.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.settings_manager is None:
+            error("PostProcessingManager: no settings manager available")
+            return
+        if ctx.settings_manager.save(ctx.settings):
             info("PostProcessingManager: settings saved")
-        except Exception as exc:
-            error(f"PostProcessingManager: failed to save settings — {exc}")
+        else:
+            error("PostProcessingManager: failed to save settings")
 
     # ------------------------------------------------------------------
     # Routine state listeners
@@ -356,16 +348,3 @@ class PostProcessingManager:
         if self._queue_worker is not None:
             self._queue_worker.join(timeout=10)
         info("PostProcessingManager: shut down")
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _load_settings(self) -> FieldWeaveSettings:
-        try:
-            settings = self._settings_manager.load()
-            info("PostProcessingManager: settings loaded")
-            return settings
-        except Exception as exc:
-            error(f"PostProcessingManager: failed to load settings — {exc}; using defaults")
-            return FieldWeaveSettings()

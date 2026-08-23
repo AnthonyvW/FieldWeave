@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
-from common.app_context import FIELDWEAVE_VERSION, get_app_context
+from common.app_context import get_fieldweave_version, get_app_context
+from UI.widgets.changelog_dialog import ChangelogDialog
 
 WEBSITE_URL = "https://www.fieldweave.com/"
 CONTACT_URL = "https://www.fieldweave.com/contact"
@@ -64,19 +65,37 @@ def _check_updates_row(parent: QWidget) -> QWidget:
     return row
 
 
+def _changelog_row(parent: QWidget) -> QWidget:
+    row = QWidget()
+    row_layout = QHBoxLayout(row)
+    row_layout.setContentsMargins(0, 0, 0, 0)
+
+    button = QPushButton("View Changelog")
+    row_layout.addWidget(button)
+    row_layout.addStretch()
+
+    def on_click() -> None:
+        ChangelogDialog(parent).exec()
+
+    button.clicked.connect(on_click)
+
+    return row
+
+
 def about_page() -> QWidget:
     w = QWidget()
     layout = QVBoxLayout(w)
 
     top = QGroupBox("About FieldWeave")
     top_layout = QVBoxLayout(top)
-    version = FIELDWEAVE_VERSION
+    version = get_fieldweave_version()
     top_layout.addWidget(QLabel(f"Version {version}"))
     top_layout.addWidget(QLabel(
         "Created by Anthony van Weel."
     ))
     top_layout.addWidget(_link_label(f'Visit FieldWeave\'s Website at <a href="{WEBSITE_URL}">{WEBSITE_URL}</a>'))
     top_layout.addWidget(_check_updates_row(w))
+    top_layout.addWidget(_changelog_row(w))
     layout.addWidget(top)
 
     support = QGroupBox("Support FieldWeave")
