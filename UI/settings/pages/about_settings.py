@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
-from common.app_context import FIELDWEAVE_VERSION, get_app_context
+from common.app_context import get_fieldweave_version, get_app_context
 
 WEBSITE_URL = "https://www.fieldweave.com/"
 CONTACT_URL = "https://www.fieldweave.com/contact"
@@ -70,7 +70,7 @@ def about_page() -> QWidget:
 
     top = QGroupBox("About FieldWeave")
     top_layout = QVBoxLayout(top)
-    version = FIELDWEAVE_VERSION
+    version = get_fieldweave_version()
     top_layout.addWidget(QLabel(f"Version {version}"))
     top_layout.addWidget(QLabel(
         "Created by Anthony van Weel."

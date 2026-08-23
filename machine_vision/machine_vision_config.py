@@ -643,7 +643,6 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         from_version: str,
         to_version: str,
     ) -> dict[str, Any]:
-        info(f"MachineVisionSettings: migrate {from_version} → {to_version} (no-op)")
         return data
 
     def from_dict(self, data: dict[str, Any]) -> MachineVisionSettings:

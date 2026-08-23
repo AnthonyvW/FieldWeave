@@ -12,7 +12,11 @@ from camera.cameras.base_camera import BaseCamera
 from machine_vision.machine_vision_manager import MachineVisionManager
 from post_processing.post_processing_manager import PostProcessingManager
 from common.logger import info, error, warning, debug
-from common.fieldweaveConfig import FieldWeaveSettingsManager, FieldWeaveSettings
+from common.fieldweaveConfig import (
+    FIELDWEAVE_VERSION,
+    FieldWeaveSettingsManager,
+    FieldWeaveSettings,
+)
 from common.image_name_formatter import ImageNameFormatter
 from motion.motion_controller_manager import MotionControllerManager
 from motion.motion_controller_manager import MotionState
@@ -23,9 +27,6 @@ if TYPE_CHECKING:
     from UI.widgets.toast_widget import ToastManager
     from UI.widgets.camera_preview import CameraPreview
     from UI.widgets.update_notifier import UpdateNotifier
-
-FIELDWEAVE_VERSION = "1.2"
-
 
 class AppContext:
     """
@@ -176,6 +177,19 @@ class AppContext:
     def settings(self) -> FieldWeaveSettings | None:
         return self._settings
 
+    def apply_settings(self, settings: FieldWeaveSettings) -> bool:
+        """Replace the shared settings instance without saving to disk.
+
+        Returns True on success, False if *settings* fails validation.
+        """
+        try:
+            settings.validate()
+        except ValueError as exc:
+            error(f"AppContext: invalid settings — {exc}")
+            return False
+        self._settings = settings
+        return True
+
     @property
     def settings_manager(self) -> FieldWeaveSettingsManager | None:
         return self._settings_manager
@@ -219,7 +233,11 @@ class AppContext:
     def _load_settings(self) -> None:
         try:
             self._settings_manager = FieldWeaveSettingsManager()
+            first_start = not self._settings_manager.active_path().exists()
             self._settings = self._settings_manager.load()
+            self._settings.first_start = first_start
+            if first_start:
+                self._settings_manager.save(self._settings)
             info(f"FieldWeave settings loaded - running v{FIELDWEAVE_VERSION}")
             if self._settings.show_patchnotes:
                 info("New version detected - patch notes should be displayed")
@@ -268,9 +286,7 @@ class AppContext:
             return
         try:
             info("Initializing post-processing manager...")
-            self._post_processing_manager = PostProcessingManager(
-                settings_manager=self._settings_manager
-            )
+            self._post_processing_manager = PostProcessingManager()
             info("Post-processing manager started")
         except Exception as e:
             error(f"Failed to start post-processing manager: {e}")
@@ -320,6 +336,10 @@ class AppContext:
 # Global instance accessors
 def get_app_context() -> AppContext:
     return AppContext()
+
+
+def get_fieldweave_version() -> str:
+    return FIELDWEAVE_VERSION
 
 
 def open_settings(category: str) -> None:
