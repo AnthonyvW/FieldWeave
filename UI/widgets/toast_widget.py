@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property, QElapsedTimer, QRect
+from PySide6.QtCore import Qt, QObject, QTimer, QPropertyAnimation, QEasingCurve, Property, QElapsedTimer, QRect
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -13,6 +13,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+def _is_alive(obj: QObject) -> bool:
+    # Qt has no non-throwing way to check whether the C++ side of an
+    # object was already deleted; metaObject() is the cheapest call
+    # that touches it.
+    try:
+        obj.metaObject()
+    except RuntimeError:
+        return False
+    return True
 
 
 class ToastType(Enum):
@@ -154,6 +165,8 @@ class Toast(QFrame):
             self.progress_bar.hide()
 
     def _update_progress(self) -> None:
+        if not _is_alive(self):
+            return
         elapsed_ms = self.elapsed_timer.elapsed()
         if elapsed_ms >= self.duration:
             self.progress_bar.setValue(0)
@@ -180,12 +193,17 @@ class Toast(QFrame):
         self.show()
         self.fade_in_animation.start()
 
-    def dismiss(self) -> None:
+    def dismiss(self) -> bool:
+        if not _is_alive(self):
+            return False
         if hasattr(self, 'progress_timer') and self.progress_timer.isActive():
             self.progress_timer.stop()
         self.fade_out_animation.start()
+        return True
 
     def _on_fade_out_finished(self) -> None:
+        if not _is_alive(self):
+            return
         self.hide()
         self.deleteLater()
 
@@ -225,8 +243,6 @@ class ToastManager:
     def _make_event_filter(self):
         manager = self
 
-        from PySide6.QtCore import QObject
-
         class _Filter(QObject):
             def eventFilter(self, obj: object, event: object) -> bool:
                 if event.type() in (event.Type.Move, event.Type.Resize):
@@ -237,15 +253,19 @@ class ToastManager:
         return self._filter
 
     def _parent_bottom_right(self) -> tuple[int, int]:
-        if not self.parent_widget:
+        if not self.parent_widget or not _is_alive(self.parent_widget):
             return (0, 0)
         r = self.parent_widget.frameGeometry()
         return (r.x() + r.width(), r.y() + r.height())
 
     def _reposition_all(self) -> None:
+        if self.parent_widget and not _is_alive(self.parent_widget):
+            return
         right_x, bottom_y = self._parent_bottom_right()
         y = bottom_y - self.MARGIN
         for toast in reversed(self.toasts):
+            if not _is_alive(toast):
+                continue
             toast.adjustSize()
             h = toast.height()
             x = right_x - toast.width() - self.MARGIN
@@ -265,6 +285,9 @@ class ToastManager:
         title: str | None = None,
         dismiss_id: int | None = None,
     ) -> int:
+        if self.parent_widget and not _is_alive(self.parent_widget):
+            return 0
+
         if dismiss_id is not None:
             self.dismiss(dismiss_id)
 
@@ -277,10 +300,11 @@ class ToastManager:
         toast.show_animated()
         return toast_id
 
-    def dismiss(self, toast_id: int) -> None:
+    def dismiss(self, toast_id: int) -> bool:
         toast = self._toasts_by_id.get(toast_id)
-        if toast is not None:
-            toast.dismiss()
+        if toast is None or not _is_alive(toast):
+            return False
+        return toast.dismiss()
 
     def _remove_toast(self, toast: Toast, toast_id: int) -> None:
         if toast in self.toasts:
@@ -302,4 +326,5 @@ class ToastManager:
 
     def clear_all(self) -> None:
         for toast in self.toasts[:]:
-            toast.dismiss()
+            if _is_alive(toast):
+                toast.dismiss()
