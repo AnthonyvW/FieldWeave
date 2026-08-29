@@ -17,6 +17,7 @@ from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverl
 from UI.widgets.preview_overlay.focus import FocusOverlay
 from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOverlay
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
+from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
 from UI.widgets.preview_overlay.background_detection import BackgroundDetectionOverlay
@@ -110,6 +111,42 @@ class OverlayLabel(QLabel):
         self._zoom_handler: ZoomPreviewOverlay | None = None
         self._zoom_press_pos: QPoint | None = None
         self._zoom_dragging: bool = False
+
+    def render_content_pixmap(self) -> QPixmap | None:
+        """
+        Render just the image content and its active overlays onto a fresh,
+        isolated pixmap — sized to the actual image (no letterbox bars) and
+        painted directly from the stored pixmap and each overlay's own
+        ``draw()``, with no other widget in the picture at all. This is
+        deliberately not a grab()/render() of the live widget tree: sibling
+        widgets (the crosshair/grid/zoom toolbar buttons, which sit on top
+        of this label at the same screen position) have shown up in a
+        plain widget grab in practice, and painting onto a bare QPixmap
+        here can't pick them up regardless. Used for "capture with UI"
+        style photos. Returns None if there's nothing to render yet.
+        """
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return None
+
+        display_rect = self._display_rect(pixmap)
+        if display_rect.isEmpty():
+            return None
+
+        content = QPixmap(display_rect.size())
+        content.fill(Qt.GlobalColor.black)
+
+        painter = QPainter(content)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.drawPixmap(0, 0, pixmap)
+        # Overlays draw using this label's own (larger, letterboxed)
+        # coordinate space; shift so display_rect's origin lands at (0, 0)
+        # on this smaller, isolated canvas.
+        painter.translate(-display_rect.topLeft())
+        self._paint_overlays(painter, display_rect)
+        painter.end()
+
+        return content
 
     def add_overlay(self, overlay: Overlay) -> None:
         self._overlays.append(overlay)
@@ -294,7 +331,17 @@ class OverlayLabel(QLabel):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_overlays(painter, display_rect)
+        painter.end()
 
+    def _paint_overlays(self, painter: QPainter, display_rect: QRect) -> None:
+        """
+        Draw every active overlay against *display_rect*. Shared by
+        ``paintEvent`` (drawing onto this label, in its own coordinate
+        space) and ``render_content_pixmap`` (drawing onto an isolated,
+        differently-offset canvas) — both hand this the same *display_rect*
+        and let the transform math work out identically either way.
+        """
         pen = QPen(QColor(0, 0, 0, 180))
         pen.setWidth(2)
         painter.setPen(pen)
@@ -323,8 +370,6 @@ class OverlayLabel(QLabel):
         for overlay in self._overlays:
             if self._overlay_active(overlay):
                 overlay.draw_foreground(painter, self.rect())
-
-        painter.end()
 
     def _image_rect(self, pixmap: QPixmap) -> QRect:
         widget_rect = self.rect()
@@ -422,6 +467,27 @@ class OverlayController:
         """Direct access to the focus stack preview overlay."""
         return self._preview._focus_stack_preview_overlay
 
+    @property
+    def loaded_image_enabled(self) -> bool:
+        return self._preview._loaded_image_overlay.enabled
+
+    @loaded_image_enabled.setter
+    def loaded_image_enabled(self, enabled: bool) -> None:
+        """
+        Show or hide the measurement tab's loaded-image overlay.
+
+        Only MeasurementTab / CaptureControlWidget should ever set this —
+        see LoadedImageOverlay's docstring on why it must stay off outside
+        that tab.
+        """
+        self._preview._loaded_image_overlay.set_enabled(enabled)
+        self._preview._video_label.update()
+
+    def set_loaded_image(self, pixmap: QPixmap | None) -> None:
+        """Replace the image shown by the loaded-image overlay."""
+        self._preview._loaded_image_overlay.set_image(pixmap)
+        self._preview._video_label.update()
+
     def set_channel(
         self,
         *,
@@ -510,7 +576,13 @@ class CameraPreview(QFrame):
         self._click_to_move_overlay = ClickToMoveOverlay()
         self._focus_stack_preview_overlay = FocusStackPreviewOverlay()
         self._zoom_preview_overlay = ZoomPreviewOverlay()
+        self._loaded_image_overlay = LoadedImageOverlay()
+        self._zoom_preview_overlay.set_loaded_image_overlay(self._loaded_image_overlay)
 
+        # Added first so it paints as the background: every other overlay
+        # (crosshair, grid, a future measurement-marker overlay) then draws
+        # on top of it exactly as it would over the live feed.
+        self._video_label.add_overlay(self._loaded_image_overlay)
         self._video_label.add_overlay(self._zoom_preview_overlay)
         self._video_label.add_overlay(self._crosshair_overlay)
         self._video_label.add_overlay(self._grid_overlay)
@@ -577,6 +649,20 @@ class CameraPreview(QFrame):
 
         self._connect_to_camera_manager()
         QApplication.instance().installEventFilter(self)
+
+    def grab_display(self) -> QPixmap:
+        """
+        Render just the image content and its active overlays — crosshair,
+        grid, the loaded-image overlay, and so on — excluding letterbox
+        bars and, just as importantly, excluding the toolbar buttons
+        overlaid on this widget (crosshair/grid/zoom/etc.), which sit at
+        the same screen position as the label and can otherwise end up in
+        a plain widget grab. Used for "capture with UI" style photos, as
+        opposed to a raw sensor capture via the camera itself. Returns a
+        null QPixmap if there's nothing to capture yet.
+        """
+        content = self._video_label.render_content_pixmap()
+        return content if content is not None else QPixmap()
 
     @property
     def overlays(self) -> OverlayController:

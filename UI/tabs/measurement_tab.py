@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import (
+    QVBoxLayout,
+    QWidget,
+    QScrollArea,
+    QFrame,
+)
+from UI.style import RIGHT_SIDEBAR_WIDTH
+from UI.tabs.base_tab import CameraWithSidebarPage
+
+from UI.widgets.collapsible_section import CollapsibleSection
+from UI.widgets.capture_control_widget import CaptureControlWidget
+
+from common.app_context import open_settings
+
+
+class MeasurementTab(CameraWithSidebarPage):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        self._capture_control = CaptureControlWidget()
+        super().__init__(self._make_sidebar(), parent)
+
+    def _make_sidebar(self) -> QWidget:
+        sidebar_container = QWidget()
+        sidebar_container.setFixedWidth(RIGHT_SIDEBAR_WIDTH)
+
+        sidebar_layout = QVBoxLayout(sidebar_container)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(10)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
+
+        capture_control = CollapsibleSection("Capture Control", on_settings=lambda: open_settings("Camera"))
+        capture_control.layout_for_content().addWidget(self._capture_control)
+        content_layout.addWidget(capture_control)
+
+        content_layout.addStretch(1)
+        sidebar_layout.addWidget(self._wrap_scroll(content), 1)
+        return sidebar_container
+
+    def _wrap_scroll(self, widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(widget)
+        return scroll
+
+    # ------------------------------------------------------------------
+    # The loaded-image overlay lives on the shared CameraPreview, so it
+    # must only be switched on while this tab is the one actually showing
+    # that preview — tied to show/hide rather than CollapsibleSection's
+    # collapse state, which shouldn't affect it.
+    # ------------------------------------------------------------------
+
+    def showEvent(self, event: QEvent) -> None:
+        super().showEvent(event)
+        self._capture_control.set_tab_active(True)
+
+    def hideEvent(self, event: QEvent) -> None:
+        super().hideEvent(event)
+        self._capture_control.set_tab_active(False)

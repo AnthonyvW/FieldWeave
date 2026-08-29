@@ -39,6 +39,13 @@ def apply_style(app: QApplication) -> None:
 
     corner_status_line_color = "#ffffff"
 
+    load_image_button_color = "#f28c28" # Orange — matches header_bar_active / CalStartCapture
+    load_image_button_border = "#c97020"
+    load_image_button_hover = "#d97a20"
+    load_image_button_pressed = "#bf6a18"
+
+    live_view_button_unselected = "rgb(150, 153, 156)" # Gray — matches LoadImageButton unselected
+
     app.setStyleSheet(
         f"""
         QTabWidget::pane {{ border: none; }}
@@ -92,6 +99,28 @@ def apply_style(app: QApplication) -> None:
             background-color: #e0e3e6;
             border-color: #d0d3d6;
             color: #a0a3a6;
+        }}
+
+        /* Measurement tab — Live View / Load Image toggle: darkened gray
+           while unselected, app-standard orange while selected. Text stays
+           white and bold in both states so only the background changes. */
+        QPushButton#LiveViewButton, QPushButton#LoadImageButton {{
+            background-color: {live_view_button_unselected};
+            color: white;
+            font-weight: bold;
+        }}
+        QPushButton#LiveViewButton:checked {{
+            background-color: {load_image_button_color};
+        }}
+        QPushButton#LoadImageButton:checked {{
+            background-color: {load_image_button_color};
+            border: 1px solid {load_image_button_border};
+        }}
+        QPushButton#LoadImageButton:hover {{
+            background-color: {load_image_button_hover};
+        }}
+        QPushButton#LoadImageButton:pressed {{
+            background-color: {load_image_button_pressed};
         }}
 
         
