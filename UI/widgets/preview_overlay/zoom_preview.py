@@ -8,8 +8,37 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from UI.style import ZOOM_PREVIEW_VIEWPORT_COLOR
+from UI.widgets.preview_overlay.large_image_source import FrameSource
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
+
+
+class _LiveFrameSource(FrameSource):
+    """
+    Wraps a live camera frame — already small enough to sit fully
+    resident in memory — so ZoomPreviewOverlay can crop/pan/zoom against
+    it with the same interface used for a tiled LargeImageSource.
+    """
+
+    def __init__(self, frame: np.ndarray) -> None:
+        self._frame = frame
+
+    def dims(self) -> tuple[int, int]:
+        return self._frame.shape[:2]
+
+    def thumbnail(self) -> np.ndarray:
+        return self._frame
+
+    def region(self, box: tuple[int, int, int, int], step: int) -> np.ndarray:
+        x0, y0, x1, y1 = box
+        return np.ascontiguousarray(self._frame[y0:y1:step, x0:x1:step])
+
+    def version(self) -> int:
+        # A new live frame always arrives via a new _LiveFrameSource
+        # wrapper (see ZoomPreviewOverlay._frame), so there's nothing
+        # this needs to track — the draw cache already keys on crop and
+        # rect size, unchanged from before this class existed.
+        return 0
 
 
 class _PanZoomState:
@@ -63,8 +92,10 @@ class ZoomPreviewOverlay(Overlay):
     ``_frame`` normally holds the last live camera frame pushed via
     ``update_full``. When a ``LoadedImageOverlay`` is registered via
     ``set_loaded_image_overlay`` and enabled, ``_frame`` switches to
-    that overlay's ``full_array`` instead — this overlay draws itself on
-    top of ``LoadedImageOverlay`` (see ``OverlayLabel._paint_overlays``),
+    that overlay's ``source`` instead — a ``LargeImageSource`` that
+    decodes tiles on demand rather than holding a full array, since a
+    loaded image can be far larger than a camera frame. This overlay
+    draws itself on top of ``LoadedImageOverlay`` (see ``OverlayLabel._paint_overlays``),
     so without the switch a zoomed live frame would occlude the loaded
     image the operator actually wants to inspect. ``_state`` switches
     alongside it to the matching ``_PanZoomState``, so the two sources'
@@ -74,6 +105,11 @@ class ZoomPreviewOverlay(Overlay):
     _MIN_ZOOM: float = 1.0
     _MAX_ZOOM: float = 8.0
     _ZOOM_STEP: float = 1.15
+
+    # Below this many source pixels, the shrinking dimension's crop is
+    # just being blown up rather than showing more real detail — the
+    # floor _max_zoom won't zoom past.
+    _MIN_CROP_PX: int = 32
 
     _MINIMAP_MAX_WIDTH: int = 120
     _MINIMAP_MARGIN: int = 10
@@ -85,6 +121,15 @@ class ZoomPreviewOverlay(Overlay):
         self._live_state = _PanZoomState(self._MIN_ZOOM)
         self._loaded_state = _PanZoomState(self._MIN_ZOOM)
         self._crop: tuple[int, int, int, int] | None = None
+
+        # draw() cache — see _rebuild_draw_cache. Keyed on the crop and
+        # the rect it was rendered for, since neither changes on every
+        # paint (e.g. an unrelated overlay toggling, the focus relay
+        # firing) while zoomed/panned, only when the viewport itself moves.
+        self._draw_cache_crop: tuple[int, int, int, int] | None = None
+        self._draw_cache_size: tuple[int, int] | None = None
+        self._draw_cache_version: int | None = None
+        self._draw_cache_pixmap: QPixmap | None = None
 
     @property
     def zoomed(self) -> bool:
@@ -101,6 +146,18 @@ class ZoomPreviewOverlay(Overlay):
         self._state.reset()
         self._crop = None
 
+    def reset_loaded(self) -> None:
+        """
+        Reset the loaded-image pan/zoom position specifically, regardless
+        of whether the overlay is enabled yet — unlike ``reset()``, which
+        resets whichever state ``_state`` currently resolves to. A new
+        image should always open at the fully-zoomed-out view even when
+        it's loaded before CaptureControlWidget switches the overlay on.
+        """
+        self._loaded_state.reset()
+        if self._loaded_active:
+            self._crop = None
+
     def update_full(self, frame: np.ndarray) -> None:
         self._live_frame = frame
 
@@ -116,10 +173,12 @@ class ZoomPreviewOverlay(Overlay):
         return self._loaded_image_overlay is not None and self._loaded_image_overlay.enabled
 
     @property
-    def _frame(self) -> np.ndarray | None:
+    def _frame(self) -> FrameSource | None:
         if self._loaded_active:
-            return self._loaded_image_overlay.full_array
-        return self._live_frame
+            return self._loaded_image_overlay.source
+        if self._live_frame is None:
+            return None
+        return _LiveFrameSource(self._live_frame)
 
     @property
     def _state(self) -> _PanZoomState:
@@ -143,18 +202,43 @@ class ZoomPreviewOverlay(Overlay):
         anchor_state = self._pos_to_full_pixel_and_rel(anchor, widget_rect) if anchor is not None else None
 
         factor = self._ZOOM_STEP ** steps
-        state.zoom = min(self._MAX_ZOOM, max(self._MIN_ZOOM, state.zoom * factor))
+        state.zoom = min(self._max_zoom(widget_rect), max(self._MIN_ZOOM, state.zoom * factor))
 
         if anchor_state is not None:
             full_px, full_py, rel_x, rel_y, _, _ = anchor_state
             size = self._crop_size(widget_rect)
             if size is not None:
                 crop_w, crop_h = size
-                h, w = self._frame.shape[:2]
+                h, w = self._frame.dims()
                 state.center_x = (full_px - crop_w * (rel_x - 0.5)) / w
                 state.center_y = (full_py - crop_h * (rel_y - 0.5)) / h
 
         self._clamp_center(widget_rect)
+
+    def _max_zoom(self, widget_rect: QRect) -> float:
+        """
+        Highest zoom level worth allowing for the current frame.
+
+        ``_MAX_ZOOM`` alone was tuned for the live camera's resolution —
+        fine there, but a loaded image can be many times larger, and a
+        fixed multiplier left no way to actually get in close on one.
+        Scale the ceiling with the frame instead: how far zoom can go
+        before the shrinking dimension's crop (see ``_crop_size``) drops
+        below ``_MIN_CROP_PX``, never below the original fixed ceiling
+        so live-camera zoom behaves exactly as before.
+        """
+        if self._frame is None or widget_rect.width() <= 0 or widget_rect.height() <= 0:
+            return self._MAX_ZOOM
+
+        h, w = self._frame.dims()
+        if w == 0 or h == 0:
+            return self._MAX_ZOOM
+
+        target_aspect = widget_rect.width() / widget_rect.height()
+        sensor_aspect = w / h
+        shrinking_dim = h if sensor_aspect <= target_aspect else w
+
+        return max(self._MAX_ZOOM, shrinking_dim / self._MIN_CROP_PX)
 
     def begin_drag(self, pos: QPoint) -> None:
         state = self._state
@@ -170,7 +254,7 @@ class ZoomPreviewOverlay(Overlay):
         if crop is None:
             return
         _, _, crop_w, crop_h = crop
-        h, w = self._frame.shape[:2]
+        h, w = self._frame.dims()
         display_rect = self._fit_rect(crop_w, crop_h, widget_rect)
         if display_rect.width() <= 0 or display_rect.height() <= 0:
             return
@@ -212,7 +296,7 @@ class ZoomPreviewOverlay(Overlay):
         if self._frame is None or widget_rect.width() <= 0 or widget_rect.height() <= 0:
             return None
 
-        h, w = self._frame.shape[:2]
+        h, w = self._frame.dims()
         if w == 0 or h == 0:
             return None
 
@@ -234,7 +318,7 @@ class ZoomPreviewOverlay(Overlay):
         if size is None:
             return None
         crop_w, crop_h = size
-        h, w = self._frame.shape[:2]
+        h, w = self._frame.dims()
         state = self._state
 
         x0 = min(max(int(state.center_x * w - crop_w / 2), 0), w - crop_w)
@@ -246,7 +330,7 @@ class ZoomPreviewOverlay(Overlay):
         if size is None:
             return
         crop_w, crop_h = size
-        h, w = self._frame.shape[:2]
+        h, w = self._frame.dims()
         state = self._state
 
         half_w_frac = min(0.5, crop_w / (2 * w))
@@ -307,7 +391,7 @@ class ZoomPreviewOverlay(Overlay):
             return None
 
         x0, y0, crop_w, crop_h = self._crop
-        h, w = self._frame.shape[:2]
+        h, w = self._frame.dims()
 
         crop_frac_x0 = x0 / w
         crop_frac_y0 = y0 / h
@@ -352,7 +436,7 @@ class ZoomPreviewOverlay(Overlay):
         if crop is None:
             return None
         x0, y0, crop_w, crop_h = crop
-        h, w = self._frame.shape[:2]
+        h, w = self._frame.dims()
 
         display_rect = self._fit_rect(crop_w, crop_h, widget_rect)
         if display_rect.width() <= 0 or display_rect.height() <= 0:
@@ -379,21 +463,64 @@ class ZoomPreviewOverlay(Overlay):
         return x0 + crop_w / 2, y0 + crop_h / 2
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
-        if self._crop is None:
+        if self._crop is None or self._frame is None:
             return
+
+        size = (rect.width(), rect.height())
+        version = self._frame.version()
+        if (
+            self._crop != self._draw_cache_crop
+            or size != self._draw_cache_size
+            or version != self._draw_cache_version
+        ):
+            self._rebuild_draw_cache(rect, version)
+
+        if self._draw_cache_pixmap is not None:
+            painter.drawPixmap(rect.x(), rect.y(), self._draw_cache_pixmap)
+
+    def _rebuild_draw_cache(self, rect: QRect, version: int) -> None:
+        """
+        Build the pixmap for the current crop and cache it against that
+        crop, rect size, and frame version — see the cache fields'
+        comment in __init__. The version check is what notices a
+        LargeImageSource tile finished decoding in the background (see
+        FrameSource.version) and repaints with it even though the crop
+        and rect haven't otherwise changed; for a live camera frame,
+        version is always 0 and has no effect, unchanged from before.
+
+        Also decimates the crop by a cheap array stride before copying it,
+        down to roughly twice *rect*'s own resolution, when the crop is
+        much larger than that. Without it, a crop taken early in a zoom
+        (still most of a gigapixel-scale loaded image) was being copied
+        and smooth-scaled down from its full source resolution on every
+        single frame, when only a small fraction of those source pixels
+        could ever appear in *rect* anyway. The stride shrinks toward 1 as
+        zoom increases and the crop approaches rect's own size, so full
+        source detail is still used once it actually matters.
+        """
         x0, y0, crop_w, crop_h = self._crop
 
-        crop_arr = np.ascontiguousarray(self._frame[y0:y0 + crop_h, x0:x0 + crop_w])
+        step_x = max(1, crop_w // max(1, rect.width() * 2))
+        step_y = max(1, crop_h // max(1, rect.height() * 2))
+        step = min(step_x, step_y)
 
-        q_image = QImage(crop_arr.data, crop_w, crop_h, crop_w * 3, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(q_image)
-        scaled = pixmap.scaled(
+        crop_arr = np.ascontiguousarray(self._frame.region((x0, y0, x0 + crop_w, y0 + crop_h), step))
+        h, w = crop_arr.shape[:2]
+
+        # QPixmap.fromImage copies the pixel data into its own storage
+        # before this call returns, so the QImage doesn't need its own
+        # defensive .copy() of crop_arr — that would just be a second
+        # full copy of what can still be a very large buffer.
+        pixmap = QPixmap.fromImage(QImage(crop_arr.data, w, h, w * 3, QImage.Format.Format_RGB888))
+        self._draw_cache_pixmap = pixmap.scaled(
             rect.width(),
             rect.height(),
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        painter.drawPixmap(rect.x(), rect.y(), scaled)
+        self._draw_cache_crop = self._crop
+        self._draw_cache_size = (rect.width(), rect.height())
+        self._draw_cache_version = version
 
     def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
         """
@@ -405,11 +532,11 @@ class ZoomPreviewOverlay(Overlay):
         Only shown once actually zoomed in: at the fully-zoomed-out level
         the viewport box would cover the whole minimap anyway.
         """
-        if self._crop is None or not self.zoomed:
+        if self._crop is None or not self.zoomed or self._frame is None:
             return
         x0, y0, crop_w, crop_h = self._crop
-        h, w = self._frame.shape[:2]
-        self._draw_minimap(painter, rect, w, h, x0, y0, crop_w, crop_h)
+        h, w = self._frame.dims()
+        self._draw_minimap(painter, rect, w, h, x0, y0, crop_w, crop_h, self._frame.thumbnail())
 
     def _draw_minimap(
         self,
@@ -421,6 +548,7 @@ class ZoomPreviewOverlay(Overlay):
         crop_y: int,
         crop_w: int,
         crop_h: int,
+        thumbnail: np.ndarray,
     ) -> None:
         """
         Draw a small thumbnail of the full frame with a box marking the
@@ -430,6 +558,11 @@ class ZoomPreviewOverlay(Overlay):
         the camera viewport — in each dimension, so the minimap never
         crowds out the view it's overlaid on even in a small or narrow
         preview pane.
+
+        *thumbnail* may be at a different resolution than full_w/full_h
+        (a live frame is passed as-is; a loaded image's is the small
+        resident preview) — its own aspect ratio matches the full frame's
+        either way, and it's stretched to mini_w/mini_h regardless.
         """
         if full_w <= 0 or full_h <= 0 or rect.width() <= 0 or rect.height() <= 0:
             return
@@ -442,7 +575,9 @@ class ZoomPreviewOverlay(Overlay):
         if mini_w <= 0 or mini_h <= 0:
             return
 
-        thumb_image = QImage(self._frame.data, full_w, full_h, full_w * 3, QImage.Format.Format_RGB888)
+        thumb_arr = np.ascontiguousarray(thumbnail)
+        thumb_h, thumb_w = thumb_arr.shape[:2]
+        thumb_image = QImage(thumb_arr.data, thumb_w, thumb_h, thumb_w * 3, QImage.Format.Format_RGB888)
         thumb = QPixmap.fromImage(thumb_image).scaled(
             mini_w,
             mini_h,

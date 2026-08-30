@@ -321,6 +321,29 @@ def apply_style(app: QApplication) -> None:
             font-weight: normal;
         }}
 
+        /* Measurement tab — capture widget's image-load / drag-drop overlay.
+           Background matches NavigationWidget's darkened "unavailable" tint. */
+        QWidget#CaptureImageOverlay {{
+            background: rgba(0, 0, 0, 100);
+        }}
+        QWidget#CaptureImageOverlayFrame {{
+            background: transparent;
+            border: none;
+        }}
+        QWidget#CaptureImageOverlayFrame[dragHint="true"] {{
+            border: 4px dashed rgba(255, 255, 255, 200);
+            border-radius: 0px;
+        }}
+        QLabel#CaptureImageOverlayLabel {{
+            color: white;
+            font-size: 13px;
+            font-weight: 600;
+            background: transparent;
+        }}
+        QLabel#CaptureImageOverlayLabel[dragHint="true"] {{
+            font-size: 20px;
+        }}
+
         /* Machine vision flyout menu checkboxes */
         QFrame#MachineVisionMenu QCheckBox {{
             font-size: 13px;

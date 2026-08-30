@@ -13,7 +13,7 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.capture_control_widget import CaptureControlWidget
 
-from common.app_context import open_settings
+from common.app_context import get_app_context, open_settings
 
 
 class MeasurementTab(CameraWithSidebarPage):
@@ -53,13 +53,21 @@ class MeasurementTab(CameraWithSidebarPage):
     # The loaded-image overlay lives on the shared CameraPreview, so it
     # must only be switched on while this tab is the one actually showing
     # that preview — tied to show/hide rather than CollapsibleSection's
-    # collapse state, which shouldn't affect it.
+    # collapse state, which shouldn't affect it. Click-to-move and
+    # scroll-to-move-Z are suppressed the same way, live feed or loaded
+    # image alike — see CameraPreview.OverlayController.measurement_tab_active.
     # ------------------------------------------------------------------
 
     def showEvent(self, event: QEvent) -> None:
         super().showEvent(event)
         self._capture_control.set_tab_active(True)
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement_tab_active = True
 
     def hideEvent(self, event: QEvent) -> None:
         super().hideEvent(event)
         self._capture_control.set_tab_active(False)
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement_tab_active = False

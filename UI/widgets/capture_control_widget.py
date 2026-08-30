@@ -1,29 +1,24 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from PIL import ExifTags
-from PIL import Image as PILImage
-from PySide6.QtCore import Slot, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Slot, QTimer, Qt, QMimeData, QEvent, QObject
+from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QResizeEvent, QMoveEvent, QShowEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
-    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -31,6 +26,10 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from common.logger import info, error, warning
 from common.setting_types import FileFormat
+from UI.widgets.preview_overlay.large_image_source import LargeImageSource
+
+
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".tif", ".tiff"})
 
 
 class CaptureMode(Enum):
@@ -38,41 +37,10 @@ class CaptureMode(Enum):
     LOADED_IMAGE = "loaded_image"
 
 
-class MetadataDialog(QDialog):
-    """Read-only key/value table shown for both live and loaded-image metadata."""
-
-    def __init__(self, title: str, metadata: dict[str, str], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(460, 380)
-
-        layout = QVBoxLayout(self)
-
-        table = QTableWidget(len(metadata), 2, self)
-        table.setHorizontalHeaderLabels(["Field", "Value"])
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        table.setWordWrap(True)
-
-        for row, (key, value) in enumerate(metadata.items()):
-            table.setItem(row, 0, QTableWidgetItem(key))
-            table.setItem(row, 1, QTableWidgetItem(value))
-
-        layout.addWidget(table)
-
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(self.accept)
-        layout.addWidget(close_button)
-
-
 class CaptureControlWidget(QWidget):
     """
-    Measurement tab's capture widget: live camera vs. loaded-image source,
-    three capture actions, output/format controls, a metadata viewer, and
-    a stub for measurement export.
+    Measurement tab's capture widget: live camera vs. loaded-image source
+    and output/format controls.
 
     Kept single-column throughout (one control per row) except where
     buttons are short enough to sit side by side, so it stays within
@@ -96,7 +64,7 @@ class CaptureControlWidget(QWidget):
         self._tab_active = False
         self._camera_available = False
 
-        self._loaded_pixmap: QPixmap | None = None
+        self._loaded_source: LargeImageSource | None = None
         self._loaded_image_path: Path | None = None
 
         # Capture state — mutated only by the on_complete callback on the
@@ -106,11 +74,34 @@ class CaptureControlWidget(QWidget):
         self._capture_filepath = ""
         self._capture_toast_id: int | None = None
 
+        # Image-load state — mutated only by _load_image_routine on a
+        # background thread; read only by _poll_load_state on the main
+        # thread. Opening a large image can take a while (format
+        # detection plus building the initial preview), so this runs off
+        # the UI thread the same way capture does.
+        self._load_pending = False
+        self._load_success: bool | None = None
+        self._load_source: LargeImageSource | None = None
+        self._load_path: Path | None = None
+        self._load_switching_in = False
+        self._load_toast_id: int | None = None
+
+        self._drag_active = False
+        self._window_drag_filter_installed = False
+        self._overlay: QWidget | None = None
+        self._overlay_frame: QWidget | None = None
+        self._overlay_label: QLabel | None = None
+
+        self.setAcceptDrops(True)
         self._setup_ui()
 
         self._capture_poll_timer = QTimer(self)
         self._capture_poll_timer.setInterval(100)
         self._capture_poll_timer.timeout.connect(self._poll_capture_state)
+
+        self._load_poll_timer = QTimer(self)
+        self._load_poll_timer.setInterval(100)
+        self._load_poll_timer.timeout.connect(self._poll_load_state)
 
         self._camera_poll_timer = QTimer(self)
         self._camera_poll_timer.setInterval(500)
@@ -145,13 +136,189 @@ class CaptureControlWidget(QWidget):
 
         layout.addLayout(self._create_mode_section())
         layout.addWidget(self._create_capture_group())
-        layout.addWidget(self._create_measurements_group())
-
-        self._metadata_button = QPushButton("View Image Metadata")
-        self._metadata_button.clicked.connect(self._view_metadata)
-        layout.addWidget(self._metadata_button)
 
         layout.addStretch()
+
+    def _ensure_overlay(self) -> None:
+        """
+        Create the overlay the first time we're shown with a real parent.
+
+        Parenting to self.parent() rather than self means Qt won't clip the
+        overlay to this widget's own bounds, so _reposition_overlay can
+        expand it to cover the layout margins the parent places around us.
+        """
+        if self._overlay is not None:
+            return
+        overlay_parent = self.parent()
+        if overlay_parent is None:
+            return
+
+        self._overlay = QWidget(overlay_parent)
+        self._overlay.setObjectName("CaptureImageOverlay")
+        self._overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._overlay.hide()
+
+        overlay_layout = QVBoxLayout(self._overlay)
+        overlay_layout.setContentsMargins(14, 14, 14, 14)
+
+        # Inset frame keeps the border a little in from the widget's true
+        # edge rather than flush against it. Expanding policy makes it fill
+        # that inset area so the border traces the widget's edge rather
+        # than shrink-wrapping to the label.
+        self._overlay_frame = QWidget(self._overlay)
+        self._overlay_frame.setObjectName("CaptureImageOverlayFrame")
+        self._overlay_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._overlay_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        frame_layout = QVBoxLayout(self._overlay_frame)
+        frame_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._overlay_label = QLabel(self._overlay_frame)
+        self._overlay_label.setObjectName("CaptureImageOverlayLabel")
+        self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._overlay_label.setWordWrap(True)
+        frame_layout.addWidget(self._overlay_label)
+
+        overlay_layout.addWidget(self._overlay_frame)
+
+    def _reposition_overlay(self) -> None:
+        """Position the overlay in its parent's coordinate space so it covers this widget plus the layout margins the parent places around it."""
+        if self._overlay is None:
+            return
+        overlay_parent = self._overlay.parent()
+        if overlay_parent is None:
+            return
+
+        origin = self.mapTo(overlay_parent, self.rect().topLeft())
+        x, y = origin.x(), origin.y()
+        w, h = self.width(), self.height()
+
+        parent = self.parent()
+        if parent is not None:
+            layout = parent.layout()
+            if layout is not None:
+                left, top, right, bottom = layout.getContentsMargins()
+                x -= left
+                y -= top
+                w += left + right
+                h += top + bottom
+
+        self._overlay.setGeometry(x, y, w, h)
+        self._overlay.raise_()
+
+    def _show_overlay(self, text: str, *, drag_hint: bool = False) -> None:
+        if self._overlay is None or self._overlay_frame is None or self._overlay_label is None:
+            return
+        self._overlay_label.setText(text)
+        for w in (self._overlay_frame, self._overlay_label):
+            w.setProperty("dragHint", drag_hint)
+            w.style().unpolish(w)
+            w.style().polish(w)
+        self._reposition_overlay()
+        self._overlay.show()
+
+    def _hide_overlay(self) -> None:
+        if self._overlay is None:
+            return
+        self._overlay.hide()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._ensure_overlay()
+        self._reposition_overlay()
+        self._install_window_drag_filter()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._reposition_overlay()
+
+    def moveEvent(self, event: QMoveEvent) -> None:
+        super().moveEvent(event)
+        self._reposition_overlay()
+
+    # ------------------------------------------------------------------
+    # Drag and drop
+    # ------------------------------------------------------------------
+
+    def _install_window_drag_filter(self) -> None:
+        """
+        Watch the top-level window for drag events, not just this widget.
+
+        Qt only delivers drag events to a widget under the cursor that
+        accepts drops (or the nearest ancestor that does), so without this
+        the drag hint would only appear once the cursor is already over us.
+        Watching the window catches the drag as soon as it enters the app.
+        """
+        if self._window_drag_filter_installed:
+            return
+        window = self.window()
+        if window is None:
+            return
+        window.setAcceptDrops(True)
+        window.installEventFilter(self)
+        self._window_drag_filter_installed = True
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self.window():
+            event_type = event.type()
+            if event_type in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+                if not self._load_pending and self._image_path_from_mime(event.mimeData()) is not None:
+                    event.acceptProposedAction()
+                    if not self._drag_active:
+                        self._drag_active = True
+                        self._show_overlay("Drop image here", drag_hint=True)
+            elif event_type == QEvent.Type.DragLeave:
+                if self._drag_active and not self._load_pending:
+                    self._drag_active = False
+                    self._hide_overlay()
+            elif event_type == QEvent.Type.Drop:
+                if self._drag_active:
+                    self._drag_active = False
+                    if not self._load_pending:
+                        self._hide_overlay()
+        return super().eventFilter(obj, event)
+
+    def _image_path_from_mime(self, mime: QMimeData) -> Path | None:
+        if not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.suffix.lower() in _IMAGE_SUFFIXES:
+                return path
+        return None
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self._load_pending:
+            event.ignore()
+            return
+        if self._image_path_from_mime(event.mimeData()) is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._drag_active = True
+        self._show_overlay("Drop image here", drag_hint=True)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if self._load_pending or self._image_path_from_mime(event.mimeData()) is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self._drag_active = False
+        if not self._load_pending:
+            self._hide_overlay()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        self._drag_active = False
+        path = self._image_path_from_mime(event.mimeData())
+        if path is None or self._load_pending:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._start_loading(path, switching_in=self._mode != CaptureMode.LOADED_IMAGE)
 
     def _create_mode_section(self) -> QVBoxLayout:
         layout = QVBoxLayout()
@@ -260,25 +427,6 @@ class CaptureControlWidget(QWidget):
         layout.addLayout(buttons_layout)
         return group
 
-    def _create_measurements_group(self) -> QGroupBox:
-        group = QGroupBox("Measurements")
-        layout = QHBoxLayout(group)
-        layout.setSpacing(6)
-
-        self._capture_measurements_button = QPushButton("Capture Measurements")
-        self._capture_measurements_button.setMinimumHeight(36)
-        self._capture_measurements_button.setToolTip("Not yet implemented")
-        self._capture_measurements_button.clicked.connect(self._capture_measurements)
-
-        self._export_measurements_button = QPushButton("Export Measurements")
-        self._export_measurements_button.setMinimumHeight(36)
-        self._export_measurements_button.setToolTip("Not yet implemented")
-        self._export_measurements_button.clicked.connect(self._export_measurements)
-
-        layout.addWidget(self._capture_measurements_button)
-        layout.addWidget(self._export_measurements_button)
-        return group
-
     # ------------------------------------------------------------------
     # Mode switching
     # ------------------------------------------------------------------
@@ -293,19 +441,25 @@ class CaptureControlWidget(QWidget):
         Fires on every click, including while this button is already the
         selected one — that repeat click is how the user swaps in a
         different image, since there's no separate "Load Image..." button.
+
+        Loading itself happens on a background thread (see _browse_image),
+        so the mode switch is finished asynchronously by _poll_load_state
+        once the image has actually decoded.
         """
+        if self._load_pending:
+            return
+
         switching_in = self._mode != CaptureMode.LOADED_IMAGE
 
-        loaded = switching_in and self._loaded_pixmap is not None
-        if not loaded:
-            loaded = self._browse_image()
-
-        if loaded:
+        if switching_in and self._loaded_source is not None:
             self._set_mode(CaptureMode.LOADED_IMAGE)
             self._loaded_mode_btn.setChecked(True)
-        elif switching_in:
-            # Cancelled or failed on the first selection — fall back to
-            # live rather than leaving this selected with nothing loaded.
+            return
+
+        started = self._browse_image(switching_in)
+        if not started and switching_in:
+            # Cancelled on the first selection — fall back to live rather
+            # than leaving this selected with nothing loaded.
             self._live_mode_btn.setChecked(True)
 
     def _set_mode(self, mode: CaptureMode) -> None:
@@ -320,8 +474,8 @@ class CaptureControlWidget(QWidget):
     # Loaded image
     # ------------------------------------------------------------------
 
-    def _browse_image(self) -> bool:
-        """Prompt for and load an image. Returns whether one was loaded."""
+    def _browse_image(self, switching_in: bool) -> bool:
+        """Prompt for an image and start decoding it in the background. Returns whether a load was started."""
         filepath, _ = QFileDialog.getOpenFileName(
             self,
             "Load Image",
@@ -331,25 +485,86 @@ class CaptureControlWidget(QWidget):
         if not filepath:
             return False
 
-        path = Path(filepath)
-        image = QImage(str(path))
-        if image.isNull():
-            warning(f"CaptureControlWidget: failed to load image {path}")
-            ctx = get_app_context()
-            if ctx.toast:
-                ctx.toast.error(f"Could not read image: {path.name}", title="Load Image Failed")
-            return False
+        self._start_loading(Path(filepath), switching_in)
+        return True
 
-        self._loaded_pixmap = QPixmap.fromImage(image)
+    def _start_loading(self, path: Path, switching_in: bool) -> None:
+        self._load_switching_in = switching_in
+        self._load_pending = False
+        self._load_success = None
+
+        self._live_mode_btn.setEnabled(False)
+        self._loaded_mode_btn.setEnabled(False)
+        self._show_overlay(f"Loading {path.name}...")
+
+        ctx = get_app_context()
+        if ctx.toast:
+            self._load_toast_id = ctx.toast.info(f"Loading {path.name}...", title="Loading Image")
+
+        threading.Thread(target=self._load_image_routine, args=(path,), daemon=True).start()
+        self._load_poll_timer.start()
+
+    def _load_image_routine(self, path: Path) -> None:
+        """
+        Runs on a background thread — mutates only plain data, never
+        touches widgets, signals, or app-context notifications directly.
+        _poll_load_state picks the result up on the main thread.
+
+        This only opens the file and builds LargeImageSource's small
+        preview — it never decodes the whole image, so this stays fast
+        even for a file far too large to hold fully in memory.
+        """
+        source = LargeImageSource(str(path))
+        success = source.open()
+        if not success:
+            source.close()
+
+        self._load_source = source if success else None
+        self._load_success = success
+        self._load_path = path
+        self._load_pending = True
+
+    def _poll_load_state(self) -> None:
+        if not self._load_pending:
+            return
+
+        self._load_poll_timer.stop()
+        self._load_pending = False
+        success = self._load_success
+        source = self._load_source
+        path = self._load_path
+        self._load_source = None
+
+        self._hide_overlay()
+        self._live_mode_btn.setEnabled(True)
+        self._loaded_mode_btn.setEnabled(True)
+
+        ctx = get_app_context()
+
+        if not success:
+            warning(f"CaptureControlWidget: failed to load image {path}")
+            if ctx.toast:
+                ctx.toast.error(f"Could not read image: {path.name}", title="Load Image Failed", dismiss_id=self._load_toast_id)
+            self._load_toast_id = None
+            if self._load_switching_in:
+                self._live_mode_btn.setChecked(True)
+                self._loaded_image_label.setVisible(False)
+            return
+
+        self._loaded_source = source
         self._loaded_image_path = path
         self._loaded_image_label.setText(path.name)
 
-        ctx = get_app_context()
         if ctx.camera_preview is not None:
-            ctx.camera_preview.overlays.set_loaded_image(self._loaded_pixmap)
+            ctx.camera_preview.overlays.set_loaded_image(self._loaded_source)
 
         info(f"CaptureControlWidget: loaded image {path}")
-        return True
+        if ctx.toast:
+            ctx.toast.success(path.name, title="Image Loaded", dismiss_id=self._load_toast_id)
+        self._load_toast_id = None
+
+        self._set_mode(CaptureMode.LOADED_IMAGE)
+        self._loaded_mode_btn.setChecked(True)
 
     # ------------------------------------------------------------------
     # Output folder / format
@@ -526,147 +741,3 @@ class CaptureControlWidget(QWidget):
             error(f"Failed to save UI screenshot to: {filepath}")
             if ctx.toast:
                 ctx.toast.error("Unable to save captured image", title="Capture Failed")
-
-    @Slot()
-    def _capture_measurements(self) -> None:
-        ctx = get_app_context()
-        if ctx.toast:
-            ctx.toast.info("Measurement capture is not yet implemented", title="Coming Soon")
-
-    @Slot()
-    def _export_measurements(self) -> None:
-        ctx = get_app_context()
-        if ctx.toast:
-            ctx.toast.info("Measurement export is not yet implemented", title="Coming Soon")
-
-    # ------------------------------------------------------------------
-    # Metadata
-    # ------------------------------------------------------------------
-
-    @Slot()
-    def _view_metadata(self) -> None:
-        if self._mode == CaptureMode.LOADED_IMAGE:
-            metadata = self._build_loaded_image_metadata()
-            title = "Loaded Image Metadata"
-        else:
-            metadata = self._build_live_metadata()
-            title = "Projected Capture Metadata"
-
-        dialog = MetadataDialog(title, metadata, self)
-        dialog.exec()
-
-    def _build_loaded_image_metadata(self) -> dict[str, str]:
-        if self._loaded_pixmap is None or self._loaded_image_path is None:
-            return {"Status": "No image loaded"}
-
-        path = self._loaded_image_path
-        try:
-            return self._read_image_file_metadata(path)
-        except (OSError, ValueError) as e:
-            warning(f"CaptureControlWidget: failed to read metadata for {path} — {e}")
-            return {
-                "File": path.name,
-                "Folder": str(path.parent),
-                "Status": "Could not read embedded metadata",
-            }
-
-    def _read_image_file_metadata(self, path: Path) -> dict[str, str]:
-        """
-        Read the image's own embedded metadata directly, rather than a
-        curated preset field list. Covers both the top-level EXIF IFD
-        (Software, Model, ...) and the Exif sub-IFD nested underneath it,
-        where the standard camera fields — ExposureTime, ISOSpeedRatings,
-        and UserComment (this app's own full capture-metadata JSON,
-        see base_camera.py's save_image) — actually live; getexif() alone
-        only surfaces the top-level IFD and silently misses those.
-        """
-        metadata: dict[str, str] = {}
-
-        with PILImage.open(path) as img:
-            metadata["Format"] = img.format or path.suffix.lstrip(".").upper()
-            metadata["Dimensions"] = f"{img.width} x {img.height}"
-            metadata["Mode"] = img.mode
-
-            exif = img.getexif()
-            for tag_id, value in exif.items():
-                tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
-                if tag_name in ("ExifOffset", "GPSInfo"):
-                    continue  # just pointers to the sub-IFDs expanded below
-                self._add_metadata_field(metadata, tag_name, value)
-
-            for ifd_id in (ExifTags.IFD.Exif, ExifTags.IFD.GPSInfo):
-                for tag_id, value in exif.get_ifd(ifd_id).items():
-                    tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
-                    self._add_metadata_field(metadata, tag_name, value)
-
-            for key, value in getattr(img, "text", {}).items():
-                self._add_metadata_field(metadata, key, value)
-
-        stat = path.stat()
-        metadata["File Size"] = f"{stat.st_size / 1024:.1f} KB"
-        metadata["File Modified"] = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        return metadata
-
-    def _add_metadata_field(self, metadata: dict[str, str], name: str, value: object) -> None:
-        """
-        Add one raw EXIF/PNG-text field. UserComment / Metadata carry this
-        app's own capture metadata as a JSON blob (see base_camera.py) —
-        flatten those into individual rows instead of one unreadable string.
-        """
-        text = self._decode_metadata_bytes(value) if isinstance(value, bytes) else str(value)
-
-        if name in ("UserComment", "Metadata"):
-            parsed = self._try_parse_json(text)
-            if isinstance(parsed, dict):
-                for flat_key, flat_value in self._flatten(parsed).items():
-                    metadata[flat_key] = str(flat_value)
-                return
-
-        metadata[name] = text
-
-    @staticmethod
-    def _decode_metadata_bytes(value: bytes) -> str:
-        for encoding in ("utf-16", "utf-8", "ascii"):
-            decoded = value.decode(encoding, errors="replace")
-            if "\ufffd" not in decoded:
-                return decoded.strip("\x00")
-        return value.decode("utf-8", errors="replace").strip("\x00")
-
-    @staticmethod
-    def _try_parse_json(text: str) -> object | None:
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
-
-    @staticmethod
-    def _flatten(data: dict, prefix: str = "") -> dict[str, object]:
-        flat: dict[str, object] = {}
-        for key, value in data.items():
-            full_key = f"{prefix}.{key}" if prefix else str(key)
-            if isinstance(value, dict):
-                flat.update(CaptureControlWidget._flatten(value, full_key))
-            else:
-                flat[full_key] = value
-        return flat
-
-    def _build_live_metadata(self) -> dict[str, str]:
-        ctx = get_app_context()
-        camera = ctx.camera
-        camera_manager = ctx.camera_manager
-
-        metadata: dict[str, str] = {"Status": "Preview — reflects a capture taken right now"}
-
-        if camera is not None and camera.underlying_camera.is_open:
-            metadata["Format"] = camera.settings.fformat.value
-        else:
-            metadata["Format"] = self._format_combo.currentText()
-
-        if camera_manager is not None and camera_manager.has_active_camera:
-            width, height = camera_manager.frame_dimensions
-            metadata["Resolution"] = f"{width} x {height}"
-
-        metadata["Output Folder"] = str(self._current_folder)
-        metadata["Filename"] = self._get_filepath().name
-        metadata["Captured At"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return metadata

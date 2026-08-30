@@ -4,6 +4,7 @@ import numpy as np
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 
+from UI.widgets.preview_overlay.large_image_source import LargeImageSource
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
 
@@ -22,47 +23,38 @@ class LoadedImageOverlay(Overlay):
     on while the measurement tab is the one currently showing the shared
     preview. Every other tab must never see it.
 
-    ``full_array`` exposes the loaded image as an RGB array so
-    ``ZoomPreviewOverlay`` can crop/zoom into it in place of the live
-    camera frame — see ``ZoomPreviewOverlay.set_loaded_image_overlay``.
+    This overlay only ever draws the fit-to-widget whole image, so it
+    only ever needs ``source.preview`` — the small resident thumbnail
+    LargeImageSource always keeps around — never a tile. ``source`` is
+    exposed so ``ZoomPreviewOverlay`` can crop/zoom into the full-
+    resolution tiles in place of the live camera frame — see
+    ``ZoomPreviewOverlay.set_loaded_image_overlay``.
     """
 
     _PLACEHOLDER_COLOR = QColor(200, 200, 200)
 
     def __init__(self) -> None:
         super().__init__()
-        self._pixmap: QPixmap | None = None
-        self._full_array: np.ndarray | None = None
+        self._source: LargeImageSource | None = None
+        # Cache of the preview pre-scaled to the last-drawn rect, so a
+        # full SmoothTransformation scale doesn't run on every paint.
+        self._scaled_cache: QPixmap | None = None
+        self._scaled_cache_size: tuple[int, int] | None = None
 
-    def set_image(self, pixmap: QPixmap | None) -> None:
-        self._pixmap = pixmap
-        self._full_array = self._to_array(pixmap)
+    def set_source(self, source: LargeImageSource | None) -> None:
+        if self._source is not None:
+            self._source.close()
+        self._source = source
+        self._scaled_cache = None
+        self._scaled_cache_size = None
+
+    @property
+    def source(self) -> LargeImageSource | None:
+        return self._source
 
     @property
     def has_image(self) -> bool:
-        return self._pixmap is not None and not self._pixmap.isNull()
-
-    @property
-    def full_array(self) -> np.ndarray | None:
-        """The loaded image as a full-resolution RGB array (H×W×3, uint8), or None if no image is loaded."""
-        return self._full_array
-
-    @staticmethod
-    def _to_array(pixmap: QPixmap | None) -> np.ndarray | None:
-        if pixmap is None or pixmap.isNull():
-            return None
-
-        image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
-        ptr = image.bits()
-        array = (
-            np.frombuffer(ptr, dtype=np.uint8)
-            .reshape((image.height(), image.bytesPerLine()))
-            [:, : image.width() * 3]
-            .reshape((image.height(), image.width(), 3))
-            .copy()
-        )
-        del ptr
-        return array
+        return self._source is not None and self._source.preview is not None
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
         painter.fillRect(rect, QColor(0, 0, 0))
@@ -76,12 +68,23 @@ class LoadedImageOverlay(Overlay):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No image loaded")
             return
 
-        scaled = self._pixmap.scaled(
-            rect.width(),
-            rect.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        size = (rect.width(), rect.height())
+        if self._scaled_cache is None or self._scaled_cache_size != size:
+            self._scaled_cache = self._preview_pixmap().scaled(
+                rect.width(),
+                rect.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._scaled_cache_size = size
+
+        scaled = self._scaled_cache
         x = rect.x() + (rect.width() - scaled.width()) // 2
         y = rect.y() + (rect.height() - scaled.height()) // 2
         painter.drawPixmap(x, y, scaled)
+
+    def _preview_pixmap(self) -> QPixmap:
+        array = np.ascontiguousarray(self._source.preview)
+        h, w = array.shape[:2]
+        image = QImage(array.data, w, h, w * 3, QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(image)
