@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import ExifTags, Image
+from PIL.PngImagePlugin import PngInfo
 
 # EXIF 2.3 UserComment charset-designation codes (first 8 bytes of the tag).
 _USER_COMMENT_CHARSETS = {
@@ -101,6 +102,90 @@ def _resolve_tag(tag_id: int, value: Any, base_tags: dict[int, str]) -> tuple[An
     if name == "UserComment" and isinstance(value, bytes):
         value = decode_user_comment(value)
     return name, value
+
+
+# Tags Pillow derives from the array actually being saved (dimensions, bit
+# depth, layout). Re-applying stored values for these could conflict with
+# the real output image, so they're excluded when building output EXIF.
+STRUCTURAL_TAGS = {
+    "ImageWidth",
+    "ImageLength",
+    "BitsPerSample",
+    "Compression",
+    "PhotometricInterpretation",
+    "SamplesPerPixel",
+    "RowsPerStrip",
+    "PlanarConfiguration",
+}
+
+# These tags store the byte offset of a nested IFD within the *source*
+# file, not real data. Carrying an offset over verbatim breaks
+# Exif.tobytes(): it tries to dereference the offset via self.fp, which
+# doesn't exist on a freshly built Exif object.
+IFD_POINTER_TAGS = {"ExifOffset", "GPSInfo", "ExifInteroperabilityOffset", "SubIFDs"}
+
+
+def extract_dpi(metadata: dict[str, Any]) -> float | None:
+    """Pull the DPI value out of a metadata dict.
+
+    TIFF/JPEG store it as XResolution/YResolution; PNG surfaces it directly
+    as a 'dpi' pair (from the pHYs chunk). FieldWeave always writes the same
+    value to X and Y, so either side of the pair is authoritative.
+    """
+    dpi_pair = metadata.get("dpi")
+    if dpi_pair is not None:
+        try:
+            return float(dpi_pair[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    value = metadata.get("XResolution", metadata.get("YResolution"))
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_exif_bytes(metadata: dict[str, Any]) -> bytes | None:
+    """Encode a dict produced by read_metadata() back into EXIF bytes for Image.save(exif=...)."""
+    exif = Image.Exif()
+    base_tag_ids = {tag.name: tag.value for tag in ExifTags.Base}
+    private_tag_ids = {name: tag_id for tag_id, name in _PRIVATE_TAG_NAMES.items()}
+
+    for name, value in metadata.items():
+        if name in STRUCTURAL_TAGS or name in NOISY_TAGS or name in IFD_POINTER_TAGS:
+            continue
+        if name in private_tag_ids:
+            exif[private_tag_ids[name]] = value if isinstance(value, str) else json.dumps(value)
+        elif name == "UserComment":
+            payload = value if isinstance(value, str) else json.dumps(value)
+            exif[base_tag_ids["UserComment"]] = b"UNICODE\x00" + payload.encode("utf-16-le")
+        elif name in base_tag_ids:
+            exif[base_tag_ids[name]] = value
+
+    try:
+        return exif.tobytes()
+    except (ValueError, TypeError):
+        return None
+
+
+def build_png_info(metadata: dict[str, Any]) -> PngInfo:
+    """Encode a dict produced by read_metadata() back into PNG text chunks for Image.save(pnginfo=...).
+
+    PNG metadata is flat (dotted keys like "Camera.model", string values)
+    rather than tag-numbered like EXIF, so no tag lookup is needed here.
+    'dpi' is excluded since that's carried via the save() dpi= kwarg instead.
+    """
+    info = PngInfo()
+    for name, value in metadata.items():
+        if name == "dpi":
+            continue
+        info.add_text(name, value if isinstance(value, str) else json.dumps(value))
+
+    return info
 
 
 def read_exif_metadata(filepath: Path) -> dict[str, Any] | None:

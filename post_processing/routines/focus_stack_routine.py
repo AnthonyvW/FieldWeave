@@ -45,7 +45,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Generator
+from typing import Any, Callable, Generator
 
 import numpy as np
 from PIL import Image
@@ -55,16 +55,34 @@ from focusweave.streaming_stack import StreamingFocusStacker
 
 from common.fieldweaveConfig import FieldWeaveSettings
 from common.app_context import get_app_context
+from common.read_metadata import build_exif_bytes, build_png_info, extract_dpi, read_metadata
 from common.setting_types import FileFormat
 from post_processing.routines.post_processing_routine import PostProcessingRoutine
 from common.logger import info, warning, error
 
 
-def _save_stack_result(image: np.ndarray, out_path: Path, fmt: FileFormat, jpeg_quality: int) -> bool:
+def _save_stack_result(
+    image: np.ndarray,
+    out_path: Path,
+    fmt: FileFormat,
+    jpeg_quality: int,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
     # Let Pillow infer the format from out_path's extension instead of passing
     # a format string ourselves -- avoids the FileFormat/Pillow name mismatch
     # entirely (e.g. "jpg" vs the "JPEG" identifier Pillow expects).
-    save_kwargs: dict = {"quality": jpeg_quality} if fmt in (FileFormat.JPEG, FileFormat.JPG) else {}
+    save_kwargs: dict[str, Any] = {"quality": jpeg_quality} if fmt in (FileFormat.JPEG, FileFormat.JPG) else {}
+
+    if metadata:
+        dpi = extract_dpi(metadata)
+        if dpi is not None:
+            save_kwargs["dpi"] = (dpi, dpi)
+        if fmt == FileFormat.PNG:
+            save_kwargs["pnginfo"] = build_png_info(metadata)
+        else:
+            exif_bytes = build_exif_bytes(metadata)
+            if exif_bytes is not None:
+                save_kwargs["exif"] = exif_bytes
 
     try:
         Image.fromarray(image).save(out_path, **save_kwargs)
@@ -271,7 +289,9 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
             self._set_result(success=False)
             return
 
-        frame_count = len(list(input_dir.iterdir()))
+        input_files = sorted(p for p in input_dir.iterdir() if p.is_file())
+        frame_count = len(input_files)
+        metadata = read_metadata(input_files[0]) if input_files else None
 
         yield
 
@@ -281,7 +301,7 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         fmt = get_app_context().camera.settings.fformat
-        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality):
+        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality, metadata):
             self._set_result(success=False)
             return
 
@@ -345,6 +365,11 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
         ``(width, height)`` of the input frames. Required by
         :class:`~focusweave.streaming_stack.StreamingFocusStacker` to
         pre-allocate its internal buffers.
+    reference_metadata:
+        Metadata (from  `read_metadata.read_metadata`) to carry onto the
+        saved output, e.g. DPI and camera settings. Streaming frames arrive
+        as bare arrays with no file to read this from, so the caller must
+        supply it up front. None = no metadata written.
     config:
         Tunable stacking parameters. If not supplied, defaults are used.
     progress_start:
@@ -360,6 +385,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
         settings: FieldWeaveSettings,
         output_path: str,
         reference_size: tuple[int, int],
+        reference_metadata: dict[str, Any] | None = None,
         config: FocusStackRoutineConfig | None = None,
         progress_start: int = 0,
         progress_end: int = 100,
@@ -367,6 +393,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
         super().__init__(settings)
         self.output_path = output_path
         self.reference_size = reference_size
+        self.reference_metadata = reference_metadata
         self.config = config or FocusStackRoutineConfig()
         self._progress_start = progress_start
         self._progress_end = progress_end
@@ -489,7 +516,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         fmt = get_app_context().camera.settings.fformat
-        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality):
+        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality, self.reference_metadata):
             self._set_result(success=False)
             return
 
