@@ -46,6 +46,9 @@ def apply_style(app: QApplication) -> None:
 
     live_view_button_unselected = "rgb(150, 153, 156)" # Gray — matches LoadImageButton unselected
 
+    measurement_tile_hover = "#f28c28" # Orange — app-standard hover/active accent
+    measurement_tile_pressed = "#d97a20"
+
     app.setStyleSheet(
         f"""
         QTabWidget::pane {{ border: none; }}
@@ -121,6 +124,28 @@ def apply_style(app: QApplication) -> None:
         }}
         QPushButton#LoadImageButton:pressed {{
             background-color: {load_image_button_pressed};
+        }}
+
+        /* Measurement tab — measurement type tiles: transparent and
+           borderless at idle so they sit flush together inside their
+           group box, orange fill on hover/checked like the other
+           accented controls (LoadImageButton, CalStartCapture, etc). */
+        QToolButton#MeasurementTile {{
+            background-color: transparent;
+            border: none;
+            border-radius: 2px;
+            padding: 6px 2px;
+            font-size: 12px;
+            color: #2c2c2c;
+        }}
+        QToolButton#MeasurementTile:hover {{
+            background-color: {measurement_tile_hover};
+        }}
+        QToolButton#MeasurementTile:checked {{
+            background-color: {measurement_tile_hover};
+        }}
+        QToolButton#MeasurementTile:pressed {{
+            background-color: {measurement_tile_pressed};
         }}
 
         

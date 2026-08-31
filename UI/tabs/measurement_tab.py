@@ -12,6 +12,7 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.capture_control_widget import CaptureControlWidget
+from UI.widgets.measurements_widget import MeasurementsWidget
 
 from common.app_context import get_app_context, open_settings
 
@@ -19,6 +20,8 @@ from common.app_context import get_app_context, open_settings
 class MeasurementTab(CameraWithSidebarPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         self._capture_control = CaptureControlWidget()
+        self._measurements = MeasurementsWidget()
+        self._measurements.selection_changed.connect(self._on_measurement_selected)
         super().__init__(self._make_sidebar(), parent)
 
     def _make_sidebar(self) -> QWidget:
@@ -37,6 +40,10 @@ class MeasurementTab(CameraWithSidebarPage):
         capture_control = CollapsibleSection("Capture Control", on_settings=lambda: open_settings("Camera"))
         capture_control.layout_for_content().addWidget(self._capture_control)
         content_layout.addWidget(capture_control)
+
+        measurements = CollapsibleSection("Measurements")
+        measurements.layout_for_content().addWidget(self._measurements)
+        content_layout.addWidget(measurements)
 
         content_layout.addStretch(1)
         sidebar_layout.addWidget(self._wrap_scroll(content), 1)
@@ -71,3 +78,8 @@ class MeasurementTab(CameraWithSidebarPage):
         preview = get_app_context().camera_preview
         if preview is not None:
             preview.overlays.measurement_tab_active = False
+
+    def _on_measurement_selected(self, kind: str | None) -> None:
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement_type = kind

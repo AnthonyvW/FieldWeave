@@ -111,6 +111,9 @@ class ZoomPreviewOverlay(Overlay):
     # floor _max_zoom won't zoom past.
     _MIN_CROP_PX: int = 32
 
+    # Fraction of the current crop's size nudged per arrow-key press.
+    _ARROW_PAN_STEP_FRAC: float = 0.05
+
     _MINIMAP_MAX_WIDTH: int = 120
     _MINIMAP_MARGIN: int = 10
 
@@ -390,8 +393,23 @@ class ZoomPreviewOverlay(Overlay):
         if not self.active or self._crop is None:
             return None
 
-        x0, y0, crop_w, crop_h = self._crop
         h, w = self._frame.dims()
+        scale_x, scale_y, translate_x, translate_y = self._transform_params(self._crop, (h, w), rect)
+
+        transform = QTransform()
+        transform.translate(translate_x, translate_y)
+        transform.scale(scale_x, scale_y)
+        return transform
+
+    @staticmethod
+    def _transform_params(
+        crop: tuple[int, int, int, int],
+        dims: tuple[int, int],
+        rect: QRect,
+    ) -> tuple[float, float, float, float]:
+        """Shared math behind paint_transform and widget_pos_for_rect_point — see either for what this means."""
+        x0, y0, crop_w, crop_h = crop
+        h, w = dims
 
         crop_frac_x0 = x0 / w
         crop_frac_y0 = y0 / h
@@ -402,11 +420,28 @@ class ZoomPreviewOverlay(Overlay):
         scale_y = 1.0 / crop_frac_h
         translate_x = rect.left() * (1 - scale_x) - crop_frac_x0 * rect.width() * scale_x
         translate_y = rect.top() * (1 - scale_y) - crop_frac_y0 * rect.height() * scale_y
+        return scale_x, scale_y, translate_x, translate_y
 
-        transform = QTransform()
-        transform.translate(translate_x, translate_y)
-        transform.scale(scale_x, scale_y)
-        return transform
+    def widget_pos_for_rect_point(self, point: QPointF, rect: QRect, widget_rect: QRect) -> QPointF:
+        """
+        Forward-map *point*, given in the same un-zoomed, within-*rect*
+        space overlay ``draw()`` methods use, to its actual on-screen
+        position — the inverse of what ``widget_pos_to_full_pixel`` does
+        for a click. Lets an overlay hit-test its own drawn markers (e.g.
+        measurement endpoints) against a real mouse position.
+
+        Recomputes the crop fresh from *widget_rect* rather than reusing
+        ``paint_transform``'s cache, so it's safe to call from a mouse
+        handler between paints, not just during one.
+        """
+        if not self.active or self._frame is None:
+            return point
+        crop = self._current_crop(widget_rect)
+        if crop is None:
+            return point
+        h, w = self._frame.dims()
+        scale_x, scale_y, translate_x, translate_y = self._transform_params(crop, (h, w), rect)
+        return QPointF(point.x() * scale_x + translate_x, point.y() * scale_y + translate_y)
 
     def widget_pos_to_full_pixel(self, pos: QPoint, widget_rect: QRect) -> tuple[float, float, int, int] | None:
         """
@@ -461,6 +496,65 @@ class ZoomPreviewOverlay(Overlay):
             return None
         x0, y0, crop_w, crop_h = crop
         return x0 + crop_w / 2, y0 + crop_h / 2
+
+    def pan_step(self, dx: int, dy: int, widget_rect: QRect) -> bool:
+        """
+        Nudge the pan position by a fraction of the current crop size —
+        drives arrow-key panning. Only meaningful once zoomed in, same
+        as click-and-drag panning; returns False otherwise so the caller
+        can leave arrow keys to whatever else wants them (e.g. focus
+        navigation) rather than swallowing the keypress.
+        """
+        if not self.active or self._frame is None:
+            return False
+        size = self._crop_size(widget_rect)
+        if size is None:
+            return False
+        crop_w, crop_h = size
+        h, w = self._frame.dims()
+        state = self._state
+        state.center_x += dx * self._ARROW_PAN_STEP_FRAC * crop_w / w
+        state.center_y += dy * self._ARROW_PAN_STEP_FRAC * crop_h / h
+        self._clamp_center(widget_rect)
+        return True
+
+    def current_scale_xy(self) -> tuple[float, float]:
+        """
+        The (scale_x, scale_y) that ``paint_transform`` is currently
+        applying — (1.0, 1.0) when not zoomed. Uses the crop cached by
+        the most recent ``display_rect`` call, same as ``paint_transform``
+        itself.
+
+        The two can differ: at some zoom levels the crop's aspect ratio
+        doesn't yet exactly match the widget's, so the displayed crop is
+        intentionally stretched non-uniformly to fill the letterbox
+        progressively — see ``_crop_size``. A marker that needs to stay a
+        true circle on screen (not an ellipse riding along with that
+        stretch) needs both axes rather than a single scale factor; one
+        that only needs its overall size corrected (stroke widths) can
+        average the two. See ``MeasurementOverlay._draw_stroke``.
+        """
+        if not self.active or self._crop is None or self._frame is None:
+            return 1.0, 1.0
+        _, _, crop_w, crop_h = self._crop
+        h, w = self._frame.dims()
+        if crop_w <= 0 or crop_h <= 0:
+            return 1.0, 1.0
+        return w / crop_w, h / crop_h
+
+    def current_frame_dims(self) -> tuple[int, int] | None:
+        """
+        The full source frame's (width, height), or None if there's no
+        frame yet. Unlike ``current_scale_xy``, this doesn't depend on
+        zoom state — it's for overlays converting between the x/y
+        fraction space measurements are stored in and true, aspect-
+        correct pixel distances (e.g. a circle's radius), which needs
+        the frame's real aspect ratio regardless of whether it's zoomed.
+        """
+        if self._frame is None:
+            return None
+        h, w = self._frame.dims()
+        return w, h
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
         if self._crop is None or self._frame is None:
