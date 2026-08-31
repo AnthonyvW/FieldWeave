@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple, TYPE_CHECKING
@@ -213,26 +213,33 @@ class CameraSettings(ABC):
         """
         Get camera metadata for image saving.
 
-        Retrieves current settings to be embedded in saved images.
+        Retrieves current settings to be embedded in saved images. Walks
+        get_metadata() rather than the raw dataclass fields, since that is
+        the authoritative list of settings a given camera exposes — a
+        subclass's fields (e.g. Amscope fan/TEC controls) only show up here
+        if get_metadata() declares them.
 
         Returns:
             Dictionary containing camera metadata including the model name
-            (if a camera is attached) and all serialisable settings fields.
+            (if a camera is attached) and every setting registered via
+            get_metadata().
         """
         metadata: dict[str, Any] = {}
 
         if self._camera is not None:
             metadata["model"] = self._camera.model
 
-        settings_dict = asdict(self)
+        for meta in self.get_metadata():
+            if not hasattr(self, meta.name):
+                continue
 
-        settings_dict.pop("version", None)
-
-        for key, value in settings_dict.items():
+            value = getattr(self, meta.name)
             if hasattr(value, "_asdict"):
-                settings_dict[key] = value._asdict()
+                value = value._asdict()
+            elif isinstance(value, Enum):
+                value = value.value
 
-        metadata.update(settings_dict)
+            metadata[meta.name] = value
 
         return metadata
 

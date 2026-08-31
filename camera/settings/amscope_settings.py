@@ -701,21 +701,23 @@ class AmscopeSettings(CameraSettings):
         return len(self.get_still_resolutions()) > 0
 
     def get_camera_metadata(self) -> dict[str, Any]:
-        """Get current camera metadata for image saving."""
-        metadata: dict[str, Any] = {}
+        """Camera metadata for image saving.
 
-        if self._camera is not None:
-            metadata['model'] = self._camera.model
+        Extends the base get_metadata()-driven metadata (which covers every
+        setting declared in get_metadata(): temp, tint, hue, saturation,
+        level ranges, DFC, etc.) with the two things that need Amscope-
+        specific handling: the live hardware exposure time, which lags
+        behind self.exposure_time while auto_exposure is on, and the
+        camera serial number, which isn't a user-facing setting at all.
+        """
+        metadata = super().get_camera_metadata()
+        metadata['exposure_time'] = self.get_exposure_time()
 
-        metadata['exposure_time_us'] = self.get_exposure_time()
-        metadata['temperature'] = self.temp
-        metadata['tint'] = self.tint
-
-        try:
-            if self._camera is not None and hasattr(self._camera, '_hcam') and self._camera._hcam:
+        if self._camera is not None and hasattr(self._camera, '_hcam') and self._camera._hcam:
+            try:
                 metadata['serial'] = self._camera._hcam.SerialNumber()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         return metadata
 

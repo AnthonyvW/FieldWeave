@@ -452,22 +452,23 @@ class BaseCamera(ABC):
         if "model" in camera_meta:
             exif[base_tags['Model']] = str(camera_meta["model"])
         
-        # Get the EXIF IFD to add camera-specific tags
-        exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
+        # Pillow's TIFF writer does not serialize nested EXIF sub-IFDs
+        # (exif.get_ifd(ExifTags.IFD.Exif)) the way it does for JPEG, so every
+        # tag below is set on the top-level exif object instead.
         
         # Exposure time
         if "exposure_time_us" in camera_meta:
             exposure_sec = camera_meta["exposure_time_us"] / 1_000_000
-            exif_ifd[base_tags['ExposureTime']] = (int(exposure_sec * 1_000_000), 1_000_000)
+            exif[base_tags['ExposureTime']] = (int(exposure_sec * 1_000_000), 1_000_000)
         
         # ISO Speed (using gain as proxy)
         if "gain_percent" in camera_meta:
             iso_value = camera_meta["gain_percent"]
-            exif_ifd[base_tags['ISOSpeedRatings']] = iso_value
+            exif[base_tags['ISOSpeedRatings']] = iso_value
         
-        # Add timestamp to EXIF IFD
-        exif_ifd[base_tags['DateTimeOriginal']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
-        exif_ifd[base_tags['DateTimeDigitized']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
+        # Add timestamp
+        exif[base_tags['DateTimeOriginal']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
+        exif[base_tags['DateTimeDigitized']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
         
         # Image description from user metadata
         additional_meta = metadata.get("additional", {})
@@ -483,7 +484,7 @@ class BaseCamera(ABC):
         
         # Store complete metadata as JSON in UserComment
         metadata_json = json.dumps(metadata, indent=2)
-        exif_ifd[base_tags['UserComment']] = metadata_json.encode('utf-16')
+        exif[base_tags['UserComment']] = metadata_json.encode('utf-16')
         
         # Save with EXIF
         pil_image.save(filepath, format='TIFF', exif=exif, compression='tiff_deflate')
