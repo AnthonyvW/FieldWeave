@@ -618,23 +618,25 @@ class UsbCameraSettings(CameraSettings):
     # ------------------------------------------------------------------
 
     def get_camera_metadata(self) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
+        """Camera metadata for image saving.
 
-        if self._camera is not None:
-            metadata['model'] = self._camera.model
-
+        Extends the base get_metadata()-driven metadata (which covers every
+        setting this device actually supports: preview_resolution, codec,
+        auto_exposure, and whichever of contrast/hue/saturation/brightness/
+        gain/gamma the camera reported support for) with exposure_time_us,
+        which isn't a declared setting since it's read live rather than
+        stored, and the contrast/saturation direction codes.
+        """
+        metadata = super().get_camera_metadata()
         metadata['exposure_time_us'] = self.get_exposure_time()
-        metadata['auto_exposure'] = self.auto_exposure
-        metadata['exposure'] = self.exposure
-        metadata['brightness'] = self.brightness
-        metadata['contrast'] = self.contrast
-        metadata['saturation'] = self.saturation
-        metadata['hue'] = self.hue
-        metadata['gain'] = self.gain
-        metadata['gamma'] = self.gamma
-        metadata['codec'] = self.codec
-        metadata['preview_resolution'] = self.preview_resolution
-        metadata['file_format'] = self.fformat.value
+
+        if 'fformat' in metadata:
+            metadata['file_format'] = metadata.pop('fformat')
+
+        if 'contrast' in metadata:
+            metadata['contrast_direction'] = self.direction_code('contrast')
+        if 'saturation' in metadata:
+            metadata['saturation_direction'] = self.direction_code('saturation')
 
         return metadata
 

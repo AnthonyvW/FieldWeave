@@ -709,9 +709,26 @@ class AmscopeSettings(CameraSettings):
         specific handling: the live hardware exposure time, which lags
         behind self.exposure_time while auto_exposure is on, and the
         camera serial number, which isn't a user-facing setting at all.
+
+        Two keys are renamed from the base dict to match UsbCameraSettings:
+        'exposure_time' -> 'exposure_time_us' (both cameras report
+        microseconds, just under different names) and 'fformat' ->
+        'file_format'.
+
+        Also adds 'contrast_direction'/'saturation_direction': a coarse
+        Normal/Low/High code (relative to this class's factory default) that
+        BaseCamera writes to the standard EXIF Contrast/Saturation tags,
+        alongside the exact values.
         """
         metadata = super().get_camera_metadata()
-        metadata['exposure_time'] = self.get_exposure_time()
+        metadata.pop('exposure_time', None)
+        metadata['exposure_time_us'] = self.get_exposure_time()
+
+        if 'fformat' in metadata:
+            metadata['file_format'] = metadata.pop('fformat')
+
+        metadata['contrast_direction'] = self.direction_code('contrast')
+        metadata['saturation_direction'] = self.direction_code('saturation')
 
         if self._camera is not None and hasattr(self._camera, '_hcam') and self._camera._hcam:
             try:

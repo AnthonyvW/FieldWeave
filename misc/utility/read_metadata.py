@@ -14,10 +14,43 @@ from typing import Any
 
 from PIL import ExifTags, Image
 
+# EXIF 2.3 UserComment charset-designation codes (first 8 bytes of the tag).
+_USER_COMMENT_CHARSETS = {
+    b"UNICODE\x00": "utf-16-le",
+    b"ASCII\x00\x00\x00": "ascii",
+}
+
 # Per-strip/tile file layout tags, not camera metadata; can run to
 # thousands of entries for a single image and drown out everything else.
 NOISY_TAGS = {"StripOffsets", "StripByteCounts", "TileOffsets", "TileByteCounts"}
 MAX_ARRAY_LEN = 10
+
+# Camera settings with no standard EXIF tag are written by BaseCamera to this
+# private, unassigned tag block, one JSON-encoded value per field. Must stay
+# in sync with _PRIVATE_CAMERA_FIELDS in camera/cameras/base_camera.py.
+_PRIVATE_CAMERA_FIELDS = (
+    "preview_resolution",
+    "still_resolution",
+    "file_format",
+    "codec",
+    "rotate",
+    "hflip",
+    "vflip",
+    "exposure",
+    "contrast",
+    "saturation",
+    "hue",
+    "temp",
+    "tint",
+    "level_range_low",
+    "level_range_high",
+    "dfc_enable",
+    "dfc_quantity",
+)
+_PRIVATE_TAG_BASE = 60100
+_PRIVATE_TAG_NAMES: dict[int, str] = {
+    _PRIVATE_TAG_BASE + i: name for i, name in enumerate(_PRIVATE_CAMERA_FIELDS)
+}
 
 
 def truncate_for_display(value: Any) -> Any:
@@ -29,18 +62,45 @@ def truncate_for_display(value: Any) -> Any:
 
 
 def decode_user_comment(raw: bytes) -> Any:
-    # BaseCamera writes this as metadata_json.encode('utf-16'), with none of
-    # the EXIF 2.3 charset-designation prefix a strict reader expects, so it
-    # has to be decoded the same nonstandard way it was written.
-    try:
-        text = raw.decode("utf-16")
-    except UnicodeDecodeError:
-        return raw
+    text: str | None = None
+
+    for prefix, encoding in _USER_COMMENT_CHARSETS.items():
+        if raw.startswith(prefix):
+            try:
+                text = raw[len(prefix):].decode(encoding)
+            except UnicodeDecodeError:
+                text = None
+            break
+
+    if text is None:
+        # Fall back to how BaseCamera wrote this before it added the
+        # charset-designation prefix (plain metadata_json.encode('utf-16')).
+        try:
+            text = raw.decode("utf-16")
+        except UnicodeDecodeError:
+            return raw
 
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         return text
+
+
+def _resolve_tag(tag_id: int, value: Any, base_tags: dict[int, str]) -> tuple[Any, Any]:
+    """Map a raw (tag_id, value) pair to (name, value), decoding private tags."""
+    if tag_id in _PRIVATE_TAG_NAMES:
+        name = _PRIVATE_TAG_NAMES[tag_id]
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        return name, value
+
+    name = base_tags.get(tag_id, tag_id)
+    if name == "UserComment" and isinstance(value, bytes):
+        value = decode_user_comment(value)
+    return name, value
 
 
 def read_exif_metadata(filepath: Path) -> dict[str, Any] | None:
@@ -58,20 +118,16 @@ def read_exif_metadata(filepath: Path) -> dict[str, Any] | None:
         result: dict[str, Any] = {}
 
         for tag_id, value in exif.items():
-            name = base_tags.get(tag_id, tag_id)
+            name, value = _resolve_tag(tag_id, value, base_tags)
             if name in NOISY_TAGS:
                 continue
-            if name == "UserComment" and isinstance(value, bytes):
-                value = decode_user_comment(value)
             result[name] = value
 
         exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
         for tag_id, value in exif_ifd.items():
-            name = base_tags.get(tag_id, tag_id)
+            name, value = _resolve_tag(tag_id, value, base_tags)
             if name in NOISY_TAGS:
                 continue
-            if name == "UserComment" and isinstance(value, bytes):
-                value = decode_user_comment(value)
             result[name] = value
 
         return result

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple, TYPE_CHECKING
@@ -242,6 +242,31 @@ class CameraSettings(ABC):
             metadata[meta.name] = value
 
         return metadata
+
+    def field_default(self, name: str) -> Any:
+        """The dataclass-declared default for *name*, or None if there isn't one.
+
+        Used as the "normal" baseline for direction_code() — the factory
+        default rather than the middle of the field's valid range, since a
+        hardware-probed range (see UsbCameraSettings) isn't necessarily
+        centered on where the camera actually ships.
+        """
+        for f in fields(self):
+            if f.name == name:
+                return f.default
+        return None
+
+    def direction_code(self, name: str) -> int:
+        """EXIF Contrast/Saturation-style code (0=Normal, 1=Low, 2=High) for
+        field *name*, relative to its dataclass default.
+        """
+        value = getattr(self, name)
+        default = self.field_default(name)
+        if value > default:
+            return 2
+        if value < default:
+            return 1
+        return 0
 
     def supports_histogram(self) -> bool:
         """

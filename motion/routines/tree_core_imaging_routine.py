@@ -315,6 +315,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 filepath=filepath,
                 resolution_index=0,
                 additional_metadata={
+                    "DPI": get_app_context().machine_vision.settings.dpi,
                     "x_position_nm": pos.x,
                     "y_position_nm": pos.y,
                     "z_position_nm": pos.z,

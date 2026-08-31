@@ -3,19 +3,19 @@ Base camera class that defines the interface for camera operations.
 All specific camera implementations should inherit from this class.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Callable, Any, TYPE_CHECKING
+from typing import Callable, Any
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 import numpy as np
-from PIL import Image, ExifTags
-from PIL.Image import Exif
-from PIL import PngImagePlugin
-import json
+from PIL import Image
 
 from common.logger import info, debug, error, exception
 from camera.settings.camera_settings import CameraSettings, CameraSettingsManager
+from camera.cameras import exif_metadata
 
 
 @dataclass
@@ -358,9 +358,8 @@ class BaseCamera(ABC):
             True if successful, False otherwise
             
         Note:
-            - TIFF/TIF: Metadata saved in TIFF tags and as JSON in UserComment
-            - JPG/JPEG: Metadata saved in EXIF UserComment as JSON
-            - PNG: Metadata saved in PNG text chunks
+            See camera.cameras.exif_metadata for exactly how fields are
+            distributed across tags/chunks per format.
         """
         pil_image = None
         try:
@@ -403,11 +402,11 @@ class BaseCamera(ABC):
             
             # Save with format-specific metadata
             if ext in ['.tif', '.tiff']:
-                self._save_tiff_with_metadata(pil_image, filepath, full_metadata)
+                exif_metadata.save_tiff_with_metadata(pil_image, filepath, full_metadata)
             elif ext in ['.jpg', '.jpeg']:
-                self._save_jpeg_with_metadata(pil_image, filepath, full_metadata)
+                exif_metadata.save_jpeg_with_metadata(pil_image, filepath, full_metadata)
             elif ext == '.png':
-                self._save_png_with_metadata(pil_image, filepath, full_metadata)
+                exif_metadata.save_png_with_metadata(pil_image, filepath, full_metadata)
             else:
                 error(f"Unsupported file format: {ext}")
                 return False
@@ -423,153 +422,3 @@ class BaseCamera(ABC):
             if pil_image is not None:
                 pil_image.close()
                 del pil_image
-    
-    def _save_tiff_with_metadata(
-        self,
-        pil_image: Image.Image,
-        filepath: Path,
-        metadata: dict[str, Any]
-    ):
-        """Save TIFF with metadata in EXIF tags and UserComment"""
-        # Get tag mappings from Base enum
-        base_tags = {tag.name: tag.value for tag in ExifTags.Base}
-        
-        # Create Exif object
-        exif = Exif()
-        
-        # Add software information
-        from common.app_context import get_app_context
-        exif[base_tags['Software']] = f"FieldWeave - v{get_app_context().settings.version}"
-        
-        # Add timestamp
-        timestamp = metadata.get("timestamp", datetime.now().isoformat())
-        exif[base_tags['DateTime']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
-        
-        # Add camera metadata if available
-        camera_meta = metadata.get("camera", {})
-        
-        # Camera Model
-        if "model" in camera_meta:
-            exif[base_tags['Model']] = str(camera_meta["model"])
-        
-        # Pillow's TIFF writer does not serialize nested EXIF sub-IFDs
-        # (exif.get_ifd(ExifTags.IFD.Exif)) the way it does for JPEG, so every
-        # tag below is set on the top-level exif object instead.
-        
-        # Exposure time
-        if "exposure_time_us" in camera_meta:
-            exposure_sec = camera_meta["exposure_time_us"] / 1_000_000
-            exif[base_tags['ExposureTime']] = (int(exposure_sec * 1_000_000), 1_000_000)
-        
-        # ISO Speed (using gain as proxy)
-        if "gain_percent" in camera_meta:
-            iso_value = camera_meta["gain_percent"]
-            exif[base_tags['ISOSpeedRatings']] = iso_value
-        
-        # Add timestamp
-        exif[base_tags['DateTimeOriginal']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
-        exif[base_tags['DateTimeDigitized']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
-        
-        # Image description from user metadata
-        additional_meta = metadata.get("additional", {})
-        description_parts = []
-        
-        if "description" in additional_meta:
-            description_parts.append(str(additional_meta["description"]))
-        if "sample_id" in additional_meta:
-            description_parts.append(f"Sample: {additional_meta['sample_id']}")
-        
-        if description_parts:
-            exif[base_tags['ImageDescription']] = " | ".join(description_parts)
-        
-        # Store complete metadata as JSON in UserComment
-        metadata_json = json.dumps(metadata, indent=2)
-        exif[base_tags['UserComment']] = metadata_json.encode('utf-16')
-        
-        # Save with EXIF
-        pil_image.save(filepath, format='TIFF', exif=exif, compression='tiff_deflate')
-        debug(f"TIFF with EXIF metadata saved to {filepath}")
-    
-    def _save_jpeg_with_metadata(
-        self,
-        pil_image: Image.Image,
-        filepath: Path,
-        metadata: dict[str, Any]
-    ):
-        """Save JPEG with metadata in EXIF tags"""
-        # Get tag mappings from Base enum
-        base_tags = {tag.name: tag.value for tag in ExifTags.Base}
-        
-        # Create Exif object
-        exif = Exif()
-        
-        # Add software information
-        from common.app_context import get_app_context
-        exif[base_tags['Software']] = f"FieldWeave - v{get_app_context().settings.version}"
-        
-        # Add timestamp
-        timestamp = metadata.get("timestamp", datetime.now().isoformat())
-        exif[base_tags['DateTime']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
-        
-        # Add camera metadata
-        camera_meta = metadata.get("camera", {})
-        
-        if "model" in camera_meta:
-            exif[base_tags['Model']] = str(camera_meta["model"])
-        
-        # Image description from additional metadata
-        additional_meta = metadata.get("additional", {})
-        if "description" in additional_meta:
-            exif[base_tags['ImageDescription']] = str(additional_meta["description"])
-        elif "sample_id" in additional_meta:
-            exif[base_tags['ImageDescription']] = f"Sample: {additional_meta['sample_id']}"
-        
-        # Get the EXIF IFD
-        exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
-        
-        # Exposure time
-        if "exposure_time_us" in camera_meta:
-            exposure_sec = camera_meta["exposure_time_us"] / 1_000_000
-            exif_ifd[base_tags['ExposureTime']] = (int(exposure_sec * 1_000_000), 1_000_000)
-        
-        # ISO Speed
-        if "gain_percent" in camera_meta:
-            iso_value = camera_meta["gain_percent"]
-            exif_ifd[base_tags['ISOSpeedRatings']] = iso_value
-        
-        # Add timestamp to EXIF IFD
-        exif_ifd[base_tags['DateTimeOriginal']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
-        exif_ifd[base_tags['DateTimeDigitized']] = datetime.fromisoformat(timestamp).strftime("%Y:%m:%d %H:%M:%S")
-        
-        # Store complete metadata as JSON in UserComment
-        metadata_json = json.dumps(metadata, indent=2)
-        exif_ifd[base_tags['UserComment']] = metadata_json.encode('utf-16')
-        
-        # Save with EXIF
-        pil_image.save(filepath, format='JPEG', exif=exif, quality=95)
-        debug(f"JPEG with EXIF metadata saved to {filepath}")
-    
-    def _save_png_with_metadata(
-        self,
-        pil_image: Image.Image,
-        filepath: Path,
-        metadata: dict[str, Any]
-    ):
-        """Save PNG with metadata in text chunks"""
-        
-        # Create PNG info
-        pnginfo = PngImagePlugin.PngInfo()
-        
-        # Add software info
-        from common.app_context import get_app_context
-        pnginfo.add_text("Software", f"FieldWeave - v{get_app_context().settings.version}")
-        pnginfo.add_text("Metadata", json.dumps(metadata, indent=2))
-        
-        # Add individual camera settings as separate chunks
-        camera_meta = metadata.get("camera", {})
-        for key, value in camera_meta.items():
-            pnginfo.add_text(f"Camera.{key}", str(value))
-        
-        # Save with metadata
-        pil_image.save(filepath, format='PNG', pnginfo=pnginfo)
-        debug(f"PNG metadata saved to {filepath}")

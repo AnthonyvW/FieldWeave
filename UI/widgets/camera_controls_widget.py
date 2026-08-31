@@ -908,7 +908,10 @@ class CameraControlsWidget(QWidget):
 
         camera.capture_and_save_still(
             filepath=filepath,
-            additional_metadata={"source": "still_capture"},
+            additional_metadata={
+                "source": "still_capture",
+                "DPI": ctx.machine_vision.settings.dpi
+                },
             timeout_ms=5000,
             on_complete=on_capture_complete,
         )

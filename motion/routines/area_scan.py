@@ -545,6 +545,7 @@ class AreaScan(AutomationRoutine):
                     filepath=filepath,
                     resolution_index=0,
                     additional_metadata={
+                        "DPI": dpi,
                         "x_position_nm": actual_pos.x,
                         "y_position_nm": actual_pos.y,
                         "z_position_nm": actual_pos.z,

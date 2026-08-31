@@ -684,7 +684,10 @@ class CaptureControlWidget(QWidget):
 
         camera.capture_and_save_still(
             filepath=filepath,
-            additional_metadata={"source": "measurement_capture"},
+            additional_metadata={
+                "DPI": ctx.machine_vision.settings.dpi,
+                "source": "measurement_capture"
+                },
             timeout_ms=5000,
             on_complete=on_capture_complete,
         )
