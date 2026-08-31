@@ -226,6 +226,17 @@ class AppContext:
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
 
+    def open_tab(self, label: str) -> bool:
+        """Switch the main window to the tab whose header text matches *label*. Returns whether a matching tab was found."""
+        tabs = getattr(self._main_window, "tabs", None)
+        if tabs is None:
+            return False
+        for index in range(tabs.count()):
+            if tabs.tabText(index) == label:
+                tabs.setCurrentIndex(index)
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Internal initialisation
     # ------------------------------------------------------------------
@@ -344,3 +355,7 @@ def get_fieldweave_version() -> str:
 
 def open_settings(category: str) -> None:
     AppContext().open_settings(category)
+
+
+def open_tab(label: str) -> bool:
+    return AppContext().open_tab(label)

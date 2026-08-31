@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from enum import Enum
+
+_MM_PER_INCH = 25.4
+
+
+class MeasurementUnit(Enum):
+    UM = "\u00b5m"
+    MM = "mm"
+    CM = "cm"
+    IN = "in"
+
+
+def pixels_to_unit(pixels: float, dpi: float, unit: MeasurementUnit) -> float:
+    """Convert a pixel length to *unit*, given the source's DPI (pixels per inch)."""
+    mm = (pixels / dpi) * _MM_PER_INCH
+    if unit is MeasurementUnit.UM:
+        return mm * 1000
+    if unit is MeasurementUnit.CM:
+        return mm / 10
+    if unit is MeasurementUnit.IN:
+        return mm / _MM_PER_INCH
+    return mm
+
+
+def format_length(pixels: float, dpi: float, unit: MeasurementUnit) -> str:
+    return f"{pixels_to_unit(pixels, dpi, unit):.2f} {unit.value}"
+
+
+def unit_to_mm(value: float, unit: MeasurementUnit) -> float:
+    """Inverse of pixels_to_unit's scaling — convert a value given in *unit* to millimeters."""
+    if unit is MeasurementUnit.UM:
+        return value / 1000
+    if unit is MeasurementUnit.CM:
+        return value * 10
+    if unit is MeasurementUnit.IN:
+        return value * _MM_PER_INCH
+    return value
+
+
+def dpi_from_measurement(pixel_length: float, value: float, unit: MeasurementUnit) -> float | None:
+    """Derive a DPI from a measured pixel length and the real-world length the user says it represents. None if either isn't a usable positive number."""
+    if pixel_length <= 0:
+        return None
+    mm = unit_to_mm(value, unit)
+    if mm <= 0:
+        return None
+    return pixel_length * _MM_PER_INCH / mm

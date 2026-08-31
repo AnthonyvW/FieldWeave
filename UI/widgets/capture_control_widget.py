@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from PySide6.QtCore import Slot, QTimer, Qt, QMimeData, QEvent, QObject
+from PySide6.QtCore import Signal, Slot, QTimer, Qt, QMimeData, QEvent, QObject
 from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QResizeEvent, QMoveEvent, QShowEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -17,19 +17,29 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from common.app_context import get_app_context
+from common.app_context import AppContext, get_app_context
 from common.logger import info, error, warning
+from common.read_metadata import extract_dpi, read_metadata
 from common.setting_types import FileFormat
+from UI.widgets.measurements.units import MeasurementUnit, dpi_from_measurement
 from UI.widgets.preview_overlay.large_image_source import LargeImageSource
 
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".tif", ".tiff"})
+
+# Pyramidal/tiled TIFF writers (libvips and others) commonly stamp
+# XResolution/YResolution as exactly 1 when no real value was supplied,
+# rather than omitting the tag — a real photo or scan is never actually
+# ~1 pixel per inch, so treat that (and anything <=) as no DPI at all,
+# not a real value. See _load_image_routine.
+_MIN_PLAUSIBLE_METADATA_DPI = 1.0
 
 
 class CaptureMode(Enum):
@@ -53,6 +63,23 @@ class CaptureControlWidget(QWidget):
     by MeasurementTab's showEvent/hideEvent.
     """
 
+    # Emitted with (dpi, is_live) for whichever mode is currently active,
+    # any time the DPI value changes — mode switch, a newly loaded
+    # image, a live-view settings/calibration change, or the user
+    # entering one by hand via "Calibrate DPI" -> Enter DPI (loaded
+    # image only — see MeasurementsWidget.set_dpi_display).
+    dpi_changed = Signal(object, bool)
+
+    # Whether a manual-calibration reference line is currently placed on
+    # the preview, so MeasurementsWidget can enable/disable its "Finish
+    # Calibration" button.
+    calibration_line_ready = Signal(bool)
+
+    # A newly loaded image had no DPI in its metadata — tells
+    # MeasurementsWidget to expand its DPI Calibration panel so the fix
+    # is right there rather than requiring the user to hunt for it.
+    loaded_dpi_missing = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
@@ -66,6 +93,18 @@ class CaptureControlWidget(QWidget):
 
         self._loaded_source: LargeImageSource | None = None
         self._loaded_image_path: Path | None = None
+
+        # DPI, tracked separately per source the same way measurements
+        # are — a loaded image keeps the DPI read from its own metadata
+        # even while the live feed is showing, and vice versa. Live DPI
+        # is always mirrored from machine_vision.settings.dpi — the only
+        # way to change it is through calibration (automatic, via the
+        # Calibration tab, or manual, via submit_calibration_dpi below),
+        # both of which write to settings directly.
+        self._live_dpi: float | None = None
+        self._loaded_dpi: float | None = None
+        self._live_reference_dims: tuple[int, int] | None = None
+        self._calibration_line_ready = False
 
         # Capture state — mutated only by the on_complete callback on the
         # camera thread; read only by _poll_capture_state on the main thread.
@@ -83,6 +122,7 @@ class CaptureControlWidget(QWidget):
         self._load_success: bool | None = None
         self._load_source: LargeImageSource | None = None
         self._load_path: Path | None = None
+        self._load_dpi: float | None = None
         self._load_switching_in = False
         self._load_toast_id: int | None = None
 
@@ -106,6 +146,8 @@ class CaptureControlWidget(QWidget):
         self._camera_poll_timer = QTimer(self)
         self._camera_poll_timer.setInterval(500)
         self._camera_poll_timer.timeout.connect(self._refresh_capture_availability)
+        self._camera_poll_timer.timeout.connect(self._refresh_live_dpi)
+        self._camera_poll_timer.timeout.connect(self._refresh_calibration_line_ready)
         self._camera_poll_timer.start()
 
         self._refresh_capture_availability()
@@ -118,6 +160,8 @@ class CaptureControlWidget(QWidget):
         """Called by MeasurementTab's showEvent/hideEvent to gate the loaded-image overlay."""
         self._tab_active = active
         self._sync_loaded_image_overlay()
+        if active and self._mode == CaptureMode.LIVE:
+            self._ensure_live_dpi()
 
     def _sync_loaded_image_overlay(self) -> None:
         preview = get_app_context().camera_preview
@@ -465,10 +509,20 @@ class CaptureControlWidget(QWidget):
     def _set_mode(self, mode: CaptureMode) -> None:
         if mode == self._mode:
             return
+        self.cancel_calibration()
+        self._discard_draft_measurement()
         self._mode = mode
         self._loaded_image_label.setVisible(mode == CaptureMode.LOADED_IMAGE)
         self._refresh_capture_availability()
         self._sync_loaded_image_overlay()
+        self._update_dpi_display()
+        if mode == CaptureMode.LIVE:
+            self._ensure_live_dpi()
+
+    def _discard_draft_measurement(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement.discard_draft()
 
     # ------------------------------------------------------------------
     # Loaded image
@@ -512,16 +566,24 @@ class CaptureControlWidget(QWidget):
 
         This only opens the file and builds LargeImageSource's small
         preview — it never decodes the whole image, so this stays fast
-        even for a file far too large to hold fully in memory.
+        even for a file far too large to hold fully in memory. Reading
+        the file's own metadata for a DPI value is cheap enough to do
+        here too, alongside the other file I/O.
         """
         source = LargeImageSource(str(path))
         success = source.open()
         if not success:
             source.close()
 
+        metadata = read_metadata(path) if success else None
+        dpi = extract_dpi(metadata) if metadata is not None else None
+        if dpi is not None and dpi <= _MIN_PLAUSIBLE_METADATA_DPI:
+            dpi = None
+
         self._load_source = source if success else None
         self._load_success = success
         self._load_path = path
+        self._load_dpi = dpi
         self._load_pending = True
 
     def _poll_load_state(self) -> None:
@@ -533,6 +595,7 @@ class CaptureControlWidget(QWidget):
         success = self._load_success
         source = self._load_source
         path = self._load_path
+        dpi = self._load_dpi
         self._load_source = None
 
         self._hide_overlay()
@@ -555,6 +618,14 @@ class CaptureControlWidget(QWidget):
         self._loaded_image_path = path
         self._loaded_image_label.setText(path.name)
 
+        no_dpi_found = dpi is None
+        if no_dpi_found:
+            QMessageBox.information(
+                self,
+                "No DPI Found",
+                "This image has no DPI in its metadata. Set it manually using the DPI Calibration panel.",
+            )
+
         if ctx.camera_preview is not None:
             ctx.camera_preview.overlays.set_loaded_image(self._loaded_source)
 
@@ -565,6 +636,13 @@ class CaptureControlWidget(QWidget):
 
         self._set_mode(CaptureMode.LOADED_IMAGE)
         self._loaded_mode_btn.setChecked(True)
+        self._apply_dpi(dpi)
+
+        # Emitted last, after the mode switch and its own dpi_changed —
+        # otherwise the mode-change-triggered panel auto-hide (see
+        # MeasurementsWidget.set_dpi_display) would immediately undo this.
+        if no_dpi_found:
+            self.loaded_dpi_missing.emit()
 
     # ------------------------------------------------------------------
     # Output folder / format
@@ -651,6 +729,149 @@ class CaptureControlWidget(QWidget):
 
         self._camera_available = available
         self._capture_button.setEnabled(available and self._mode == CaptureMode.LIVE)
+
+    # ------------------------------------------------------------------
+    # DPI
+    #
+    # Live view mirrors machine_vision.settings.dpi — the only way to
+    # change it is calibration, automatic (the Calibration tab) or
+    # manual (submit_calibration_dpi below), both of which write to
+    # settings directly, so there is exactly one source of truth and
+    # nothing here can fight it on the next poll tick.
+    #
+    # A loaded image instead carries its own DPI in its file metadata —
+    # see _load_image_routine — with a manual entry dialog as fallback.
+    #
+    # Either way, once DPI is available placement produces a labeled
+    # real-world length; without one the tab still works as a plain
+    # image/live viewer, just with unlabeled shapes — see
+    # MeasurementOverlay._draw_measurement_label.
+    # ------------------------------------------------------------------
+
+    def _refresh_live_dpi(self) -> None:
+        """Silently pick up settings.dpi / still-resolution changes (e.g. a calibration run on another tab)."""
+        if self._mode != CaptureMode.LIVE:
+            return
+        ctx = get_app_context()
+        dpi = ctx.machine_vision.settings.dpi
+        if dpi != self._live_dpi:
+            self._apply_dpi(dpi)
+        self._refresh_live_reference_dims(ctx)
+
+    def _refresh_live_reference_dims(self, ctx: AppContext) -> None:
+        """
+        Push the camera's still-capture resolution to the overlay — DPI
+        is calibrated against that, not the (lower-resolution) live
+        preview stream, so real-world length math must scale against it
+        too. See MeasurementOverlay._draw_measurement_label.
+        """
+        camera = ctx.camera
+        dims = None
+        if camera is not None and camera.underlying_camera.is_open:
+            _, width, height = camera.settings.get_current_still_resolution()
+            dims = (width, height)
+        if dims != self._live_reference_dims:
+            self._live_reference_dims = dims
+            if ctx.camera_preview is not None:
+                ctx.camera_preview.overlays.measurement.set_live_reference_dims(dims)
+
+    def _ensure_live_dpi(self) -> None:
+        """Resolve live DPI from settings. Never prompts — calibration is initiated explicitly via MeasurementsWidget's "Calibrate DPI" panel."""
+        if not self._tab_active:
+            return
+        ctx = get_app_context()
+        self._refresh_live_reference_dims(ctx)
+        self._apply_dpi(ctx.machine_vision.settings.dpi)
+
+    def submit_dpi_value(self, value: float) -> None:
+        """Directly apply a DPI value entered in MeasurementsWidget's own panel — live writes it to machine_vision.settings like calibration does; loaded just updates this widget's own _loaded_dpi."""
+        if value <= 0:
+            ctx = get_app_context()
+            if ctx.toast:
+                ctx.toast.error("Enter a positive DPI", title="Invalid DPI")
+            return
+        ctx = get_app_context()
+        if self._mode == CaptureMode.LIVE:
+            ctx.machine_vision.settings.dpi = value
+            ctx.machine_vision.save_settings()
+        self._apply_dpi(value)
+
+    def _apply_dpi(self, dpi: float | None) -> None:
+        """Store *dpi* for whichever source is currently active and push it to the preview overlay. Non-positive values are treated as unset."""
+        if dpi is not None and dpi <= 0:
+            dpi = None
+        ctx = get_app_context()
+        if self._mode == CaptureMode.LIVE:
+            self._live_dpi = dpi
+            if ctx.camera_preview is not None:
+                ctx.camera_preview.overlays.measurement.set_live_dpi(dpi)
+        else:
+            self._loaded_dpi = dpi
+            if ctx.camera_preview is not None:
+                ctx.camera_preview.overlays.measurement.set_loaded_dpi(dpi)
+        self._update_dpi_display()
+
+    def _update_dpi_display(self) -> None:
+        dpi = self._live_dpi if self._mode == CaptureMode.LIVE else self._loaded_dpi
+        self.dpi_changed.emit(dpi, self._mode == CaptureMode.LIVE)
+
+    # ------------------------------------------------------------------
+    # DPI calibration — manual works for either source (live or loaded
+    # image). There's no automatic option surfaced here at all; that
+    # lives entirely on the Calibration tab (see dpi_calibration.py),
+    # which writes machine_vision.settings.dpi itself.
+    #
+    # Manual places a single reference line on the preview (see
+    # MeasurementOverlay.start_calibration_placement) and derives DPI
+    # from its pixel length plus a user-entered real-world length. For
+    # live view that's a global machine_vision.settings write, same as
+    # the Calibration tab's own routine; for a loaded image it's
+    # per-image, so it only ever updates this widget's own _loaded_dpi.
+    # ------------------------------------------------------------------
+
+    def request_manual_calibration(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement.start_calibration_placement()
+
+    def cancel_calibration(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement.cancel_calibration_placement()
+
+    def submit_calibration_dpi(self, value: float, unit: MeasurementUnit) -> None:
+        ctx = get_app_context()
+        preview = ctx.camera_preview
+        if preview is None:
+            return
+
+        pixel_length = preview.overlays.measurement.calibration_line_length_px()
+        if pixel_length is None:
+            if ctx.toast:
+                ctx.toast.warning("Place the calibration line first", title="No Calibration Line")
+            return
+
+        dpi = dpi_from_measurement(pixel_length, value, unit)
+        if dpi is None:
+            if ctx.toast:
+                ctx.toast.error("Enter a positive measurement", title="Invalid Calibration")
+            return
+
+        if self._mode == CaptureMode.LIVE:
+            ctx.machine_vision.settings.dpi = dpi
+            ctx.machine_vision.save_settings()
+
+        preview.overlays.measurement.clear_calibration_line()
+        self._apply_dpi(dpi)
+        if ctx.toast:
+            ctx.toast.success(f"DPI set to {dpi:.2f}", title="Calibration Complete")
+
+    def _refresh_calibration_line_ready(self) -> None:
+        preview = get_app_context().camera_preview
+        ready = preview is not None and preview.overlays.measurement.has_calibration_line
+        if ready != self._calibration_line_ready:
+            self._calibration_line_ready = ready
+            self.calibration_line_ready.emit(ready)
 
     # ------------------------------------------------------------------
     # Capture actions

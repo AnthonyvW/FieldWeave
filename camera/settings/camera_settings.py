@@ -190,6 +190,10 @@ class CameraSettings(ABC):
     
     def get_still_resolutions(self) -> list['CameraResolution']:
         return []
+
+    @abstractmethod
+    def get_current_still_resolution(self) -> tuple[int, int, int]:
+        pass
     
     @abstractmethod
     def get_exposure_time(self) -> int:

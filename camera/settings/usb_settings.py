@@ -519,6 +519,11 @@ class UsbCameraSettings(CameraSettings):
     def get_still_resolutions(self) -> list[CameraResolution]:
         return []
 
+    def get_current_still_resolution(self) -> tuple[int, int, int]:
+        # No separate still pipeline; a still is grabbed from the live preview
+        # frame, so its resolution is whatever the preview is currently set to.
+        return self.get_current_preview_resolution()
+
     # ------------------------------------------------------------------
     # Resolution setters
     # ------------------------------------------------------------------

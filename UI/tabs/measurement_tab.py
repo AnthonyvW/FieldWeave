@@ -13,6 +13,7 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.capture_control_widget import CaptureControlWidget
 from UI.widgets.measurements_widget import MeasurementsWidget
+from UI.widgets.measurements.units import MeasurementUnit
 
 from common.app_context import get_app_context, open_settings
 
@@ -21,7 +22,21 @@ class MeasurementTab(CameraWithSidebarPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         self._capture_control = CaptureControlWidget()
         self._measurements = MeasurementsWidget()
+
         self._measurements.selection_changed.connect(self._on_measurement_selected)
+        self._measurements.unit_changed.connect(self._on_unit_changed)
+        self._on_unit_changed(self._measurements.current_unit())
+
+        self._measurements.dpi_value_submitted.connect(self._capture_control.submit_dpi_value)
+        self._measurements.manual_calibration_started.connect(self._capture_control.request_manual_calibration)
+        self._measurements.calibration_dpi_submitted.connect(self._capture_control.submit_calibration_dpi)
+        self._measurements.calibration_cancelled.connect(self._capture_control.cancel_calibration)
+
+        self._capture_control.dpi_changed.connect(self._measurements.set_dpi_display)
+        self._capture_control.calibration_line_ready.connect(self._measurements.set_calibration_line_ready)
+        self._capture_control.loaded_dpi_missing.connect(self._measurements.expand_calibration_panel)
+        self._measurements.set_dpi_display(None, True)
+
         super().__init__(self._make_sidebar(), parent)
 
     def _make_sidebar(self) -> QWidget:
@@ -82,4 +97,11 @@ class MeasurementTab(CameraWithSidebarPage):
     def _on_measurement_selected(self, kind: str | None) -> None:
         preview = get_app_context().camera_preview
         if preview is not None:
-            preview.overlays.measurement_type = kind
+            preview.overlays.measurement.type = kind
+        if kind is not None:
+            self._capture_control.cancel_calibration()
+
+    def _on_unit_changed(self, unit: MeasurementUnit) -> None:
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement.set_unit(unit)

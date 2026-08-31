@@ -19,7 +19,7 @@ from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOve
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.large_image_source import LargeImageSource
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
-from UI.widgets.preview_overlay.measurement_overlay import MeasurementOverlay
+from UI.widgets.preview_overlay.measurement_overlay import MeasurementOverlay, MeasurementOverlayController
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
 from UI.widgets.preview_overlay.background_detection import BackgroundDetectionOverlay
@@ -593,6 +593,7 @@ class OverlayController:
 
     def __init__(self, preview: CameraPreview) -> None:
         self._preview = preview
+        self._measurement = MeasurementOverlayController(preview._measurement_overlay, preview._video_label.update)
 
     @property
     def crosshair(self) -> bool:
@@ -691,14 +692,9 @@ class OverlayController:
         self._preview._video_label.update()
 
     @property
-    def measurement_type(self) -> str | None:
-        return self._preview._measurement_overlay.active_type
-
-    @measurement_type.setter
-    def measurement_type(self, kind: str | None) -> None:
-        """Set which measurement kind new clicks on the preview should place, or None to disable placement."""
-        self._preview._measurement_overlay.set_active_type(kind)
-        self._preview._video_label.update()
+    def measurement(self) -> MeasurementOverlayController:
+        """Measurement/DPI/calibration control surface — see MeasurementOverlayController."""
+        return self._measurement
 
     @property
     def loaded_image_enabled(self) -> bool:

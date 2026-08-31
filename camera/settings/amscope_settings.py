@@ -998,6 +998,21 @@ class AmscopeSettings(CameraSettings):
         except Exception as e:
             error(f"Failed to get still resolutions: {e}")
             return []
+
+    def get_current_still_resolution(self) -> tuple[int, int, int]:
+        # The SDK has no live "current still index" register - the still slot
+        # is only latched in at capture time - so resolve the stored
+        # still_resolution string against get_still_resolutions() instead.
+        still_resolutions = self.get_still_resolutions()
+        if not still_resolutions:
+            return (0, 0, 0)
+
+        index = self.get_still_resolution_index()
+        if not (0 <= index < len(still_resolutions)):
+            return (0, 0, 0)
+
+        r = still_resolutions[index]
+        return (index, r.width, r.height)
     
     def get_exposure_time(self) -> int:
         if self._camera is None or not hasattr(self._camera, '_hcam'):

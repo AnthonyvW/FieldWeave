@@ -1,21 +1,28 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import NamedTuple
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QBrush, QPainter, QPen
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
+from PySide6.QtGui import QBrush, QFont, QFontMetricsF, QPainter, QPen
 
 from UI.widgets.measurements.measurement_style import (
     OVERLAY_DASH_GAP,
     OVERLAY_DASH_LENGTH,
     OVERLAY_ENDPOINT_HIT_RADIUS,
     OVERLAY_ENDPOINT_RADIUS,
+    OVERLAY_LABEL_CORNER_RADIUS,
+    OVERLAY_LABEL_FONT_SIZE,
+    OVERLAY_LABEL_OFFSET,
+    OVERLAY_LABEL_PADDING_X,
+    OVERLAY_LABEL_PADDING_Y,
     OVERLAY_LINE_COLOR,
     OVERLAY_LINE_WIDTH,
     OVERLAY_OUTLINE_COLOR,
     OVERLAY_OUTLINE_WIDTH,
 )
+from UI.widgets.measurements.units import MeasurementUnit, format_length
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.zoom_preview import ZoomPreviewOverlay
@@ -23,6 +30,7 @@ from UI.widgets.preview_overlay.zoom_preview import ZoomPreviewOverlay
 # How many points each kind needs before it auto-finalizes on a click.
 # "Arbitrary Line" is intentionally absent — it keeps accumulating points
 # until cancelled (see MeasurementOverlay.place_point/cancel_placement).
+CALIBRATION_KIND = "Calibration Line"
 _REQUIRED_POINTS = {
     "Point": 1,
     "Horizontal Line": 2,
@@ -30,10 +38,11 @@ _REQUIRED_POINTS = {
     "Radius Circle": 2,
     "Diameter": 2,
     "3 Point Circle": 3,
+    CALIBRATION_KIND: 2,
 }
 
 PLACEABLE_KINDS = (*_REQUIRED_POINTS, "Arbitrary Line")
-_LINE_KINDS = ("Arbitrary Line", "Horizontal Line", "Vertical Line")
+_LINE_KINDS = ("Arbitrary Line", "Horizontal Line", "Vertical Line", CALIBRATION_KIND)
 _CIRCLE_KINDS = ("Radius Circle", "Diameter", "3 Point Circle")
 
 # Points closer together than this (in frame fractions) are treated as a
@@ -118,6 +127,26 @@ class MeasurementOverlay(Overlay):
         self._live_measurements: list[Measurement] = []
         self._loaded_measurements: list[Measurement] = []
 
+        self._live_dpi: float | None = None
+        self._loaded_dpi: float | None = None
+        self._unit: MeasurementUnit = MeasurementUnit.MM
+
+        # The camera's live preview stream runs at a lower resolution
+        # than its still capture — DPI is calibrated against the still
+        # resolution (that's what actually gets saved with a capture's
+        # metadata), so live-view length math must scale fraction deltas
+        # by *this*, not by whatever frame size the zoom handler happens
+        # to have loaded for panning/zooming — see set_live_reference_dims.
+        self._live_reference_dims: tuple[int, int] | None = None
+
+        # Manual DPI calibration's single reference line. Kept entirely
+        # separate from ``measurements`` — it's a working reference, not
+        # a placed measurement. Applies to whichever source is active
+        # when placed; CaptureControlWidget cancels it on any mode
+        # switch, so it never survives a source change. See
+        # start_calibration_placement/calibration_line_length_px.
+        self._calibration_line: tuple[tuple[float, float], tuple[float, float]] | None = None
+
         self._active_type: str | None = None
         self._draft_type: str | None = None
         self._draft_points: list[tuple[float, float]] | None = None
@@ -154,6 +183,72 @@ class MeasurementOverlay(Overlay):
     def clear_loaded(self) -> None:
         """Remove every placed measurement for the loaded-image source specifically."""
         self._loaded_measurements.clear()
+
+    @property
+    def dpi(self) -> float | None:
+        """DPI for whichever source (live feed or loaded image) is currently shown, or None if unresolved."""
+        return self._loaded_dpi if self._loaded_active else self._live_dpi
+
+    def set_live_dpi(self, dpi: float | None) -> None:
+        self._live_dpi = dpi if dpi and dpi > 0 else None
+
+    def set_loaded_dpi(self, dpi: float | None) -> None:
+        self._loaded_dpi = dpi if dpi and dpi > 0 else None
+
+    def set_unit(self, unit: MeasurementUnit) -> None:
+        """Set the unit measurement labels are displayed in. Applies to both sources — it's a display preference, not per-source state like DPI."""
+        self._unit = unit
+
+    def set_live_reference_dims(self, dims: tuple[int, int] | None) -> None:
+        self._live_reference_dims = dims
+
+    # ------------------------------------------------------------------
+    # Manual DPI calibration — a single reference line, placed the same
+    # way any 2-point measurement is (see place_point), but finalizing
+    # into ``_calibration_line`` instead of ``measurements``. The caller
+    # (CaptureControlWidget) reads its pixel length back via
+    # calibration_line_length_px, combines it with a user-entered
+    # real-world length, and writes the resulting DPI to
+    # machine_vision.settings — this overlay only handles placement and
+    # geometry, never machine_vision itself.
+    # ------------------------------------------------------------------
+
+    def start_calibration_placement(self) -> None:
+        self._calibration_line = None
+        self.set_active_type(CALIBRATION_KIND)
+
+    def cancel_calibration_placement(self) -> None:
+        self._calibration_line = None
+        if self._active_type == CALIBRATION_KIND:
+            self.set_active_type(None)
+
+    def clear_calibration_line(self) -> None:
+        self._calibration_line = None
+
+    @property
+    def has_calibration_line(self) -> bool:
+        return self._calibration_line is not None
+
+    def calibration_line_length_px(self) -> float | None:
+        """
+        Pixel length of the placed calibration line at whichever
+        resolution DPI actually applies to for the active source — the
+        still-capture resolution for live view (see
+        _live_reference_dims), or the loaded image's own true resolution
+        for a loaded image (the zoom handler's current frame already is
+        that, unlike live view's preview-stream frame). None if
+        unavailable.
+        """
+        if self._calibration_line is None:
+            return None
+        if self._loaded_active:
+            dims = self._zoom_handler.current_frame_dims() if self._zoom_handler is not None else None
+        else:
+            dims = self._live_reference_dims
+        if dims is None:
+            return None
+        length = self._polyline_length_px(self._calibration_line, dims)
+        return length if length > 0 else None
 
     @property
     def active_type(self) -> str | None:
@@ -213,7 +308,10 @@ class MeasurementOverlay(Overlay):
         resolved = self._resolve_measurement(kind, points)
         if resolved is None:
             return False
-        self.measurements.append(Measurement(kind, resolved))
+        if kind == CALIBRATION_KIND:
+            self._calibration_line = resolved
+        else:
+            self.measurements.append(Measurement(kind, resolved))
         return True
 
     def update_preview(self, pos: QPoint, widget_rect: QRect) -> bool:
@@ -235,6 +333,19 @@ class MeasurementOverlay(Overlay):
         """
         if self._draft_points is not None and self._draft_type == "Arbitrary Line" and len(self._draft_points) >= 2:
             self.measurements.append(Measurement(self._draft_type, tuple(self._draft_points)))
+        self._draft_type = None
+        self._draft_points = None
+        self._draft_preview = None
+
+    def discard_draft(self) -> None:
+        """
+        Drop the in-progress draft outright, never finalizing it —
+        unlike cancel_placement's Arbitrary Line special case. Used when
+        switching between live view and a loaded image: a draft belongs
+        to whichever source it was started against, so it shouldn't
+        silently turn into a finished measurement attributed to the
+        source being switched away from.
+        """
         self._draft_type = None
         self._draft_points = None
         self._draft_preview = None
@@ -282,6 +393,10 @@ class MeasurementOverlay(Overlay):
             return (x, y0), (x, y1)
         if kind == "Arbitrary Line":
             return tuple(points) if len(points) >= 2 else None
+        if kind == CALIBRATION_KIND:
+            if len(points) < 2 or points[0] == points[1]:
+                return None
+            return points[0], points[1]
         if kind in ("Radius Circle", "Diameter"):
             if len(points) < 2 or points[0] == points[1]:
                 return None
@@ -446,6 +561,13 @@ class MeasurementOverlay(Overlay):
             self._draw_measurement(painter, rect, measurement.kind, measurement.points, stroke_scale, full_dims)
             for point in measurement.points:
                 self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
+            self._draw_measurement_label(painter, rect, measurement.kind, measurement.points, stroke_scale, full_dims)
+
+        if self._calibration_line is not None:
+            self._draw_polyline(painter, rect, self._calibration_line, stroke_scale, dashed=False)
+            for point in self._calibration_line:
+                self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
+            self._draw_label(painter, rect, self._midpoint(self._calibration_line), "Calibration", stroke_scale)
 
         self._draw_draft(painter, rect, stroke_scale, scale_x, scale_y, full_dims)
 
@@ -464,6 +586,136 @@ class MeasurementOverlay(Overlay):
             self._draw_polyline(painter, rect, points, stroke_scale, dashed=dashed)
         elif kind in _CIRCLE_KINDS and full_dims is not None:
             self._draw_circle(painter, rect, kind, points, stroke_scale, full_dims, dashed=dashed)
+
+    def _draw_measurement_label(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        stroke_scale: float,
+        full_dims: tuple[int, int] | None,
+    ) -> None:
+        """
+        Draw the real-world length/diameter next to a finalized
+        measurement — the whole point of DPI. Silently does nothing
+        until both a reference frame size and a DPI are available, so a
+        shape placed before DPI is set just shows up unlabeled rather
+        than blocking placement (see ``drawing_enabled``).
+
+        For live view, *full_dims* (the zoom handler's current frame —
+        the preview stream, sized for panning/zooming) is not what DPI
+        was calibrated against, so ``_live_reference_dims`` (the still
+        capture resolution) is used instead when available. A loaded
+        image's *full_dims* is already its own true resolution, so it's
+        used as-is.
+        """
+        dims = full_dims if self._loaded_active else (self._live_reference_dims or full_dims)
+        if dims is None or self.dpi is None:
+            return
+        text_and_anchor = self._measurement_label(kind, points, dims)
+        if text_and_anchor is None:
+            return
+        text, anchor = text_and_anchor
+        self._draw_label(painter, rect, anchor, text, stroke_scale)
+
+    def _measurement_label(
+        self,
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        full_dims: tuple[int, int],
+    ) -> tuple[str, tuple[float, float]] | None:
+        if kind == CALIBRATION_KIND:
+            return None
+
+        if kind in _LINE_KINDS:
+            length_px = self._polyline_length_px(points, full_dims)
+            if length_px <= 0:
+                return None
+            return format_length(length_px, self.dpi, self._unit), self._midpoint(points)
+
+        if kind in _CIRCLE_KINDS:
+            geometry = self._circle_geometry(kind, points, full_dims)
+            if geometry is None:
+                return None
+            center, radius_px = geometry
+            return f"\u00d8 {format_length(radius_px * 2, self.dpi, self._unit)}", center
+
+        return None
+
+    @staticmethod
+    def _polyline_length_px(points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]) -> float:
+        full_w, full_h = full_dims
+        total = 0.0
+        for i in range(len(points) - 1):
+            dx = (points[i + 1][0] - points[i][0]) * full_w
+            dy = (points[i + 1][1] - points[i][1]) * full_h
+            total += math.hypot(dx, dy)
+        return total
+
+    @staticmethod
+    def _midpoint(points: tuple[tuple[float, float], ...]) -> tuple[float, float]:
+        """
+        Anchor for a polyline's label. A straight 2-point line has one
+        segment and anchors at its midpoint as before. A multi-segment
+        "Arbitrary Line" instead anchors at whichever segment is
+        middlemost — its own midpoint if there's a single middle segment
+        (an odd segment count), or the joint shared by the two middle
+        segments if there's an even count — so the label tracks whichever
+        interior point actually governs that segment when it's dragged,
+        rather than staying fixed to the two endpoints regardless of what
+        moved in between.
+        """
+        segment_count = len(points) - 1
+        if segment_count <= 1:
+            first, last = points[0], points[-1]
+            return (first[0] + last[0]) / 2, (first[1] + last[1]) / 2
+        if segment_count % 2 == 0:
+            return points[segment_count // 2]
+        a, b = points[segment_count // 2], points[segment_count // 2 + 1]
+        return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+
+    def _draw_label(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        anchor: tuple[float, float],
+        text: str,
+        stroke_scale: float,
+    ) -> None:
+        """
+        White rounded-rect background with a thin black outline, dark
+        text on top — reads clearly regardless of what's under it, unlike
+        the outlined-stroke technique used for lines and endpoints (a
+        thin outline around small text gets muddy at typical font sizes).
+        Sized and offset in the same fixed-on-screen-size terms as the
+        rest of the overlay, divided by *stroke_scale* so it doesn't
+        grow with zoom.
+        """
+        point = self._to_point(rect, anchor)
+
+        font = QFont(painter.font())
+        font.setPixelSize(max(1, round(OVERLAY_LABEL_FONT_SIZE / stroke_scale)))
+        metrics = QFontMetricsF(font)
+        pad_x = OVERLAY_LABEL_PADDING_X / stroke_scale
+        pad_y = OVERLAY_LABEL_PADDING_Y / stroke_scale
+        box_w = metrics.horizontalAdvance(text) + pad_x * 2
+        box_h = metrics.height() + pad_y * 2
+
+        box = QRectF(
+            point.x() - box_w / 2,
+            point.y() - OVERLAY_LABEL_OFFSET / stroke_scale - box_h,
+            box_w,
+            box_h,
+        )
+
+        painter.setFont(font)
+        painter.setPen(QPen(OVERLAY_OUTLINE_COLOR, OVERLAY_OUTLINE_WIDTH / stroke_scale))
+        painter.setBrush(QBrush(OVERLAY_LINE_COLOR))
+        painter.drawRoundedRect(box, OVERLAY_LABEL_CORNER_RADIUS / stroke_scale, OVERLAY_LABEL_CORNER_RADIUS / stroke_scale)
+
+        painter.setPen(QPen(OVERLAY_OUTLINE_COLOR))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_draft(
         self,
@@ -489,6 +741,10 @@ class MeasurementOverlay(Overlay):
                 self._draw_polyline(painter, rect, points, stroke_scale, dashed=False)
             if preview is not None:
                 self._draw_polyline(painter, rect, (points[-1], preview), stroke_scale, dashed=True)
+
+            label_points = (*points, preview) if preview is not None else tuple(points)
+            if len(label_points) >= 2:
+                self._draw_measurement_label(painter, rect, kind, label_points, stroke_scale, full_dims)
         else:
             preview_points = (*points, preview) if preview is not None else tuple(points)
             display_points = preview_points
@@ -510,6 +766,12 @@ class MeasurementOverlay(Overlay):
                     # guide between what's placed so far is still useful
                     # feedback (e.g. two of three "3 Point Circle" clicks).
                     self._draw_polyline(painter, rect, preview_points, stroke_scale, dashed=True)
+
+            if kind == CALIBRATION_KIND:
+                if len(display_points) >= 2:
+                    self._draw_label(painter, rect, self._midpoint(tuple(display_points)), "Calibration", stroke_scale)
+            elif len(display_points) >= 2:
+                self._draw_measurement_label(painter, rect, kind, tuple(display_points), stroke_scale, full_dims)
 
             points = list(display_points)
 
@@ -653,3 +915,76 @@ class MeasurementOverlay(Overlay):
     def _to_point(rect: QRect, fraction: tuple[float, float]) -> QPointF:
         fx, fy = fraction
         return QPointF(rect.x() + fx * rect.width(), rect.y() + fy * rect.height())
+
+
+class MeasurementOverlayController:
+    """
+    Measurement/DPI/calibration control surface — exposed to the rest of
+    the app as ``CameraPreview.overlays.measurement``.
+
+    Kept apart from OverlayController's much broader, unrelated surface
+    (crosshair, grid, focus, channel filters, ...) so measurement- and
+    calibration-specific control logic lives next to the overlay it
+    actually drives, rather than scattered through camera_preview.py.
+    Every mutator repaints via *repaint* afterward the same way
+    OverlayController's own setters do — CameraPreview passes its video
+    label's ``update`` method in.
+    """
+
+    def __init__(self, overlay: MeasurementOverlay, repaint: Callable[[], None]) -> None:
+        self._overlay = overlay
+        self._repaint = repaint
+
+    @property
+    def type(self) -> str | None:
+        return self._overlay.active_type
+
+    @type.setter
+    def type(self, kind: str | None) -> None:
+        """Set which measurement kind new clicks on the preview should place, or None to disable placement."""
+        self._overlay.set_active_type(kind)
+        self._repaint()
+
+    @property
+    def dpi(self) -> float | None:
+        """DPI for whichever source (live feed or loaded image) the overlay is currently showing."""
+        return self._overlay.dpi
+
+    def set_live_dpi(self, dpi: float | None) -> None:
+        self._overlay.set_live_dpi(dpi)
+        self._repaint()
+
+    def set_live_reference_dims(self, dims: tuple[int, int] | None) -> None:
+        self._overlay.set_live_reference_dims(dims)
+        self._repaint()
+
+    def set_loaded_dpi(self, dpi: float | None) -> None:
+        self._overlay.set_loaded_dpi(dpi)
+        self._repaint()
+
+    def set_unit(self, unit: MeasurementUnit) -> None:
+        self._overlay.set_unit(unit)
+        self._repaint()
+
+    def discard_draft(self) -> None:
+        self._overlay.discard_draft()
+        self._repaint()
+
+    def start_calibration_placement(self) -> None:
+        self._overlay.start_calibration_placement()
+        self._repaint()
+
+    def cancel_calibration_placement(self) -> None:
+        self._overlay.cancel_calibration_placement()
+        self._repaint()
+
+    def clear_calibration_line(self) -> None:
+        self._overlay.clear_calibration_line()
+        self._repaint()
+
+    @property
+    def has_calibration_line(self) -> bool:
+        return self._overlay.has_calibration_line
+
+    def calibration_line_length_px(self) -> float | None:
+        return self._overlay.calibration_line_length_px()

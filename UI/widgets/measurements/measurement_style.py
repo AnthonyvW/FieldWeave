@@ -57,3 +57,12 @@ OVERLAY_DASH_GAP = 10
 # dragging — deliberately larger than OVERLAY_ENDPOINT_RADIUS so the
 # circle is easy to grab without needing pixel-perfect precision.
 OVERLAY_ENDPOINT_HIT_RADIUS = 10
+
+# Length/diameter label drawn next to a finalized measurement. Same
+# fixed-on-screen-size treatment as the rest of this block — see
+# MeasurementOverlay._draw_label.
+OVERLAY_LABEL_FONT_SIZE = 13
+OVERLAY_LABEL_OFFSET = 8
+OVERLAY_LABEL_PADDING_X = 6
+OVERLAY_LABEL_PADDING_Y = 3
+OVERLAY_LABEL_CORNER_RADIUS = 4
