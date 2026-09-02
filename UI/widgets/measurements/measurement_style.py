@@ -44,6 +44,14 @@ OVERLAY_OUTLINE_COLOR = QColor("#000000")
 OVERLAY_OUTLINE_WIDTH = 1
 OVERLAY_ENDPOINT_RADIUS = 4
 
+# Base on-screen radius for a placed "Point" measurement's own marker
+# (distinct from OVERLAY_ENDPOINT_RADIUS, which is for the draggable
+# anchor handles shown on any hovered/dragged measurement) — scaled by
+# a measurement's own line_thickness override the same way OVERLAY_LINE_WIDTH
+# is for a line's stroke, since a dot has no length for "thickness" to
+# describe but does have a size. See MeasurementOverlay._draw_point_marker.
+OVERLAY_POINT_RADIUS = 6
+
 # On/off lengths for the in-progress preview line's dashes, in the same
 # screen-pixel-target terms as the sizes above. MeasurementOverlay derives
 # each stroke's actual dash pattern from these divided by that stroke's
@@ -66,3 +74,14 @@ OVERLAY_LABEL_OFFSET = 8
 OVERLAY_LABEL_PADDING_X = 6
 OVERLAY_LABEL_PADDING_Y = 3
 OVERLAY_LABEL_CORNER_RADIUS = 4
+
+# Delete glyph drawn inside a tag's own label box while that tag is
+# hovered — screen-pixel targets, same counter-scaling treatment as the
+# rest of this block. OVERLAY_TAG_HOVER_COLOR outlines the whole tag
+# while hovered, as a hint that clicking it (anywhere but the glyph)
+# opens the customize menu rather than doing nothing.
+OVERLAY_DELETE_SIZE = 9
+OVERLAY_DELETE_MARGIN = 9
+OVERLAY_DELETE_BG_COLOR = QColor("#d64545")
+OVERLAY_DELETE_GLYPH_COLOR = QColor("#ffffff")
+OVERLAY_TAG_HOVER_COLOR = QColor("#1a73e8")

@@ -475,6 +475,50 @@ def apply_style(app: QApplication) -> None:
             padding: 2px 4px;
             border: 1px solid rgb(180, 180, 180);
             border-radius: 0px;
+            background-color: #ffffff;
+        }}
+
+        /* Measurement tag/customize-menu title and description fields —
+           same bordered-field look as the rest of the app, just with
+           slightly rounded corners to match the floating popup they sit
+           in rather than a docked panel. */
+        QLineEdit#MeasurementCustomizeTitle {{
+            border-radius: 4px;
+        }}
+        QPlainTextEdit#MeasurementCustomizeDescription {{
+            border-radius: 4px;
+        }}
+
+        /* Plain text edits (measurement descriptions, etc.) — same
+           bordered-field look as QLineEdit, since Qt gives it no
+           border of its own by default. */
+        QPlainTextEdit {{
+            font-size: 13px;
+            padding: 2px 4px;
+            border: 1px solid rgb(180, 180, 180);
+            border-radius: 0px;
+            background-color: #ffffff;
+        }}
+
+        /* Measurement tab — customize-menu popup opened from a tag on
+           the preview itself. Needs an explicit background: unlike a
+           docked panel it floats directly over live video, so without
+           one it reads as fully transparent. */
+        QFrame#MeasurementCustomizeMenu {{
+            background: rgb(245, 246, 248);
+            border: 1px solid rgba(0, 0, 0, 0.25);
+            border-radius: 4px;
+        }}
+
+        /* Field labels within that popup — Qt stylesheets have no
+           text-transform, so the actual uppercasing happens in Python
+           (see _field_label); this just gives the already-uppercased
+           text a distinct, smaller, section-heading weight instead of
+           reading as regular body text. */
+        QLabel#MeasurementFieldLabel {{
+            font-weight: 600;
+            font-size: 11px;
+            color: rgb(90, 90, 90);
         }}
 
         /* Area scan — start automation button */

@@ -13,6 +13,7 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.capture_control_widget import CaptureControlWidget
 from UI.widgets.measurements_widget import MeasurementsWidget
+from UI.widgets.measurements.measurement_meta import MeasurementMeta
 from UI.widgets.measurements.units import MeasurementUnit
 
 from common.app_context import get_app_context, open_settings
@@ -25,6 +26,7 @@ class MeasurementTab(CameraWithSidebarPage):
 
         self._measurements.selection_changed.connect(self._on_measurement_selected)
         self._measurements.unit_changed.connect(self._on_unit_changed)
+        self._measurements.default_meta_changed.connect(self._on_default_meta_changed)
         self._on_unit_changed(self._measurements.current_unit())
 
         self._measurements.dpi_value_submitted.connect(self._capture_control.submit_dpi_value)
@@ -105,3 +107,8 @@ class MeasurementTab(CameraWithSidebarPage):
         preview = get_app_context().camera_preview
         if preview is not None:
             preview.overlays.measurement.set_unit(unit)
+
+    def _on_default_meta_changed(self, meta: MeasurementMeta) -> None:
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement.set_default_meta(meta)

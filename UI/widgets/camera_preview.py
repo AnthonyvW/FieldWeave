@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Slot, QRect, QPoint, QRectF, QEvent, QTimer
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent, QMouseEvent, QPainterPath
+from PySide6.QtCore import Qt, Slot, Signal, QRect, QPoint, QRectF, QEvent, QTimer
+from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QWheelEvent, QMouseEvent, QKeyEvent, QEnterEvent, QPainterPath
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QComboBox, QFrame, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QPushButton, QTextEdit, QVBoxLayout, QWidget, QSizePolicy,
+    QAbstractSpinBox, QApplication, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QTextEdit, QVBoxLayout,
+    QWidget, QSizePolicy,
 )
 
 from common.app_context import get_app_context
@@ -19,6 +20,7 @@ from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOve
 from UI.widgets.preview_overlay.grid import GridButton, GridOverlay
 from UI.widgets.preview_overlay.large_image_source import LargeImageSource
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
+from UI.widgets.preview_overlay.measurement_interaction import MeasurementInteraction
 from UI.widgets.preview_overlay.measurement_overlay import MeasurementOverlay, MeasurementOverlayController
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.red_mark_detection_overlay import RedMarkDetectionOverlay
@@ -113,6 +115,7 @@ class OverlayLabel(QLabel):
         self._zoom_handler: ZoomPreviewOverlay | None = None
         self._loaded_image_overlay: LoadedImageOverlay | None = None
         self._measurement_handler: MeasurementOverlay | None = None
+        self._measurement_interaction: MeasurementInteraction | None = None
         self._measurement_active: bool = False
         self._measurement_press_pos: QPoint | None = None
         self._measurement_dragging: bool = False
@@ -120,6 +123,13 @@ class OverlayLabel(QLabel):
         self._zoom_press_pos: QPoint | None = None
         self._zoom_dragging: bool = False
         self._content_dims: tuple[int, int] | None = None
+
+        # Grabbed on hover (see enterEvent) rather than left at the
+        # default NoFocus, so the Delete key reaches keyPressEvent while
+        # the cursor sits over a measurement tag without requiring a
+        # click first — matches the hover-to-reveal-X affordance itself
+        # needing no click either.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_content_dims(self, dims: tuple[int, int] | None) -> None:
         """
@@ -215,6 +225,10 @@ class OverlayLabel(QLabel):
         """Register the overlay that receives measurement placement click events."""
         self._measurement_handler = handler
 
+    def set_measurement_interaction(self, interaction: MeasurementInteraction | None) -> None:
+        """Register the controller for this overlay's own tag hover/click/delete UI and its customize-menu popup — see MeasurementInteraction. Event handlers below just forward to it."""
+        self._measurement_interaction = interaction
+
     def set_measurement_mode_active(self, active: bool) -> None:
         """
         Whether the measurement tab is the one currently showing this
@@ -235,6 +249,8 @@ class OverlayLabel(QLabel):
         if self._measurement_handler is not None:
             self._measurement_handler.cancel_placement()
             self._measurement_handler.end_endpoint_drag()
+        if self._measurement_interaction is not None:
+            self._measurement_interaction.set_active(active)
 
     @property
     def _click_to_move_allowed(self) -> bool:
@@ -245,6 +261,24 @@ class OverlayLabel(QLabel):
     def _update_cursor(self) -> None:
         active = self._click_handler is not None and self._click_to_move_allowed
         self.setCursor(Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor)
+
+    def enterEvent(self, event: QEnterEvent) -> None:
+        super().enterEvent(event)
+        if self._measurement_interaction is not None and self._measurement_interaction.wants_focus_on_hover():
+            # Grabbed so Delete reaches keyPressEvent purely from
+            # hovering a tag, with no click needed first.
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        super().leaveEvent(event)
+        if self._measurement_interaction is not None:
+            self._measurement_interaction.handle_leave()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self._measurement_interaction is not None and self._measurement_interaction.handle_key_press(event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _overlay_active(self, overlay: Overlay) -> bool:
         """
@@ -278,6 +312,10 @@ class OverlayLabel(QLabel):
                 return display_rect
         return self._image_rect(pixmap)
 
+    def display_rect(self) -> QRect:
+        """Public wrapper around _display_rect for external callers (see MeasurementInteraction) that just want the current rect against the current pixmap, without needing to know that parameter exists."""
+        return self._display_rect(self.pixmap())
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if (
             self._measurement_active
@@ -287,6 +325,10 @@ class OverlayLabel(QLabel):
         ):
             self._measurement_handler.cancel_placement()
             self.update()
+            event.accept()
+            return
+
+        if self._measurement_interaction is not None and self._measurement_interaction.handle_mouse_press(event):
             event.accept()
             return
 
@@ -362,6 +404,9 @@ class OverlayLabel(QLabel):
         return has_pixmap or self._content_dims is not None
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._measurement_press_pos is None and self._measurement_interaction is not None:
+            self._measurement_interaction.handle_mouse_move(event)
+
         if self._measurement_handler is not None and self._measurement_handler.dragging_endpoint:
             self._measurement_handler.update_endpoint_drag(event.position().toPoint(), self.rect())
             self.update()
@@ -524,6 +569,9 @@ class OverlayLabel(QLabel):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self._paint_overlays(painter, display_rect)
         painter.end()
+
+        if self._measurement_interaction is not None:
+            self._measurement_interaction.handle_paint_finished()
 
     def _paint_overlays(self, painter: QPainter, display_rect: QRect) -> None:
         """
@@ -920,12 +968,15 @@ class CameraPreview(QFrame):
         self._zoom_reset_button.raise_()
         self._zoom_reset_button.reset_zoom.connect(self._on_zoom_reset)
 
+        self._measurement_interaction = MeasurementInteraction(self._measurement_overlay, self._video_label, self)
+
         self._overlays = OverlayController(self)
 
         self._video_label.set_click_handler(self._click_to_move_overlay)
         self._video_label.set_zoom_handler(self._zoom_preview_overlay)
         self._video_label.set_loaded_image_overlay(self._loaded_image_overlay)
         self._video_label.set_measurement_handler(self._measurement_overlay)
+        self._video_label.set_measurement_interaction(self._measurement_interaction)
 
         self._focus_overlay._relay.result_ready.connect(self._video_label.update)
         self._inspect_calibration_overlay._relay.result_ready.connect(self._video_label.update)

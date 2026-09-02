@@ -3,13 +3,17 @@ from __future__ import annotations
 from enum import Enum
 
 _MM_PER_INCH = 25.4
+_MM_PER_M = 1000.0
+_MM_PER_FT = 304.8
 
 
 class MeasurementUnit(Enum):
     UM = "\u00b5m"
     MM = "mm"
     CM = "cm"
+    M = "m"
     IN = "in"
+    FT = "ft"
 
 
 def pixels_to_unit(pixels: float, dpi: float, unit: MeasurementUnit) -> float:
@@ -19,8 +23,12 @@ def pixels_to_unit(pixels: float, dpi: float, unit: MeasurementUnit) -> float:
         return mm * 1000
     if unit is MeasurementUnit.CM:
         return mm / 10
+    if unit is MeasurementUnit.M:
+        return mm / _MM_PER_M
     if unit is MeasurementUnit.IN:
         return mm / _MM_PER_INCH
+    if unit is MeasurementUnit.FT:
+        return mm / _MM_PER_FT
     return mm
 
 
@@ -34,8 +42,12 @@ def unit_to_mm(value: float, unit: MeasurementUnit) -> float:
         return value / 1000
     if unit is MeasurementUnit.CM:
         return value * 10
+    if unit is MeasurementUnit.M:
+        return value * _MM_PER_M
     if unit is MeasurementUnit.IN:
         return value * _MM_PER_INCH
+    if unit is MeasurementUnit.FT:
+        return value * _MM_PER_FT
     return value
 
 

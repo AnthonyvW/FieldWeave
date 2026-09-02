@@ -4,6 +4,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFrame,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -25,10 +27,19 @@ from UI.widgets.measurements.circles import (
 from UI.widgets.measurements.lines import (
     ArbitraryLineMeasurement,
     HorizontalLineMeasurement,
+    MEASUREMENT_LINE_CAPS,
     VerticalLineMeasurement,
+)
+from UI.widgets.measurements.measurement_meta import MeasurementMeta
+from UI.widgets.measurements.measurement_style import (
+    OVERLAY_LINE_COLOR, OVERLAY_LINE_WIDTH, OVERLAY_OUTLINE_COLOR, OVERLAY_OUTLINE_WIDTH,
 )
 from UI.widgets.measurements.points import PointMeasurement
 from UI.widgets.measurements.units import MeasurementUnit
+from UI.widgets.preview_overlay.measurement_customize_menu import (
+    _ColorPicker, _StylePicker, _ThicknessControl, _dash_style_icon, _field_label, _line_cap_icon,
+)
+from UI.widgets.preview_overlay.measurement_overlay import MEASUREMENT_DASH_PATTERNS
 
 GRID_COLUMNS = 4
 
@@ -86,6 +97,14 @@ class MeasurementsWidget(QWidget):
     Placement doesn't require DPI (a shape can always be placed), but
     its length label on the preview only appears once one is set — see
     MeasurementOverlay._draw_measurement_label.
+
+    Below the tile grid, "Customize Measurements" holds defaults (title
+    prefix, unit, and the same appearance fields MeasurementCustomizeMenu
+    offers) applied to measurements as they're placed — see
+    _build_customize_panel. Editing an already-placed measurement is
+    separate: its tag on the preview opens MeasurementCustomizeMenu
+    directly (camera_preview.py), rather than going through this widget
+    at all.
     """
 
     selection_changed = Signal(object)  # str | None
@@ -94,6 +113,7 @@ class MeasurementsWidget(QWidget):
     manual_calibration_started = Signal()
     calibration_dpi_submitted = Signal(float, object)  # value, MeasurementUnit
     calibration_cancelled = Signal()
+    default_meta_changed = Signal(object)  # MeasurementMeta, applied to newly placed measurements
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -144,6 +164,140 @@ class MeasurementsWidget(QWidget):
             grid.addWidget(button, row, column)
 
         outer_layout.addWidget(group)
+
+        self._customize_panel = self._build_customize_panel()
+        outer_layout.addWidget(self._customize_panel)
+
+    def _build_customize_panel(self) -> QGroupBox:
+        """
+        Defaults applied to every new measurement as it's placed —
+        every field MeasurementCustomizeMenu offers for an already-
+        placed measurement, applied here as a shared starting point
+        instead. An unset title stays unset (see
+        MeasurementOverlay._resolve_meta), a set one becomes a numbered
+        prefix ("Wingspan 1", "Wingspan 2", ...); everything else
+        applies as-is. A description isn't offered here since it's
+        inherently per-measurement — standardizing one across every
+        placement of a kind doesn't make sense the way a shared title,
+        unit, or appearance choice does. Takes effect as the fields are
+        edited, with no separate apply step, since there's nothing to
+        preview here — it only ever affects measurements placed after
+        the fact. Editing a measurement already placed (including
+        giving it its own description) is a separate, per-instance
+        action — see MeasurementCustomizeMenu, opened by clicking its
+        tag on the preview.
+        """
+        panel = QGroupBox("Customize Measurements")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(4, 12, 4, 4)
+        layout.setSpacing(6)
+
+        layout.addWidget(QLabel("Default Title:"))
+        self._default_title_edit = QLineEdit()
+        self._default_title_edit.setPlaceholderText("e.g. Wingspan")
+        self._default_title_edit.textChanged.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_title_edit)
+
+        default_unit_row = QHBoxLayout()
+        default_unit_row.addWidget(QLabel("Unit:"))
+        self._default_unit_combo = QComboBox()
+        for unit in MeasurementUnit:
+            self._default_unit_combo.addItem(unit.value, unit)
+        self._default_unit_combo.setCurrentIndex(self._default_unit_combo.findData(MeasurementUnit.MM))
+        self._default_unit_combo.currentIndexChanged.connect(self._on_default_meta_edited)
+        default_unit_row.addWidget(self._default_unit_combo, 1)
+        layout.addLayout(default_unit_row)
+
+        self._default_always_show_description_check = QCheckBox("Always show description")
+        self._default_always_show_description_check.toggled.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_always_show_description_check)
+
+        self._default_tag_bg_picker = _ColorPicker("Tag Background Color", OVERLAY_LINE_COLOR.name())
+        self._default_tag_bg_picker.color_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_tag_bg_picker)
+
+        self._default_tag_text_picker = _ColorPicker("Tag Text Color", OVERLAY_OUTLINE_COLOR.name())
+        self._default_tag_text_picker.color_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_tag_text_picker)
+
+        self._default_line_color_picker = _ColorPicker("Line Color", OVERLAY_LINE_COLOR.name())
+        self._default_line_color_picker.color_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_line_color_picker)
+
+        layout.addWidget(_field_label("Line Thickness"))
+        self._default_line_thickness_control = _ThicknessControl(0.5, 12.0)
+        self._default_line_thickness_control.set_value(OVERLAY_LINE_WIDTH)
+        self._default_line_thickness_control.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_line_thickness_control)
+
+        self._default_line_style_picker = _StylePicker(
+            "Line Style", [(style, _dash_style_icon(style)) for style in MEASUREMENT_DASH_PATTERNS]
+        )
+        self._default_line_style_picker.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_line_style_picker)
+
+        # Caps only ever apply to line-kind measurements (see
+        # MeasurementOverlay.LINE_KINDS) but, unlike MeasurementCustomizeMenu,
+        # there's no single placed measurement's kind to hide these
+        # against here — this panel is a shared template for every tile,
+        # line or not, so a circle/point placement simply never reads
+        # its own line_start_cap/line_end_cap.
+        self._default_start_cap_picker = _StylePicker(
+            "Start", [(cap, _line_cap_icon(cap)) for cap in MEASUREMENT_LINE_CAPS]
+        )
+        self._default_start_cap_picker.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_start_cap_picker)
+
+        self._default_end_cap_picker = _StylePicker(
+            "End", [(cap, _line_cap_icon(cap)) for cap in MEASUREMENT_LINE_CAPS]
+        )
+        self._default_end_cap_picker.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_end_cap_picker)
+
+        self._default_outline_enabled_check = QCheckBox("Enable Outline")
+        self._default_outline_enabled_check.setChecked(True)
+        self._default_outline_enabled_check.toggled.connect(self._on_default_outline_enabled_toggled)
+        layout.addWidget(self._default_outline_enabled_check)
+
+        self._default_outline_color_picker = _ColorPicker("Outline Color", OVERLAY_OUTLINE_COLOR.name())
+        self._default_outline_color_picker.color_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_outline_color_picker)
+
+        self._default_outline_thickness_label = _field_label("Outline Thickness")
+        layout.addWidget(self._default_outline_thickness_label)
+        self._default_outline_thickness_control = _ThicknessControl(0.0, 8.0)
+        self._default_outline_thickness_control.set_value(OVERLAY_OUTLINE_WIDTH)
+        self._default_outline_thickness_control.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_outline_thickness_control)
+
+        return panel
+
+    def _set_default_outline_controls_visible(self, visible: bool) -> None:
+        self._default_outline_color_picker.setVisible(visible)
+        self._default_outline_thickness_label.setVisible(visible)
+        self._default_outline_thickness_control.setVisible(visible)
+
+    def _on_default_outline_enabled_toggled(self, _enabled: bool) -> None:
+        self._set_default_outline_controls_visible(self._default_outline_enabled_check.isChecked())
+        self._on_default_meta_edited()
+
+    def _on_default_meta_edited(self, *_args: object) -> None:
+        meta = MeasurementMeta(
+            title=self._default_title_edit.text().strip(),
+            unit=self._default_unit_combo.currentData(),
+            always_show_description=self._default_always_show_description_check.isChecked(),
+            tag_background_color=self._default_tag_bg_picker.color(),
+            tag_text_color=self._default_tag_text_picker.color(),
+            line_color=self._default_line_color_picker.color(),
+            line_thickness=self._default_line_thickness_control.value(),
+            line_dash_style=self._default_line_style_picker.value(),
+            line_start_cap=self._default_start_cap_picker.value(),
+            line_end_cap=self._default_end_cap_picker.value(),
+            outline_enabled=self._default_outline_enabled_check.isChecked(),
+            outline_color=self._default_outline_color_picker.color(),
+            outline_thickness=self._default_outline_thickness_control.value(),
+        )
+        self.default_meta_changed.emit(meta)
 
     def _build_calibration_panel(self) -> QGroupBox:
         panel = QGroupBox("DPI Calibration")
