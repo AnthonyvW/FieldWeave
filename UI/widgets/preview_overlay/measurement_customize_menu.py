@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
     QPushButton, QSlider, QVBoxLayout, QWidget,
 )
 
-from UI.widgets.measurements.lines import LINE_KINDS, MEASUREMENT_LINE_CAPS
+from UI.widgets.measurements.lines import MEASUREMENT_LINE_CAPS
+from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
 from UI.widgets.measurements.measurement_meta import MeasurementMeta
 from UI.widgets.measurements.measurement_style import (
     OVERLAY_LINE_COLOR, OVERLAY_LINE_WIDTH, OVERLAY_OUTLINE_COLOR, OVERLAY_OUTLINE_WIDTH,
@@ -416,7 +417,7 @@ class MeasurementCustomizeMenu(QFrame):
 
         # Caps are a line-only decoration (MeasurementOverlay never
         # passes start_cap/end_cap when drawing a circle) — open_for
-        # hides this pair for any kind outside LINE_KINDS.
+        # hides this pair for any kind whose category isn't "line".
         self._start_cap_picker = _StylePicker(
             "Start", [(cap, _line_cap_icon(cap)) for cap in MEASUREMENT_LINE_CAPS]
         )
@@ -461,8 +462,9 @@ class MeasurementCustomizeMenu(QFrame):
         of where within it the opening click landed.
 
         *kind* decides whether the start/end cap pickers show at all —
-        caps only ever apply to line-kind measurements (see LINE_KINDS)
-        — not just whether they're editable.
+        caps only ever apply to line-category measurements (see
+        MeasurementKind.category in measurement_kind.py) — not just
+        whether they're editable.
         """
         self._index = index
         self._original_meta = meta
@@ -476,7 +478,8 @@ class MeasurementCustomizeMenu(QFrame):
         self._line_color_picker.set_color(meta.line_color)
         self._line_thickness_control.set_value(meta.line_thickness or OVERLAY_LINE_WIDTH)
         self._line_style_picker.set_value(meta.line_dash_style)
-        show_caps = kind in LINE_KINDS
+        entry = DEFAULT_REGISTRY.get(kind)
+        show_caps = entry is not None and entry.category == "line"
         self._start_cap_picker.set_value(meta.line_start_cap)
         self._start_cap_picker.setVisible(show_caps)
         self._end_cap_picker.set_value(meta.line_end_cap)

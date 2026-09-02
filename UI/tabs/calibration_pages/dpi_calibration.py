@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -23,7 +24,9 @@ from PySide6.QtWidgets import (
 from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
+from UI.widgets.measurements.units import MeasurementUnit, dpi_from_measurement
 from UI.widgets.navigation_widget import NavigationWidget
+from UI.widgets.preview_overlay.interaction_mode import CALIBRATION_LINE_MODE, PreviewModeSpec, ModeToken
 from common.app_context import get_app_context, open_settings
 from common.logger import error, info
 from motion.models import Position
@@ -218,8 +221,8 @@ class DpiCalibrationStepsWidget(QWidget):
         self._routine = None
         self._last_result = None
         self._on_title_changed = on_title_changed
-        self._crosshair_state_before: bool | None = None
-        self._inspect_calibration_state_before: bool | None = None
+        self._mode_token: ModeToken | None = None
+        self._calibration_mode_token: ModeToken | None = None
         self._build_ui()
         self._update_step_display()
 
@@ -380,6 +383,8 @@ class DpiCalibrationStepsWidget(QWidget):
         dpi_row.addStretch()
         layout.addLayout(dpi_row)
 
+        layout.addWidget(self._build_manual_calibration_row())
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
@@ -405,44 +410,26 @@ class DpiCalibrationStepsWidget(QWidget):
     # Overlay helpers
     # ------------------------------------------------------------------
 
-    def _get_overlays(self):
-        ctx = get_app_context()
-        preview = ctx.camera_preview
-        return preview.overlays if preview is not None else None
-
-    def _save_overlay_state(self) -> None:
-        overlays = self._get_overlays()
-        if overlays is not None:
-            self._crosshair_state_before = overlays.crosshair
-            self._inspect_calibration_state_before = overlays.inspect_calibration
-        else:
-            self._crosshair_state_before = None
-            self._inspect_calibration_state_before = None
-
     def _restore_overlay_state(self) -> None:
-        overlays = self._get_overlays()
-        if overlays is None:
-            return
-        if self._crosshair_state_before is not None:
-            overlays.crosshair = self._crosshair_state_before
-            self._crosshair_state_before = None
-        if self._inspect_calibration_state_before is not None:
-            overlays.inspect_calibration = self._inspect_calibration_state_before
-            self._inspect_calibration_state_before = None
+        """Pop this wizard's mode, restoring whatever was active before it — safe to call more than once."""
+        if self._mode_token is not None:
+            self._mode_token.pop()
+            self._mode_token = None
 
     def _apply_overlays_for_step(self, step: int) -> None:
-        overlays = self._get_overlays()
-        if overlays is None:
-            return
         if step == 1:
-            overlays.crosshair = True
-            overlays.inspect_calibration = False
+            visible = frozenset({"crosshair"})
         elif step == 2 or step == 3:
-            overlays.crosshair = False
-            overlays.inspect_calibration = True
+            visible = frozenset({"inspect_calibration"})
         else:
-            overlays.crosshair = False
-            overlays.inspect_calibration = False
+            visible = frozenset()
+
+        self._restore_overlay_state()
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            self._mode_token = preview.modes.push(
+                PreviewModeSpec(name=f"dpi-calibration-step-{step}", visible_overlays=visible)
+            )
 
     # ------------------------------------------------------------------
     # Step 3 — tick calibration slots
@@ -466,6 +453,8 @@ class DpiCalibrationStepsWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _update_step_display(self) -> None:
+        if self._current_step != 4:
+            self._cancel_calibration_line_if_active()
         step_title, step_body = _STEPS[self._current_step]
         self._step_title.setText(step_title)
         self._step_body.setText(step_body)
@@ -518,7 +507,6 @@ class DpiCalibrationStepsWidget(QWidget):
 
     def reset(self) -> None:
         self._restore_overlay_state()
-        self._save_overlay_state()
         self._current_step = 0
         self._capture_complete = False
         self._output_folder = None
@@ -705,12 +693,102 @@ class DpiCalibrationStepsWidget(QWidget):
         self._dpi_spin.blockSignals(False)
 
     def _on_finish_clicked(self) -> None:
+        self._cancel_calibration_line_if_active()
         mv = get_app_context().machine_vision
         mv.settings.dpi = self._dpi_spin.value()
         mv.save_settings()
         info(f"[DpiCalibration] DPI saved as {mv.settings.dpi:.2f}")
         self._restore_overlay_state()
         self.finished.emit()
+
+    # ------------------------------------------------------------------
+    # Manual calibration — an alternative to the automated routine above:
+    # place a reference line of known length directly on the preview and
+    # derive DPI from its pixel length, the same way MeasurementTab's own
+    # "Calibrate DPI" panel does (see CaptureControlWidget). Applying it
+    # just fills in _dpi_spin, so it's saved through the normal Finish
+    # Calibration path rather than writing settings.dpi a second way.
+    # ------------------------------------------------------------------
+
+    def _build_manual_calibration_row(self) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._calibration_line_btn = QPushButton("Place Calibration Line")
+        self._calibration_line_btn.setObjectName("CalSecondaryButton")
+        self._calibration_line_btn.setCheckable(True)
+        self._calibration_line_btn.toggled.connect(self._on_calibration_line_toggled)
+        layout.addWidget(self._calibration_line_btn)
+
+        self._calibration_value_spin = QDoubleSpinBox()
+        self._calibration_value_spin.setRange(0.001, 100_000.0)
+        self._calibration_value_spin.setDecimals(3)
+        self._calibration_value_spin.setValue(1.0)
+        self._calibration_value_spin.setFixedWidth(80)
+        layout.addWidget(self._calibration_value_spin)
+
+        self._calibration_unit_combo = QComboBox()
+        for unit in MeasurementUnit:
+            self._calibration_unit_combo.addItem(unit.value, unit)
+        self._calibration_unit_combo.setCurrentIndex(self._calibration_unit_combo.findData(MeasurementUnit.MM))
+        layout.addWidget(self._calibration_unit_combo)
+
+        self._calibration_apply_btn = QPushButton("Apply")
+        self._calibration_apply_btn.setObjectName("CalSecondaryButton")
+        self._calibration_apply_btn.clicked.connect(self._on_calibration_apply_clicked)
+        layout.addWidget(self._calibration_apply_btn)
+
+        layout.addStretch()
+        return widget
+
+    def _cancel_calibration_line_if_active(self) -> None:
+        """Tear down an in-progress manual-calibration placement — called whenever the wizard leaves step 4 (Next/Previous/Finish) so the calibration-line mode token never outlives this step."""
+        if self._calibration_line_btn.isChecked():
+            self._calibration_line_btn.setChecked(False)
+
+    def _on_calibration_line_toggled(self, checked: bool) -> None:
+        ctx = get_app_context()
+        preview = ctx.camera_preview
+        if preview is None:
+            return
+        if checked:
+            # DPI is calibrated against the still-capture resolution, not
+            # the (lower-resolution) live preview stream — MeasurementTab
+            # keeps this refreshed while it's visible (CaptureControlWidget),
+            # but this wizard may be the first place DPI is ever set in a
+            # session, so refresh it here too.
+            camera = ctx.camera
+            if camera is not None and camera.underlying_camera.is_open:
+                _, width, height = camera.settings.get_current_still_resolution()
+                preview.overlays.measurement.set_live_reference_dims((width, height))
+            self._calibration_mode_token = preview.modes.push(CALIBRATION_LINE_MODE)
+            preview.overlays.measurement.start_calibration_placement()
+            self._set_status("Click two points on the preview to place a reference line.")
+        else:
+            preview.overlays.measurement.cancel_calibration_placement()
+            if self._calibration_mode_token is not None:
+                self._calibration_mode_token.pop()
+                self._calibration_mode_token = None
+            self._set_status("")
+
+    def _on_calibration_apply_clicked(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is None:
+            return
+        pixel_length = preview.overlays.measurement.calibration_line_length_px()
+        if pixel_length is None:
+            self._set_status("Place the calibration line first.")
+            return
+        unit = self._calibration_unit_combo.currentData()
+        dpi = dpi_from_measurement(pixel_length, self._calibration_value_spin.value(), unit)
+        if dpi is None:
+            self._set_status("Enter a positive measurement.")
+            return
+        self._dpi_spin.setValue(dpi)
+        self._calibration_line_btn.setChecked(False)
+        self._set_status(f"Calibration line applied — DPI set to {dpi:.2f}.")
 
     # ------------------------------------------------------------------
     # Step 5 — quality control slots

@@ -18,6 +18,7 @@ from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.navigation_widget import NavigationWidget
+from UI.widgets.preview_overlay.interaction_mode import PreviewModeSpec, ModeToken
 from common.app_context import get_app_context, open_settings
 from common.logger import info
 from motion.models import Position
@@ -156,7 +157,7 @@ class SlotCalibrationStepsWidget(QWidget):
         self._on_title_changed = on_title_changed
         self._routine = None
         self._latest_activity: str = ""
-        self._original_red_mark: bool | None = None
+        self._mode_token: ModeToken | None = None
         self._pending_start_height_nm: int | None = None
         self._pending_start_offset_nm: int | None = None
         self._pending_slot_positions: dict[int, int] = {}
@@ -595,13 +596,25 @@ class SlotCalibrationStepsWidget(QWidget):
         self._set_status("")
 
     def _set_red_mark_overlay(self, enabled: bool) -> None:
+        if self._mode_token is not None:
+            self._mode_token.pop()
+            self._mode_token = None
         ctx = get_app_context()
-        if ctx is None:
-            return
-        preview = getattr(ctx, "camera_preview", None)
+        preview = getattr(ctx, "camera_preview", None) if ctx is not None else None
         if preview is None:
             return
-        preview.overlays.red_mark = enabled
+        self._mode_token = preview.modes.push(
+            PreviewModeSpec(
+                name="slot-calibration",
+                visible_overlays=frozenset({"red_mark"}) if enabled else frozenset(),
+            )
+        )
+
+    def _restore_red_mark_overlay(self) -> None:
+        """Pop this wizard's mode, restoring whatever was active before it — safe to call more than once."""
+        if self._mode_token is not None:
+            self._mode_token.pop()
+            self._mode_token = None
 
     def _next_step(self) -> None:
         if self._current_step < self._total_steps - 1:
@@ -616,15 +629,11 @@ class SlotCalibrationStepsWidget(QWidget):
             self._update_step_display()
 
     def _on_cancel(self) -> None:
-        if self._original_red_mark is not None:
-            self._set_red_mark_overlay(self._original_red_mark)
-            self._original_red_mark = None
+        self._restore_red_mark_overlay()
         self.cancelled.emit()
 
     def reset(self) -> None:
-        ctx = get_app_context()
-        preview = getattr(ctx, "camera_preview", None) if ctx is not None else None
-        self._original_red_mark = preview.overlays.red_mark if preview is not None else None
+        self._restore_red_mark_overlay()
         self._current_step = 0
         self._pending_start_height_nm = None
         self._pending_start_offset_nm = None
@@ -856,9 +865,7 @@ class SlotCalibrationStepsWidget(QWidget):
                     tca.slots[idx].offset_nm = off_nm
             get_app_context().motion.save_settings()
             info("[SlotCalibration] Settings saved on finish.")
-        if self._original_red_mark is not None:
-            self._set_red_mark_overlay(self._original_red_mark)
-            self._original_red_mark = None
+        self._restore_red_mark_overlay()
         self.finished.emit()
 
     # ------------------------------------------------------------------

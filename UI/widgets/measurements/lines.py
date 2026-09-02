@@ -6,10 +6,11 @@ from PySide6.QtGui import QPainter, QPainterPath
 from UI.widgets.measurements.base_measurement import MeasurementButton
 from UI.widgets.measurements.measurement_style import ENDPOINT_RADIUS, LINE_COLOR, LINE_MARGIN
 
-# A calibration line is placed the same way as an Arbitrary Line but has
-# no tile of its own (see MeasurementOverlay.begin_calibration_placement)
-# — its name lives here rather than in measurement_overlay.py so it can
-# sit alongside the other line kinds in LINE_KINDS below.
+# A calibration line is placed the same way as a 2-point line but has no
+# tile of its own (see MeasurementOverlay.start_calibration_placement)
+# and no registered MeasurementButton — its name lives here, next to the
+# tile classes below, rather than in measurement_kind.py, which
+# registers it as a MeasurementKind alongside the real kinds.
 CALIBRATION_KIND = "Calibration Line"
 
 # Matches the choices in MeasurementCustomizeMenu's start/end cap
@@ -89,16 +90,3 @@ class VerticalLineMeasurement(MeasurementButton):
         painter.drawLine(start, end)
         self._draw_point(painter, start, ENDPOINT_RADIUS, active)
         self._draw_point(painter, end, ENDPOINT_RADIUS, active)
-
-
-# Every measurement kind MeasurementOverlay draws as a capped,
-# possibly-dashed polyline — the three tile classes above plus
-# CALIBRATION_KIND, which places the same way but has no tile of its
-# own. Defined down here, after those classes, so it can read their
-# names directly instead of repeating the strings.
-LINE_KINDS = (
-    ArbitraryLineMeasurement.name,
-    HorizontalLineMeasurement.name,
-    VerticalLineMeasurement.name,
-    CALIBRATION_KIND,
-)

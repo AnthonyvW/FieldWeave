@@ -18,6 +18,7 @@ from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.navigation_widget import NavigationWidget
+from UI.widgets.preview_overlay.interaction_mode import PreviewModeSpec, ModeToken
 from common.app_context import get_app_context, open_settings
 from common.logger import error, info
 
@@ -164,7 +165,7 @@ class CameraSpaceStepsWidget(QWidget):
         self._total_steps: int = len(_STEPS)
         self._capture_complete: bool = False
         self._on_title_changed = on_title_changed
-        self._crosshair_state_before: bool | None = None
+        self._mode_token: ModeToken | None = None
         self._build_ui()
         self._update_step_display()
 
@@ -277,22 +278,23 @@ class CameraSpaceStepsWidget(QWidget):
         return widget
 
     def _set_crosshair(self, enabled: bool) -> None:
-        ctx = get_app_context()
-        preview = ctx.camera_preview
+        if self._mode_token is not None:
+            self._mode_token.pop()
+            self._mode_token = None
+        preview = get_app_context().camera_preview
         if preview is not None:
-            preview.overlays.crosshair = enabled
-
-    def _save_crosshair_state(self) -> None:
-        ctx = get_app_context()
-        preview = ctx.camera_preview
-        self._crosshair_state_before: bool | None = (
-            preview.overlays.crosshair if preview is not None else None
-        )
+            self._mode_token = preview.modes.push(
+                PreviewModeSpec(
+                    name="camera-space-calibration",
+                    visible_overlays=frozenset({"crosshair"}) if enabled else frozenset(),
+                )
+            )
 
     def _restore_crosshair_state(self) -> None:
-        if self._crosshair_state_before is not None:
-            self._set_crosshair(self._crosshair_state_before)
-            self._crosshair_state_before = None
+        """Pop this wizard's mode, restoring whatever was active before it — safe to call more than once."""
+        if self._mode_token is not None:
+            self._mode_token.pop()
+            self._mode_token = None
 
     def _update_step_display(self) -> None:
         step_title, step_body = _STEPS[self._current_step]
@@ -365,7 +367,6 @@ class CameraSpaceStepsWidget(QWidget):
 
     def reset(self) -> None:
         self._restore_crosshair_state()
-        self._save_crosshair_state()
         self._current_step = 0
         self._capture_complete = False
         self._update_step_display()

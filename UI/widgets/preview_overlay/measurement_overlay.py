@@ -17,7 +17,15 @@ from PySide6.QtGui import (
     QTransform,
 )
 
-from UI.widgets.measurements.lines import CALIBRATION_KIND, LINE_KINDS, arrow_dims, arrow_head_path, open_arrow_barbs_path
+from UI.widgets.measurements.lines import CALIBRATION_KIND, arrow_dims, arrow_head_path, open_arrow_barbs_path
+from UI.widgets.measurements.measurement_io import (
+    DeserializeResult,
+    deserialize_measurements,
+    load_measurements_from_file,
+    save_measurements_to_file,
+    serialize_measurements,
+)
+from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
 from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.measurement_style import (
     OVERLAY_DASH_GAP,
@@ -43,23 +51,8 @@ from UI.widgets.measurements.measurement_style import (
 from UI.widgets.measurements.units import MeasurementUnit, format_length
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
-from UI.widgets.preview_overlay.zoom_preview import ZoomPreviewOverlay
+from UI.widgets.preview_overlay.coordinate_space import CoordinateSpace
 
-# How many points each kind needs before it auto-finalizes on a click.
-# "Arbitrary Line" is intentionally absent — it keeps accumulating points
-# until cancelled (see MeasurementOverlay.place_point/cancel_placement).
-_REQUIRED_POINTS = {
-    "Point": 1,
-    "Horizontal Line": 2,
-    "Vertical Line": 2,
-    "Radius Circle": 2,
-    "Diameter": 2,
-    "3 Point Circle": 3,
-    CALIBRATION_KIND: 2,
-}
-
-PLACEABLE_KINDS = (*_REQUIRED_POINTS, "Arbitrary Line")
-_CIRCLE_KINDS = ("Radius Circle", "Diameter", "3 Point Circle")
 
 # Raw screen-pixel dash/gap values at a fixed small reference width —
 # used only to render the customize menu's style-picker icons (see
@@ -106,37 +99,10 @@ def resolve_dash_pattern(dash_style: str, line_width: float) -> list[float] | No
     return [value * reference for value in multipliers]
 
 
-# Points closer together than this (in frame fractions) are treated as a
-# single point rather than a real second click.
-_DEGENERATE_EPSILON = 1e-12
-
-
 class Measurement(NamedTuple):
     kind: str
     points: tuple[tuple[float, float], ...]
     meta: MeasurementMeta = DEFAULT_META
-
-
-def _collinear(p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float]) -> bool:
-    cross = (p2[0] - p1[0]) * (p3[1] - p1[1]) - (p2[1] - p1[1]) * (p3[0] - p1[0])
-    return abs(cross) < _DEGENERATE_EPSILON
-
-
-def _circumcircle(
-    p1: tuple[float, float],
-    p2: tuple[float, float],
-    p3: tuple[float, float],
-) -> tuple[tuple[float, float], float] | None:
-    """Center and radius of the circle through three points, or None if they're collinear (no unique circle)."""
-    ax, ay = p1
-    bx, by = p2
-    cx, cy = p3
-    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if abs(d) < _DEGENERATE_EPSILON:
-        return None
-    ux = ((ax**2 + ay**2) * (by - cy) + (bx**2 + by**2) * (cy - ay) + (cx**2 + cy**2) * (ay - by)) / d
-    uy = ((ax**2 + ay**2) * (cx - bx) + (bx**2 + by**2) * (ax - cx) + (cx**2 + cy**2) * (bx - ax)) / d
-    return (ux, uy), math.hypot(ax - ux, ay - uy)
 
 
 class MeasurementOverlay(Overlay):
@@ -161,11 +127,12 @@ class MeasurementOverlay(Overlay):
     way ``ZoomPreviewOverlay`` keeps separate pan/zoom state per source.
 
     Placement is click, then click again, for however many points the
-    active kind needs (see ``_REQUIRED_POINTS``) — a single click for
-    "Point", two for a line or 2-point circle, three for "3 Point
-    Circle". ``place_point`` handles every click; it starts a new draft
-    on the first, finalizes it once enough points have arrived, and
-    (for "Point") finalizes immediately since it only ever needs one.
+    active kind needs (see ``MeasurementKind.required_points`` in
+    measurement_kind.py) — a single click for "Point", two for a line or
+    2-point circle, three for "3 Point Circle". ``place_point`` handles
+    every click; it starts a new draft on the first, finalizes it once
+    enough points have arrived, and finalizes immediately for any kind
+    that only ever needs one (e.g. "Point").
     "Arbitrary Line" is the exception: it has no fixed point count and
     keeps growing into a multi-segment polyline until ``cancel_placement``
     (a right-click) ends it — dropped entirely if fewer than two points
@@ -183,7 +150,7 @@ class MeasurementOverlay(Overlay):
 
     def __init__(self) -> None:
         super().__init__()
-        self._zoom_handler: ZoomPreviewOverlay | None = None
+        self._zoom_handler: CoordinateSpace | None = None
         self._loaded_image_overlay: LoadedImageOverlay | None = None
 
         self._live_measurements: list[Measurement] = []
@@ -243,8 +210,8 @@ class MeasurementOverlay(Overlay):
         # placed points don't otherwise clutter the view.
         self._near_index: int | None = None
 
-    def set_zoom_handler(self, handler: ZoomPreviewOverlay | None) -> None:
-        """Register the overlay used to convert clicks into frame-fraction coordinates."""
+    def set_zoom_handler(self, handler: CoordinateSpace | None) -> None:
+        """Register the coordinate space used to convert clicks into frame-fraction coordinates — see CoordinateSpace for the contract; ZoomPreviewOverlay is the live preview's implementation."""
         self._zoom_handler = handler
 
     def set_loaded_image_overlay(self, overlay: LoadedImageOverlay | None) -> None:
@@ -351,7 +318,7 @@ class MeasurementOverlay(Overlay):
 
     @property
     def drawing_enabled(self) -> bool:
-        return self._active_type in PLACEABLE_KINDS
+        return self._active_type in DEFAULT_REGISTRY
 
     @property
     def in_progress(self) -> bool:
@@ -373,8 +340,12 @@ class MeasurementOverlay(Overlay):
         if self._draft_points is None:
             if not self.drawing_enabled:
                 return False
-            if self._active_type == "Point":
-                self.measurements.append(Measurement(self._active_type, (point,), self._resolve_meta(self._active_type)))
+            entry = DEFAULT_REGISTRY.get(self._active_type)
+            if entry is not None and entry.required_points == 1:
+                resolved = entry.resolve([point])
+                if resolved is None:
+                    return False
+                self.measurements.append(Measurement(self._active_type, resolved, self._resolve_meta(self._active_type)))
                 return True
             self._draft_type = self._active_type
             self._draft_points = [point]
@@ -384,7 +355,8 @@ class MeasurementOverlay(Overlay):
         self._draft_points.append(point)
         self._draft_preview = None
 
-        required = _REQUIRED_POINTS.get(self._draft_type)
+        entry = DEFAULT_REGISTRY.get(self._draft_type)
+        required = entry.required_points if entry is not None else None
         if required is None or len(self._draft_points) < required:
             # "Arbitrary Line": no fixed count, keeps accumulating points.
             return True
@@ -578,14 +550,17 @@ class MeasurementOverlay(Overlay):
         cursor = QPointF(pos)
         full_dims = self._zoom_handler.current_frame_dims()
         for index, measurement in enumerate(self.measurements):
+            entry = DEFAULT_REGISTRY.get(measurement.kind)
+            if entry is None:
+                continue
             screen_points = [self._screen_point(self._to_point(rect, p), rect, widget_rect) for p in measurement.points]
             if any(self._distance(cursor, sp) <= OVERLAY_ENDPOINT_HIT_RADIUS for sp in screen_points):
                 return index
-            if measurement.kind in LINE_KINDS:
+            if entry.category == "line":
                 for a, b in zip(screen_points, screen_points[1:]):
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
-            elif measurement.kind in _CIRCLE_KINDS and full_dims is not None:
+            elif entry.category == "circle" and full_dims is not None:
                 edge_points = self._circle_edge_screen_points(
                     measurement.kind, measurement.points, rect, widget_rect, full_dims
                 )
@@ -661,47 +636,15 @@ class MeasurementOverlay(Overlay):
     ) -> tuple[tuple[float, float], ...] | None:
         """
         Turn the raw clicked points into the tuple actually stored, per
-        *kind*, or None if they don't describe a valid measurement (e.g.
-        two clicks landed on the same spot, or three on a straight line).
-        A horizontal/vertical line holds its first click's row/column
-        fixed and spans only to the second click, not the full
-        width/height. Circle kinds keep their raw points as clicked —
-        the actual center/radius is derived at draw time (see
-        ``_circle_geometry``) so a later endpoint drag recomputes it for
-        free.
+        *kind* — see ``MeasurementKind.resolve`` in measurement_kind.py —
+        or None if they don't describe a valid measurement (e.g. two
+        clicks landed on the same spot, or three on a straight line).
+        Circle kinds keep their raw points as clicked — the actual
+        center/radius is derived at draw time (see ``_circle_geometry``)
+        so a later endpoint drag recomputes it for free.
         """
-        if kind == "Point":
-            return (points[0],) if points else None
-        if kind == "Horizontal Line":
-            if len(points) < 2 or points[0] == points[1]:
-                return None
-            y = points[0][1]
-            x0, x1 = sorted((points[0][0], points[1][0]))
-            return (x0, y), (x1, y)
-        if kind == "Vertical Line":
-            if len(points) < 2 or points[0] == points[1]:
-                return None
-            x = points[0][0]
-            y0, y1 = sorted((points[0][1], points[1][1]))
-            return (x, y0), (x, y1)
-        if kind == "Arbitrary Line":
-            return tuple(points) if len(points) >= 2 else None
-        if kind == CALIBRATION_KIND:
-            if len(points) < 2 or points[0] == points[1]:
-                return None
-            return points[0], points[1]
-        if kind in ("Radius Circle", "Diameter"):
-            if len(points) < 2 or points[0] == points[1]:
-                return None
-            return points[0], points[1]
-        if kind == "3 Point Circle":
-            if len(points) < 3:
-                return None
-            p1, p2, p3 = points[0], points[1], points[2]
-            if p1 == p2 or p2 == p3 or p1 == p3 or _collinear(p1, p2, p3):
-                return None
-            return p1, p2, p3
-        return None
+        entry = DEFAULT_REGISTRY.get(kind)
+        return entry.resolve(points) if entry is not None else None
 
     # ------------------------------------------------------------------
     # Endpoint dragging — moving a point on an already-placed
@@ -757,10 +700,12 @@ class MeasurementOverlay(Overlay):
     def _move_point(self, m_index: int, p_index: int, new_point: tuple[float, float]) -> None:
         """
         Apply a dragged point's new position to the measurement at
-        *m_index*. Horizontal/vertical lines and a radius circle's
-        center get special handling so the shape stays the kind it is;
-        every other point (polyline points, circle-edge points, a lone
-        "Point") just moves freely.
+        *m_index* — see ``MeasurementKind.move_point`` in
+        measurement_kind.py for the kind-specific drag constraints
+        (horizontal/vertical lines staying axis-locked, a radius
+        circle's center translating the whole shape); every other point
+        (polyline points, circle-edge points, a lone "Point") just moves
+        freely by default.
         """
         measurements = self.measurements
         if m_index < 0 or m_index >= len(measurements):
@@ -770,27 +715,13 @@ class MeasurementOverlay(Overlay):
         if p_index < 0 or p_index >= len(points):
             return
 
-        if measurement.kind == "Horizontal Line" and len(points) == 2:
-            y = new_point[1]
-            other = points[1 - p_index]
-            x0, x1 = sorted((new_point[0], other[0]))
-            points = [(x0, y), (x1, y)]
-        elif measurement.kind == "Vertical Line" and len(points) == 2:
-            x = new_point[0]
-            other = points[1 - p_index]
-            y0, y1 = sorted((new_point[1], other[1]))
-            points = [(x, y0), (x, y1)]
-        elif measurement.kind == "Radius Circle" and p_index == 0:
-            # Dragging the center translates the whole circle rather
-            # than just the center point, so the radius doesn't change
-            # out from under the (undragged) edge point.
-            dx = new_point[0] - points[0][0]
-            dy = new_point[1] - points[0][1]
-            points = [new_point, (points[1][0] + dx, points[1][1] + dy)]
+        entry = DEFAULT_REGISTRY.get(measurement.kind)
+        if entry is not None:
+            new_points = entry.move_point(points, p_index, new_point)
         else:
             points[p_index] = new_point
-
-        measurements[m_index] = measurement._replace(points=tuple(points))
+            new_points = points
+        measurements[m_index] = measurement._replace(points=tuple(new_points))
 
     # ------------------------------------------------------------------
     # Geometry
@@ -804,48 +735,44 @@ class MeasurementOverlay(Overlay):
     ) -> tuple[tuple[float, float], float] | None:
         """
         Return (center_fraction, radius_in_full_pixels) for a circle
-        kind, or None if *points* don't yet describe one. Converts to
-        true source-pixel coordinates first — points are stored as
-        independent x/y fractions of the frame, and the frame is rarely
-        square, so a radius computed directly in fraction space would be
-        wrong whenever width and height scale differently.
+        kind, or None if *points* don't yet describe one — see
+        ``MeasurementKind.circle_geometry`` in measurement_kind.py, which
+        converts to true source-pixel coordinates first since points are
+        stored as independent x/y fractions of the frame, and the frame
+        is rarely square, so a radius computed directly in fraction
+        space would be wrong whenever width and height scale differently.
         """
-        full_w, full_h = full_dims
-        if full_w <= 0 or full_h <= 0:
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None or entry.circle_geometry is None:
             return None
-
-        def to_px(p: tuple[float, float]) -> tuple[float, float]:
-            return p[0] * full_w, p[1] * full_h
-
-        if kind == "Radius Circle" and len(points) >= 2:
-            center_px = to_px(points[0])
-            edge_px = to_px(points[1])
-            radius = math.hypot(edge_px[0] - center_px[0], edge_px[1] - center_px[1])
-            return (points[0], radius) if radius > 0 else None
-
-        if kind == "Diameter" and len(points) >= 2:
-            a_px = to_px(points[0])
-            b_px = to_px(points[1])
-            radius = math.hypot(b_px[0] - a_px[0], b_px[1] - a_px[1]) / 2
-            if radius <= 0:
-                return None
-            center_px = ((a_px[0] + b_px[0]) / 2, (a_px[1] + b_px[1]) / 2)
-            return (center_px[0] / full_w, center_px[1] / full_h), radius
-
-        if kind == "3 Point Circle" and len(points) >= 3:
-            result = _circumcircle(to_px(points[0]), to_px(points[1]), to_px(points[2]))
-            if result is None:
-                return None
-            center_px, radius = result
-            return (center_px[0] / full_w, center_px[1] / full_h), radius
-
-        return None
+        return entry.circle_geometry(points, full_dims)
 
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
 
     def draw(self, painter: QPainter, rect: QRect) -> None:
+        self._draw_placed_measurements(painter, rect)
+
+        scale_x, scale_y = self._zoom_handler.current_scale_xy() if self._zoom_handler is not None else (1.0, 1.0)
+        stroke_scale = (scale_x + scale_y) / 2
+        full_dims = self._zoom_handler.current_frame_dims() if self._zoom_handler is not None else None
+
+        if self._calibration_line is not None:
+            self._draw_polyline(painter, rect, self._calibration_line, stroke_scale, dashed=False)
+            for point in self._calibration_line:
+                self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
+            self._draw_label(painter, rect, self._midpoint(self._calibration_line), "Calibration", scale_x, scale_y)
+
+        self._draw_draft(painter, rect, stroke_scale, scale_x, scale_y, full_dims)
+
+    def _draw_placed_measurements(self, painter: QPainter, rect: QRect) -> None:
+        """
+        The finalized measurements only — no in-progress draft, no
+        manual-calibration reference line (neither is a placed
+        measurement). Split out from draw() so an export renderer can
+        burn in exactly what's actually been measured, nothing ephemeral.
+        """
         scale_x, scale_y = self._zoom_handler.current_scale_xy() if self._zoom_handler is not None else (1.0, 1.0)
         stroke_scale = (scale_x + scale_y) / 2
         full_dims = self._zoom_handler.current_frame_dims() if self._zoom_handler is not None else None
@@ -876,13 +803,22 @@ class MeasurementOverlay(Overlay):
                     self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
 
-        if self._calibration_line is not None:
-            self._draw_polyline(painter, rect, self._calibration_line, stroke_scale, dashed=False)
-            for point in self._calibration_line:
-                self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
-            self._draw_label(painter, rect, self._midpoint(self._calibration_line), "Calibration", scale_x, scale_y)
-
-        self._draw_draft(painter, rect, stroke_scale, scale_x, scale_y, full_dims)
+    def draw_placed_measurements_with_coordinate_space(
+        self, painter: QPainter, rect: QRect, coords: CoordinateSpace
+    ) -> None:
+        """
+        Draw only the finalized measurements against *coords* instead of
+        whatever coordinate space is normally registered (see
+        set_zoom_handler) — used for exporting a full-resolution image,
+        where there's no live pan/zoom viewport at all, just a 1:1
+        IdentityCoordinateSpace sized to the export target.
+        """
+        previous = self._zoom_handler
+        self._zoom_handler = coords
+        try:
+            self._draw_placed_measurements(painter, rect)
+        finally:
+            self._zoom_handler = previous
 
     def _draw_measurement(
         self,
@@ -904,19 +840,22 @@ class MeasurementOverlay(Overlay):
         start_cap: str = "curved",
         end_cap: str = "curved",
     ) -> None:
-        if kind in LINE_KINDS:
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None:
+            return
+        if entry.category == "line":
             self._draw_polyline(
                 painter, rect, points, stroke_scale, dashed=dashed,
                 line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
                 dash_style=dash_style, start_cap=start_cap, end_cap=end_cap,
             )
-        elif kind in _CIRCLE_KINDS and full_dims is not None:
+        elif entry.category == "circle" and full_dims is not None:
             self._draw_circle(
                 painter, rect, kind, points, stroke_scale, full_dims,
                 dashed=dashed, line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
             )
-        elif kind == "Point" and points:
+        elif entry.category == "point" and points:
             self._draw_point_marker(
                 painter, rect, points[0], scale_x, scale_y,
                 line_color=line_color, line_width=line_width,
@@ -1071,17 +1010,18 @@ class MeasurementOverlay(Overlay):
         and a line/circle placed before DPI is set stays untagged until
         either a title or DPI arrives.
         """
-        if kind == CALIBRATION_KIND:
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None or not entry.has_label:
             return None
 
         unit = meta.unit if meta.unit is not None else self._unit
 
-        if kind in LINE_KINDS:
+        if entry.category == "line":
             suffix = self._length_suffix(points, full_dims, unit)
             text = self._compose_label_text(meta.title, suffix)
             return (text, self._midpoint(points)) if text else None
 
-        if kind in _CIRCLE_KINDS:
+        if entry.category == "circle":
             if full_dims is None:
                 return None
             geometry = self._circle_geometry(kind, points, full_dims)
@@ -1347,12 +1287,17 @@ class MeasurementOverlay(Overlay):
         kind = self._draft_type
         points = self._draft_points
         preview = self._draft_preview
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None:
+            return
 
-        if kind == "Arbitrary Line":
-            # Confirmed segments are drawn solid — they're placed, just
-            # not yet finalized into a stored Measurement — and only the
-            # pending segment to the cursor dashes, so it's clear which
-            # part of the shape is still being decided.
+        if entry.required_points is None:
+            # Unbounded kinds (e.g. "Arbitrary Line") keep accumulating
+            # points until cancelled. Confirmed segments are drawn solid
+            # — they're placed, just not yet finalized into a stored
+            # Measurement — and only the pending segment to the cursor
+            # dashes, so it's clear which part of the shape is still
+            # being decided.
             if len(points) >= 2:
                 self._draw_polyline(painter, rect, points, stroke_scale, dashed=False)
             if preview is not None:
@@ -1365,18 +1310,20 @@ class MeasurementOverlay(Overlay):
             preview_points = (*points, preview) if preview is not None else tuple(points)
             display_points = preview_points
 
-            if kind in ("Horizontal Line", "Vertical Line") and len(preview_points) >= 2:
-                # Draw the same row/column-constrained shape the click
-                # would actually finalize, not the raw (diagonal) two
-                # points — see _resolve_measurement.
-                resolved = self._resolve_measurement(kind, list(preview_points))
+            if len(preview_points) >= 2:
+                # Draw the same shape a click would actually finalize
+                # (e.g. a horizontal/vertical line's row/column lock)
+                # rather than the raw clicked points, whenever resolve()
+                # already accepts what's been placed so far — see
+                # _resolve_measurement.
+                resolved = entry.resolve(list(preview_points))
                 if resolved is not None:
                     display_points = resolved
 
             self._draw_measurement(painter, rect, kind, display_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True)
 
-            if kind in _CIRCLE_KINDS and len(preview_points) >= 2:
-                required = _REQUIRED_POINTS.get(kind, len(preview_points))
+            if entry.category == "circle" and len(preview_points) >= 2:
+                required = entry.required_points or len(preview_points)
                 if len(preview_points) < required:
                     # Not enough points for a circle yet — a straight
                     # guide between what's placed so far is still useful
@@ -1384,6 +1331,9 @@ class MeasurementOverlay(Overlay):
                     self._draw_polyline(painter, rect, preview_points, stroke_scale, dashed=True)
 
             if kind == CALIBRATION_KIND:
+                # Calibration's own fixed label, never the generic
+                # title/length tag (has_label=False) — genuinely unique
+                # to this pseudo-kind rather than a general capability.
                 if len(display_points) >= 2:
                     self._draw_label(painter, rect, self._midpoint(tuple(display_points)), "Calibration", scale_x, scale_y)
             elif len(display_points) >= 2:
@@ -1393,7 +1343,7 @@ class MeasurementOverlay(Overlay):
 
         for point in points:
             self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
-        if preview is not None and kind == "Arbitrary Line":
+        if preview is not None and entry.required_points is None:
             self._draw_endpoint(painter, self._to_point(rect, preview), scale_x, scale_y)
 
     def _draw_polyline(
@@ -1846,3 +1796,43 @@ class MeasurementOverlayController:
 
     def label_screen_rect(self, index: int, rect: QRect, widget_rect: QRect) -> QRectF | None:
         return self._overlay.label_screen_rect(index, rect, widget_rect)
+
+    # ------------------------------------------------------------------
+    # Import/export — see measurement_io.py for the actual document
+    # format and validation; this just wires it to the active source's
+    # own measurement list (live or loaded, same split as everywhere
+    # else — see MeasurementOverlay._loaded_active).
+    # ------------------------------------------------------------------
+
+    def export_measurements(self) -> dict:
+        """A plain, JSON-serializable document of the active source's placed measurements."""
+        return serialize_measurements(self._overlay.measurements)
+
+    def import_measurements(self, data: dict, *, replace: bool = True) -> DeserializeResult:
+        """
+        Load measurements from a document produced by ``export_measurements``
+        into the active source's own list. Invalid entries are skipped
+        and reported in the returned result's ``warnings`` rather than
+        raising — see ``measurement_io.deserialize_measurements``.
+        *replace* clears the active list first; pass False to append
+        instead.
+        """
+        result = deserialize_measurements(data, DEFAULT_REGISTRY)
+        measurements = self._overlay.measurements
+        if replace:
+            measurements.clear()
+        measurements.extend(Measurement(kind, points, meta) for kind, points, meta in result.entries)
+        self._repaint()
+        return result
+
+    def export_measurements_to_file(self, path: str) -> None:
+        save_measurements_to_file(path, self._overlay.measurements)
+
+    def import_measurements_from_file(self, path: str, *, replace: bool = True) -> DeserializeResult:
+        result = load_measurements_from_file(path, DEFAULT_REGISTRY)
+        measurements = self._overlay.measurements
+        if replace:
+            measurements.clear()
+        measurements.extend(Measurement(kind, points, meta) for kind, points, meta in result.entries)
+        self._repaint()
+        return result

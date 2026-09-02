@@ -114,6 +114,9 @@ class MeasurementsWidget(QWidget):
     calibration_dpi_submitted = Signal(float, object)  # value, MeasurementUnit
     calibration_cancelled = Signal()
     default_meta_changed = Signal(object)  # MeasurementMeta, applied to newly placed measurements
+    export_measurements_requested = Signal()
+    import_measurements_requested = Signal()
+    export_image_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -167,6 +170,21 @@ class MeasurementsWidget(QWidget):
 
         self._customize_panel = self._build_customize_panel()
         outer_layout.addWidget(self._customize_panel)
+
+        data_group = QGroupBox("Import / Export")
+        data_layout = QVBoxLayout(data_group)
+        export_row = QHBoxLayout()
+        export_button = QPushButton("Export...")
+        export_button.clicked.connect(self.export_measurements_requested)
+        import_button = QPushButton("Import...")
+        import_button.clicked.connect(self.import_measurements_requested)
+        export_row.addWidget(export_button)
+        export_row.addWidget(import_button)
+        data_layout.addLayout(export_row)
+        export_image_button = QPushButton("Export Image with Measurements...")
+        export_image_button.clicked.connect(self.export_image_requested)
+        data_layout.addWidget(export_image_button)
+        outer_layout.addWidget(data_group)
 
     def _build_customize_panel(self) -> QGroupBox:
         """
@@ -236,12 +254,12 @@ class MeasurementsWidget(QWidget):
         self._default_line_style_picker.value_changed.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_line_style_picker)
 
-        # Caps only ever apply to line-kind measurements (see
-        # MeasurementOverlay.LINE_KINDS) but, unlike MeasurementCustomizeMenu,
-        # there's no single placed measurement's kind to hide these
-        # against here — this panel is a shared template for every tile,
-        # line or not, so a circle/point placement simply never reads
-        # its own line_start_cap/line_end_cap.
+        # Caps only ever apply to line-category measurements (see
+        # MeasurementKind.category in measurement_kind.py) but, unlike
+        # MeasurementCustomizeMenu, there's no single placed measurement's
+        # kind to hide these against here — this panel is a shared
+        # template for every tile, line or not, so a circle/point
+        # placement simply never reads its own line_start_cap/line_end_cap.
         self._default_start_cap_picker = _StylePicker(
             "Start", [(cap, _line_cap_icon(cap)) for cap in MEASUREMENT_LINE_CAPS]
         )
