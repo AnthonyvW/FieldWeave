@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (
+    QFileDialog,
     QVBoxLayout,
     QWidget,
     QScrollArea,
@@ -23,6 +24,7 @@ from UI.widgets.measurements.measurement_meta import MeasurementMeta
 from UI.widgets.preview_overlay.interaction_mode import MEASUREMENT_MODE, ModeToken
 
 from common.app_context import get_app_context, open_settings
+from common.logger import warning
 
 
 class MeasurementTab(CameraWithSidebarPage):
@@ -39,6 +41,8 @@ class MeasurementTab(CameraWithSidebarPage):
         self._measurements.manual_calibration_started.connect(self._capture_control.request_manual_calibration)
         self._measurements.calibration_dpi_submitted.connect(self._capture_control.submit_calibration_dpi)
         self._measurements.calibration_cancelled.connect(self._capture_control.cancel_calibration)
+        self._measurements.export_measurements_requested.connect(self._on_export_measurements_clicked)
+        self._measurements.import_measurements_requested.connect(self._on_import_measurements_clicked)
 
         self._capture_control.dpi_changed.connect(self._measurements.set_dpi_display)
         self._capture_control.calibration_line_ready.connect(self._measurements.set_calibration_line_ready)
@@ -141,3 +145,48 @@ class MeasurementTab(CameraWithSidebarPage):
             # imported measurement has no unit override) in sync with
             # whatever the panel currently has selected.
             preview.overlays.measurement.set_unit(meta.unit)
+
+    # ------------------------------------------------------------------
+    # Import/export — see MeasurementOverlayController and measurement_io.py
+    # for the actual serialization/validation; this just supplies the
+    # file dialogs, toast feedback, and sensible defaults (reusing
+    # CaptureControlWidget's own output folder / loaded-image-name logic
+    # rather than starting blank).
+    # ------------------------------------------------------------------
+
+    def _on_export_measurements_clicked(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is None:
+            return
+        stem = self._capture_control.default_export_stem()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Measurements", str(self._capture_control.current_folder / f"{stem}.json"), "Measurement files (*.json)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        preview.overlays.measurement.export_measurements_to_file(path)
+        ctx = get_app_context()
+        if ctx.toast is not None:
+            ctx.toast.success(path, title="Measurements Exported")
+
+    def _on_import_measurements_clicked(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Measurements", str(self._capture_control.current_folder), "Measurement files (*.json)"
+        )
+        if not path:
+            return
+        result = preview.overlays.measurement.import_measurements_from_file(path)
+        for issue in result.warnings:
+            warning(f"[MeasurementImport] {issue}")
+        ctx = get_app_context()
+        if ctx.toast is None:
+            return
+        if result.warnings:
+            ctx.toast.warning(f"{len(result.entries)} loaded, {len(result.warnings)} skipped — see log", title="Import Completed With Issues")
+        else:
+            ctx.toast.success(f"{len(result.entries)} measurement(s) loaded", title="Measurements Imported")

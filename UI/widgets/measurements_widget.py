@@ -98,13 +98,17 @@ class MeasurementsWidget(QWidget):
     its length label on the preview only appears once one is set — see
     MeasurementOverlay._draw_measurement_label.
 
-    Below the tile grid, "Customize Measurements" holds defaults (title
-    prefix, unit, and the same appearance fields MeasurementCustomizeMenu
-    offers) applied to measurements as they're placed — see
-    _build_customize_panel. Editing an already-placed measurement is
-    separate: its tag on the preview opens MeasurementCustomizeMenu
-    directly (camera_preview.py), rather than going through this widget
-    at all.
+    Below the tile grid, "Export"/"Import" round-trip the active source's
+    placed measurements through a JSON file — see measurement_io.py for
+    the format and MeasurementTab for the file dialogs and defaults this
+    just requests via export_measurements_requested/
+    import_measurements_requested. Below that, "Customize Measurements"
+    holds defaults (title prefix, unit, and the same appearance fields
+    MeasurementCustomizeMenu offers) applied to measurements as they're
+    placed — see _build_customize_panel. Editing an already-placed
+    measurement is separate: its tag on the preview opens
+    MeasurementCustomizeMenu directly (camera_preview.py), rather than
+    going through this widget at all.
     """
 
     selection_changed = Signal(object)  # str | None
@@ -113,6 +117,8 @@ class MeasurementsWidget(QWidget):
     calibration_dpi_submitted = Signal(float, object)  # value, MeasurementUnit
     calibration_cancelled = Signal()
     default_meta_changed = Signal(object)  # MeasurementMeta, applied to newly placed measurements
+    export_measurements_requested = Signal()
+    import_measurements_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -153,6 +159,15 @@ class MeasurementsWidget(QWidget):
             grid.addWidget(button, row, column)
 
         outer_layout.addWidget(group)
+
+        data_row = QHBoxLayout()
+        self._export_measurements_button = QPushButton("Export")
+        self._export_measurements_button.clicked.connect(self.export_measurements_requested)
+        self._import_measurements_button = QPushButton("Import")
+        self._import_measurements_button.clicked.connect(self.import_measurements_requested)
+        data_row.addWidget(self._export_measurements_button)
+        data_row.addWidget(self._import_measurements_button)
+        outer_layout.addLayout(data_row)
 
         self._customize_panel = self._build_customize_panel()
         outer_layout.addWidget(self._customize_panel)

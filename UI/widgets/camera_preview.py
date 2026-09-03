@@ -881,36 +881,51 @@ class CameraPreview(QFrame):
             return None
         return self._burn_in_measurements(image)
 
-    def export_preview_measurement_image(self) -> QImage | None:
+    def _current_preview_frame_image(self) -> QImage | None:
         """
-        Preview-resolution sibling to export_measurement_image — the
-        base image is the loaded image's own resident thumbnail, or the
-        last live frame scaled to the video label's current displayed
-        size, with measurements burned in the same way. Deliberately
-        doesn't paint the label's own active overlays (the old "Take
-        Photo with UI" screenshot approach did) — that would also draw
-        ZoomPreviewOverlay's own crop/minimap chrome, which doesn't
-        belong in an exported image. Returns None if there's nothing to
-        export yet.
+        Preview-resolution base image — the loaded image's own resident
+        thumbnail if one is active, otherwise the last live frame scaled
+        to the video label's current displayed size — with no
+        measurements burned in. None if there's nothing to export yet.
+        Shared by export_preview_image and export_preview_measurement_image.
+
+        Deliberately doesn't paint the label's own active overlays (the
+        old "Take Photo with UI" screenshot approach did) — that would
+        also draw ZoomPreviewOverlay's own crop/minimap chrome, which
+        doesn't belong in an exported image.
         """
         if self._loaded_image_overlay.enabled:
             source = self._loaded_image_overlay.source
             if source is None or source.preview is None:
                 return None
             array = np.ascontiguousarray(source.preview)
-            image = QImage(
+            return QImage(
                 array.data, array.shape[1], array.shape[0], array.strides[0], QImage.Format.Format_RGB888
             ).copy()
-        else:
-            if self._last_full_image is None:
-                return None
-            lw = self._video_label.width()
-            lh = self._video_label.height()
-            if lw <= 0 or lh <= 0:
-                return None
-            image = self._last_full_image.scaled(
-                lw, lh, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
-            )
+        if self._last_full_image is None:
+            return None
+        lw = self._video_label.width()
+        lh = self._video_label.height()
+        if lw <= 0 or lh <= 0:
+            return None
+        return self._last_full_image.scaled(
+            lw, lh, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
+        )
+
+    def export_preview_image(self) -> QImage | None:
+        """The current preview-resolution base image with no measurements burned in — the preview-resolution sibling to export_plain_image. Returns None if there's nothing to export yet."""
+        return self._current_preview_frame_image()
+
+    def export_preview_measurement_image(self) -> QImage | None:
+        """
+        Preview-resolution sibling to export_measurement_image — same
+        base image as export_preview_image, with measurements burned in
+        the same way export_measurement_image does. Returns None if
+        there's nothing to export yet.
+        """
+        image = self._current_preview_frame_image()
+        if image is None:
+            return None
         return self._burn_in_measurements(image)
 
     def _burn_in_measurements(self, image: QImage) -> QImage:

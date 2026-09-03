@@ -451,48 +451,46 @@ class CaptureControlWidget(QWidget):
         format_layout.addWidget(self._open_folder_button)
         format_layout.addStretch()
 
+        # What "Take Photo" actually does — see _on_capture_clicked. Only
+        # "Full-res image (no measurements)" keeps doing a real camera
+        # sensor capture (Live mode only, unchanged from before); every
+        # other kind instead renders+saves whatever is currently
+        # displayed (works in Live or Loaded-Image mode) via
+        # _export_current_frame, the same operation the old standalone
+        # "Export..." button performed. AdjustToMinimumContentsLength
+        # keeps the combo's closed-state width from growing to fit its
+        # longest item's text, which otherwise stretched this group (and
+        # the sidebar) wider than intended.
+        capture_kind_layout = QHBoxLayout()
+        capture_kind_label = QLabel("Capture:")
+        capture_kind_label.setMinimumWidth(100)
+
+        self._export_kind_combo = QComboBox()
+        self._export_kind_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._export_kind_combo.setMinimumContentsLength(1)
+        self._export_kind_combo.addItem("Preview image (measurements baked in)", "preview")
+        self._export_kind_combo.addItem("Preview image (no measurements)", "preview_no_measurements")
+        self._export_kind_combo.addItem("Full-res image (measurements baked in)", "full_res")
+        self._export_kind_combo.addItem("Full-res image (no measurements)", "full_res_no_measurements")
+        self._export_kind_combo.addItem("Full-res image + measurements file", "full_res_sidecar")
+        self._export_kind_combo.currentIndexChanged.connect(self._refresh_capture_availability)
+
+        capture_kind_layout.addWidget(capture_kind_label)
+        capture_kind_layout.addWidget(self._export_kind_combo, 1)
+
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(6)
 
         self._capture_button = QPushButton("Take Photo")
         self._capture_button.setMinimumHeight(36)
-        self._capture_button.clicked.connect(self._take_photo)
+        self._capture_button.clicked.connect(self._on_capture_clicked)
         buttons_layout.addWidget(self._capture_button)
-
-        # "Export..." offers three clearly-labeled kinds of image export
-        # (see _on_export_clicked) — baked-in measurements only ever show
-        # up as pixels in the first two, only ever as a separate file in
-        # the third, so which is which is unambiguous by construction
-        # rather than needing a separate toggle to explain it. Replaces
-        # the old "Take Photo with UI" button, which just screenshotted
-        # the live display (including ZoomPreviewOverlay's own crop/
-        # minimap chrome) rather than rendering a clean export.
-        export_row = QHBoxLayout()
-        export_row.setSpacing(6)
-        self._export_kind_combo = QComboBox()
-        self._export_kind_combo.addItem("Preview image (measurements baked in)", "preview")
-        self._export_kind_combo.addItem("Full-res image (measurements baked in)", "full_res")
-        self._export_kind_combo.addItem("Full-res image + measurements file", "full_res_sidecar")
-        self._export_button = QPushButton("Export...")
-        self._export_button.clicked.connect(self._on_export_clicked)
-        export_row.addWidget(self._export_kind_combo, 1)
-        export_row.addWidget(self._export_button)
-
-        data_row = QHBoxLayout()
-        data_row.setSpacing(6)
-        self._export_measurements_button = QPushButton("Export Measurements...")
-        self._export_measurements_button.clicked.connect(self._on_export_measurements_clicked)
-        self._import_measurements_button = QPushButton("Import Measurements...")
-        self._import_measurements_button.clicked.connect(self._on_import_measurements_clicked)
-        data_row.addWidget(self._export_measurements_button)
-        data_row.addWidget(self._import_measurements_button)
 
         layout.addLayout(folder_layout)
         layout.addLayout(filename_layout)
         layout.addLayout(format_layout)
+        layout.addLayout(capture_kind_layout)
         layout.addLayout(buttons_layout)
-        layout.addLayout(export_row)
-        layout.addLayout(data_row)
         return group
 
     # ------------------------------------------------------------------
@@ -723,9 +721,8 @@ class CaptureControlWidget(QWidget):
             toast.info("Opening in file explorer...", title="Opening Folder", duration=10000)
 
     def _generate_filename(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         extension = self._format_combo.currentText()
-        return f"measurement_{timestamp}.{extension}"
+        return f"{self.default_export_stem()}.{extension}"
 
     def _get_filepath(self) -> Path:
         extension = self._format_combo.currentText()
@@ -752,7 +749,14 @@ class CaptureControlWidget(QWidget):
             self._format_combo.blockSignals(False)
 
         self._camera_available = available
-        self._capture_button.setEnabled(available and self._mode == CaptureMode.LIVE)
+
+        # Only the raw-sensor-capture kind needs an actual open camera in
+        # Live mode — every other kind renders+saves whatever is already
+        # displayed (see _on_capture_clicked) and works regardless.
+        if self._export_kind_combo.currentData() == "full_res_no_measurements":
+            self._capture_button.setEnabled(available and self._mode == CaptureMode.LIVE)
+        else:
+            self._capture_button.setEnabled(True)
 
     # ------------------------------------------------------------------
     # DPI
@@ -898,11 +902,39 @@ class CaptureControlWidget(QWidget):
             self.calibration_line_ready.emit(ready)
 
     # ------------------------------------------------------------------
-    # Capture actions
+    # Capture actions — "Take Photo" is now a single button whose actual
+    # behavior is chosen by _export_kind_combo (see _on_capture_clicked):
+    # a real camera sensor capture for "Full-res image (no measurements)"
+    # (the one kind that still needs one — Live mode only), or a
+    # render-and-save of whatever is currently displayed for every other
+    # kind (works in Live or Loaded-Image mode) — see CameraPreview's own
+    # export_plain_image/export_measurement_image/export_preview_image/
+    # export_preview_measurement_image for the actual rendering, and
+    # MeasurementOverlayController/measurement_io.py for the measurements
+    # JSON sidecar. Neither path prompts with a file dialog — both save
+    # straight to _get_filepath(), same as a raw capture always has.
     # ------------------------------------------------------------------
 
+    def default_export_stem(self) -> str:
+        """Default filename stem for an export — the loaded image's own name while one is active, else a fresh timestamped stem matching _generate_filename's own pattern. Public: also used by MeasurementTab's relocated Export/Import Measurements defaults."""
+        if self._mode == CaptureMode.LOADED_IMAGE and self._loaded_image_path is not None:
+            return self._loaded_image_path.stem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"measurement_{timestamp}"
+
+    @property
+    def current_folder(self) -> Path:
+        """Current output folder — read by MeasurementTab for its relocated Export/Import Measurements dialogs' default directory."""
+        return self._current_folder
+
     @Slot()
-    def _take_photo(self) -> None:
+    def _on_capture_clicked(self) -> None:
+        if self._export_kind_combo.currentData() == "full_res_no_measurements":
+            self._capture_raw_photo()
+        else:
+            self._export_current_frame(self._export_kind_combo.currentData())
+
+    def _capture_raw_photo(self) -> None:
         ctx = get_app_context()
         camera = ctx.camera
 
@@ -957,100 +989,41 @@ class CaptureControlWidget(QWidget):
             ctx.toast.error("Unable to capture image from camera", title="Capture Failed", dismiss_id=self._capture_toast_id)
         self._capture_toast_id = None
 
-    # ------------------------------------------------------------------
-    # Image / measurement export & import — see CameraPreview's own
-    # export_plain_image/export_measurement_image/
-    # export_preview_measurement_image for the actual rendering, and
-    # MeasurementOverlayController/measurement_io.py for measurement
-    # JSON serialization; this just supplies the file dialogs, defaults,
-    # and toast feedback. Moved here (from the Measurements widget) since
-    # this widget already owns the output folder/filename state a
-    # sensible default draws from — see _default_export_stem.
-    # ------------------------------------------------------------------
-
-    def _default_export_stem(self) -> str:
-        """Default filename stem for an export dialog — the loaded image's own name while one is active, else a fresh timestamped stem matching _generate_filename's own pattern."""
-        if self._mode == CaptureMode.LOADED_IMAGE and self._loaded_image_path is not None:
-            return self._loaded_image_path.stem
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"measurement_{timestamp}"
-
-    @Slot()
-    def _on_export_clicked(self) -> None:
+    def _export_current_frame(self, kind: str) -> None:
         ctx = get_app_context()
         preview = ctx.camera_preview
         if preview is None:
             return
 
-        kind = self._export_kind_combo.currentData()
         if kind == "preview":
             image = preview.export_preview_measurement_image()
-        else:
-            image = preview.export_measurement_image() if kind == "full_res" else preview.export_plain_image()
+        elif kind == "preview_no_measurements":
+            image = preview.export_preview_image()
+        elif kind == "full_res":
+            image = preview.export_measurement_image()
+        else:  # "full_res_sidecar"
+            image = preview.export_plain_image()
         if image is None:
             if ctx.toast:
-                ctx.toast.warning("Nothing to export yet", title="Export Image")
+                ctx.toast.warning("Nothing to capture yet", title="Capture Failed")
             return
 
-        stem = self._default_export_stem()
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Image", str(self._current_folder / f"{stem}.png"), "PNG image (*.png)"
-        )
-        if not path:
+        filepath = self._get_filepath()
+        if not self._ensure_output_folder():
             return
-        if not path.lower().endswith(".png"):
-            path += ".png"
 
-        if not image.save(path):
-            error(f"Failed to save exported image to: {path}")
+        if not image.save(str(filepath)):
+            error(f"Failed to save exported image to: {filepath}")
             if ctx.toast:
-                ctx.toast.error("Unable to save exported image", title="Export Failed")
+                ctx.toast.error("Unable to save exported image", title="Capture Failed")
             return
-        info(f"Exported image to: {path}")
+        info(f"Exported image to: {filepath}")
         if ctx.toast:
-            ctx.toast.success(path, title="Image Exported")
+            ctx.toast.success(f"Saved to: {filepath.name}", title="Image Captured")
+        self._filename_edit.clear()
 
         if kind == "full_res_sidecar":
-            sidecar = str(Path(path).with_suffix(".json"))
+            sidecar = str(filepath.with_suffix(".json"))
             preview.overlays.measurement.export_measurements_to_file(sidecar)
             if ctx.toast:
-                ctx.toast.success(sidecar, title="Measurements Exported")
-
-    @Slot()
-    def _on_export_measurements_clicked(self) -> None:
-        preview = get_app_context().camera_preview
-        if preview is None:
-            return
-        stem = self._default_export_stem()
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Measurements", str(self._current_folder / f"{stem}.json"), "Measurement files (*.json)"
-        )
-        if not path:
-            return
-        if not path.lower().endswith(".json"):
-            path += ".json"
-        preview.overlays.measurement.export_measurements_to_file(path)
-        ctx = get_app_context()
-        if ctx.toast:
-            ctx.toast.success(path, title="Measurements Exported")
-
-    @Slot()
-    def _on_import_measurements_clicked(self) -> None:
-        preview = get_app_context().camera_preview
-        if preview is None:
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import Measurements", str(self._current_folder), "Measurement files (*.json)"
-        )
-        if not path:
-            return
-        result = preview.overlays.measurement.import_measurements_from_file(path)
-        for issue in result.warnings:
-            warning(f"[MeasurementImport] {issue}")
-        ctx = get_app_context()
-        if ctx.toast is None:
-            return
-        if result.warnings:
-            ctx.toast.warning(f"{len(result.entries)} loaded, {len(result.warnings)} skipped — see log", title="Import Completed With Issues")
-        else:
-            ctx.toast.success(f"{len(result.entries)} measurement(s) loaded", title="Measurements Imported")
+                ctx.toast.success(Path(sidecar).name, title="Measurements Exported")
