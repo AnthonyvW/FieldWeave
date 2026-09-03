@@ -13,6 +13,11 @@ CircleGeometry = tuple[Point2D, float]
 # (center, rx_px, ry_px, rotation_deg) — rx points along *rotation_deg*
 # from the +x axis, ry perpendicular to it.
 EllipseGeometry = tuple[Point2D, float, float, float]
+# (center, radius_px, start_deg, sweep_deg) — the arc runs from
+# start_deg by sweep_deg (signed: positive/negative picks the
+# direction), both measured via atan2(dy,dx) in the same pixel-space
+# convention used everywhere else in this module.
+ArcGeometry = tuple[Point2D, float, float, float]
 
 # Points closer together than this (in frame fractions) are treated as a
 # single point rather than a real second click — mirrors
@@ -83,6 +88,7 @@ class MeasurementKind:
     move_point: Callable[[list[Point2D], int, Point2D], list[Point2D]] = _default_move_point
     circle_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], CircleGeometry | None] | None = None
     ellipse_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], EllipseGeometry | None] | None = None
+    arc_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], ArcGeometry | None] | None = None
     has_label: bool = True
     # MeasurementMeta field overrides applied on top of the sidebar's
     # default meta as a measurement of this kind is placed (see
@@ -494,6 +500,95 @@ def _four_point_angle_anchor(points: tuple[Point2D, ...]) -> Point2D:
     return sum(xs) / len(xs), sum(ys) / len(ys)
 
 
+# ----------------------------------------------------------------------
+# Arcs — "3 Point Arc" (start, a point the arc passes through, end —
+# same circumcircle math as "3 Point Circle", but drawn as just the arc
+# between start and end that actually passes through the middle point)
+# and "Radius Arc" (center, a point setting both radius and the start
+# angle, a third point setting only the end angle — its own distance
+# from center is ignored, matching "Radius Circle"'s center+edge but
+# with a further point to say where the sweep stops).
+# ----------------------------------------------------------------------
+
+
+def _sweep_through_angle(start_deg: float, mid_deg: float, end_deg: float) -> float:
+    """Signed sweep (degrees) from *start_deg* to *end_deg* that passes through *mid_deg* along the way — whichever of the two directions (CCW/positive or CW/negative) reaches *mid_deg* first."""
+    ccw_to_end = (end_deg - start_deg) % 360
+    ccw_to_mid = (mid_deg - start_deg) % 360
+    return ccw_to_end if ccw_to_mid <= ccw_to_end else ccw_to_end - 360
+
+
+def _three_point_arc_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3:
+        return None
+    p0, p1, p2 = points[0], points[1], points[2]
+    if p0 == p1 or p1 == p2 or p0 == p2 or _collinear(p0, p1, p2):
+        return None
+    return p0, p1, p2
+
+
+def _arc_geometry_three_point(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> ArcGeometry | None:
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0 or len(points) < 3:
+        return None
+
+    def to_px(p: Point2D) -> Point2D:
+        return p[0] * full_w, p[1] * full_h
+
+    a, b, c = to_px(points[0]), to_px(points[1]), to_px(points[2])
+    result = _circumcircle(a, b, c)
+    if result is None:
+        return None
+    center, radius = result
+    if radius < _DEGENERATE_EPSILON:
+        return None
+    start_deg = math.degrees(math.atan2(a[1] - center[1], a[0] - center[0]))
+    mid_deg = math.degrees(math.atan2(b[1] - center[1], b[0] - center[0]))
+    end_deg = math.degrees(math.atan2(c[1] - center[1], c[0] - center[0]))
+    sweep = _sweep_through_angle(start_deg, mid_deg, end_deg)
+    return (center[0] / full_w, center[1] / full_h), radius, start_deg, sweep
+
+
+def _radius_arc_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3:
+        return None
+    p0, p1, p2 = points[0], points[1], points[2]
+    if p0 == p1 or p0 == p2:
+        return None
+    return p0, p1, p2
+
+
+def _arc_geometry_radius(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> ArcGeometry | None:
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0 or len(points) < 3:
+        return None
+
+    def to_px(p: Point2D) -> Point2D:
+        return p[0] * full_w, p[1] * full_h
+
+    center, start_pt, end_pt = to_px(points[0]), to_px(points[1]), to_px(points[2])
+    radius = math.hypot(start_pt[0] - center[0], start_pt[1] - center[1])
+    if radius < _DEGENERATE_EPSILON:
+        return None
+    start_deg = math.degrees(math.atan2(start_pt[1] - center[1], start_pt[0] - center[0]))
+    end_deg = math.degrees(math.atan2(end_pt[1] - center[1], end_pt[0] - center[0]))
+    # Shortest signed sweep (in (-180, 180]) — unlike "3 Point Arc" there's
+    # no third "passes through" point dictating a direction, so the
+    # shorter way round is the least surprising default.
+    sweep = ((end_deg - start_deg + 180) % 360) - 180
+    return (center[0] / full_w, center[1] / full_h), radius, start_deg, sweep
+
+
+def _radius_arc_move(points: list[Point2D], index: int, new_point: Point2D) -> list[Point2D]:
+    if index != 0 or len(points) != 3:
+        return _default_move_point(points, index, new_point)
+    # Dragging the center translates the whole arc, same reasoning as
+    # "Radius Circle"'s own center drag.
+    dx = new_point[0] - points[0][0]
+    dy = new_point[1] - points[0][1]
+    return [new_point, (points[1][0] + dx, points[1][1] + dy), (points[2][0] + dx, points[2][1] + dy)]
+
+
 DEFAULT_REGISTRY = MeasurementKindRegistry()
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Point", required_points=1, category="point", resolve=_point_resolve,
@@ -562,6 +657,20 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     name="4 Point Angle", required_points=4, category="angle",
     resolve=_four_point_angle_resolve, segment_pairs=_four_point_angle_segments,
     angle_value=_four_point_angle_value, angle_anchor=_four_point_angle_anchor,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Start, a point the arc passes through, end — same circumcircle
+    # math as "3 Point Circle", drawn as just the arc between start and
+    # end that passes through the middle point.
+    name="3 Point Arc", required_points=3, category="arc",
+    resolve=_three_point_arc_resolve, arc_geometry=_arc_geometry_three_point,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Center, a point setting radius + start angle, a third point
+    # setting only the end angle (its own distance from center is
+    # ignored) — the shorter way round between start and end angle.
+    name="Radius Arc", required_points=3, category="arc",
+    resolve=_radius_arc_resolve, move_point=_radius_arc_move, arc_geometry=_arc_geometry_radius,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real

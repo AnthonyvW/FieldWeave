@@ -554,7 +554,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._index = index
         self._original_meta = meta
         entry = DEFAULT_REGISTRY.get(kind)
-        show_caps = entry is not None and entry.category in ("line", "angle")
+        show_caps = entry is not None and entry.category in ("line", "angle", "arc")
         show_area = entry is not None and entry.category in ("circle", "ellipse")
         self._title_edit.setText(meta.title)
         self._description_edit.setPlainText(meta.description)

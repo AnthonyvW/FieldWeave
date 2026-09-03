@@ -607,6 +607,12 @@ class MeasurementOverlay(Overlay):
                     b = self._screen_point(self._to_point(rect, pb), rect, widget_rect)
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
+            elif entry.category == "arc" and full_dims is not None:
+                arc_points = self._arc_sample_points(measurement.kind, measurement.points, full_dims)
+                arc_screen = [self._screen_point(self._to_point(rect, p), rect, widget_rect) for p in arc_points]
+                for a, b in zip(arc_screen, arc_screen[1:]):
+                    if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
+                        return index
         return None
 
     _CIRCLE_EDGE_SAMPLES = 32
@@ -868,6 +874,42 @@ class MeasurementOverlay(Overlay):
             return None
         return entry.ellipse_geometry(points, full_dims)
 
+    @staticmethod
+    def _arc_geometry(
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        full_dims: tuple[int, int],
+    ) -> tuple[tuple[float, float], float, float, float] | None:
+        """(center_fraction, radius_px, start_deg, sweep_deg) for an arc kind — see MeasurementKind.arc_geometry, the arc counterpart of _circle_geometry above."""
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None or entry.arc_geometry is None:
+            return None
+        return entry.arc_geometry(points, full_dims)
+
+    _ARC_SAMPLES_PER_DEGREE = 1 / 6  # one sample every 6 degrees of sweep
+    _ARC_MIN_SAMPLES = 8
+
+    def _arc_sample_points(
+        self, kind: str, points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]
+    ) -> list[tuple[float, float]]:
+        """Points (fraction space) evenly sampled along the arc *kind*/*points* describes, from its start angle through its full sweep — the arc drawn/hit-tested as a many-segment polyline rather than reasoned about via Qt's own arc-angle conventions (which this sidesteps entirely)."""
+        geometry = self._arc_geometry(kind, points, full_dims)
+        if geometry is None:
+            return []
+        (cx, cy), radius_px, start_deg, sweep_deg = geometry
+        full_w, full_h = full_dims
+        if full_w <= 0 or full_h <= 0:
+            return []
+        samples = max(self._ARC_MIN_SAMPLES, round(abs(sweep_deg) * self._ARC_SAMPLES_PER_DEGREE))
+        result = []
+        for i in range(samples + 1):
+            angle = math.radians(start_deg + sweep_deg * i / samples)
+            result.append((
+                cx + (radius_px * math.cos(angle)) / full_w,
+                cy + (radius_px * math.sin(angle)) / full_h,
+            ))
+        return result
+
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
@@ -1007,6 +1049,19 @@ class MeasurementOverlay(Overlay):
             for pair in entry.segment_pairs(points):
                 self._draw_polyline(
                     painter, rect, pair, stroke_scale, dashed=dashed,
+                    line_color=line_color, line_width=line_width,
+                    outline_color=outline_color, outline_width=outline_width,
+                    dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
+                )
+        elif entry.category == "arc" and full_dims is not None:
+            # Drawn as a many-segment polyline sampled along the arc —
+            # reuses the same stroke/dash/cap machinery as any other
+            # line rather than reasoning about Qt's own arc-angle
+            # conventions (see _arc_sample_points).
+            arc_points = self._arc_sample_points(kind, points, full_dims)
+            if len(arc_points) >= 2:
+                self._draw_polyline(
+                    painter, rect, arc_points, stroke_scale, dashed=dashed,
                     line_color=line_color, line_width=line_width,
                     outline_color=outline_color, outline_width=outline_width,
                     dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
@@ -1311,6 +1366,28 @@ class MeasurementOverlay(Overlay):
                 angle_deg = entry.angle_value(points, full_dims)
                 if angle_deg is not None:
                     suffix = f"{angle_deg:.{decimals}f}\u00b0"
+        elif entry.category == "arc":
+            if full_dims is None:
+                return None
+            geometry = self._arc_geometry(kind, points, full_dims)
+            if geometry is None:
+                return None
+            center, radius_px, start_deg, sweep_deg = geometry
+            mid_angle = math.radians(start_deg + sweep_deg / 2)
+            full_w, full_h = full_dims
+            # Anchor at the arc's own midpoint, not the raw center point,
+            # which would place the tag away from the arc itself.
+            anchor = (
+                center[0] + (radius_px * math.cos(mid_angle)) / full_w,
+                center[1] + (radius_px * math.sin(mid_angle)) / full_h,
+            )
+            suffix = None
+            if self.dpi is not None and dims is not None:
+                suffix_geometry = self._arc_geometry(kind, points, dims)
+                if suffix_geometry is not None:
+                    _, suffix_radius_px, _start, suffix_sweep = suffix_geometry
+                    radius_text = format_length(suffix_radius_px, self.dpi, unit, decimals)
+                    suffix = f"R {radius_text} \u00b7 {abs(suffix_sweep):.{decimals}f}\u00b0"
         else:
             if not points:
                 return None
@@ -1664,14 +1741,14 @@ class MeasurementOverlay(Overlay):
 
             self._draw_measurement(painter, rect, kind, display_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True)
 
-            if entry.category in ("circle", "ellipse") and len(preview_points) >= 2:
+            if entry.category in ("circle", "ellipse", "arc") and len(preview_points) >= 2:
                 required = entry.required_points or len(preview_points)
                 if len(preview_points) < required:
-                    # Not enough points for a circle/ellipse yet — a
+                    # Not enough points for a circle/ellipse/arc yet — a
                     # straight guide between what's placed so far is
                     # still useful feedback (e.g. two of three "3 Point
-                    # Circle"/"3 Point Ellipse" clicks, or the first few
-                    # of a "5 Point Ellipse").
+                    # Circle"/"3 Point Ellipse"/"3 Point Arc" clicks, or
+                    # the first few of a "5 Point Ellipse").
                     self._draw_polyline(painter, rect, preview_points, stroke_scale, dashed=True)
 
             if kind == CALIBRATION_KIND:

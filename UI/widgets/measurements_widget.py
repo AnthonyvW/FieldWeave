@@ -23,6 +23,10 @@ from UI.widgets.measurements.angles import (
     FourPointAngleMeasurement,
     ThreePointAngleMeasurement,
 )
+from UI.widgets.measurements.arcs import (
+    RadiusArcMeasurement,
+    ThreePointArcMeasurement,
+)
 from UI.widgets.measurements.calibration_line_button import CalibrationLineButton
 from UI.widgets.measurements.circles import (
     DiameterMeasurement,
@@ -70,6 +74,8 @@ _MEASUREMENT_TYPES = (
     FivePointEllipseMeasurement,
     ThreePointAngleMeasurement,
     FourPointAngleMeasurement,
+    ThreePointArcMeasurement,
+    RadiusArcMeasurement,
 )
 
 
