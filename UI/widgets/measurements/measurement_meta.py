@@ -57,6 +57,10 @@ class MeasurementMeta(NamedTuple):
     area_unit: MeasurementUnit | None = None
     tag_offset_x: float = 0.0
     tag_offset_y: float = 0.0
+    # Multiplier on the arrow/bracket caps' base size (see
+    # UI.widgets.measurements.lines.arrow_dims) — one shared "size" knob
+    # for both, rather than a separate control per cap style.
+    cap_size_scale: float = 1.0
 
 
 DEFAULT_META = MeasurementMeta()

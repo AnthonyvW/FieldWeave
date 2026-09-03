@@ -65,19 +65,20 @@ def _line_cap_icon(cap: str) -> QIcon:
     x1, x2 = 4.0, _ICON_SIZE.width() - 14.0
     tip = QPointF(_ICON_SIZE.width() - 4.0, y)
 
-    # "arrow_open"'s shaft runs the full way to the tip, flat-ended so
-    # it stays sharp rather than blunted by a round cap — matching the
-    # overlay, where the barbs alone form the point.
+    # "arrow_open"'s and "bracket"'s shafts run the full way to the tip
+    # (flat-ended, so "arrow_open" stays sharp rather than blunted by a
+    # round cap, matching the overlay where the barbs alone form the
+    # point; "bracket" sits its tick directly on the tip).
     pen = QPen(color)
     pen.setWidth(2)
     if cap == "square":
         pen.setCapStyle(Qt.PenCapStyle.SquareCap)
-    elif cap == "arrow_open":
+    elif cap in ("arrow_open", "bracket"):
         pen.setCapStyle(Qt.PenCapStyle.FlatCap)
     else:
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     painter.setPen(pen)
-    painter.drawLine(QPointF(x1, y), tip if cap == "arrow_open" else QPointF(x2, y))
+    painter.drawLine(QPointF(x1, y), tip if cap in ("arrow_open", "bracket") else QPointF(x2, y))
 
     if cap == "arrow":
         painter.setPen(Qt.PenStyle.NoPen)
@@ -90,6 +91,12 @@ def _line_cap_icon(cap: str) -> QIcon:
         painter.setPen(open_pen)
         painter.drawLine(tip, QPointF(x2 - 4, y - 5))
         painter.drawLine(tip, QPointF(x2 - 4, y + 5))
+    elif cap == "bracket":
+        tick_pen = QPen(color)
+        tick_pen.setWidth(2)
+        tick_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(tick_pen)
+        painter.drawLine(QPointF(tip.x(), y - 5), QPointF(tip.x(), y + 5))
 
     painter.end()
     return QIcon(pixmap)
@@ -496,6 +503,16 @@ class MeasurementCustomizeMenu(QFrame):
         self._end_cap_picker.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._end_cap_picker)
 
+        # One shared size for both the "arrow"/"arrow_open" and
+        # "bracket" caps, rather than a separate control per style —
+        # they're all sized off arrow_dims (see lines.py), so one slider
+        # scales whichever cap is actually chosen.
+        self._cap_size_label = _field_label("Arrow/Bracket Size")
+        layout.addWidget(self._cap_size_label)
+        self._cap_size_control = _ThicknessControl(0.25, 3.0)
+        self._cap_size_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._cap_size_control)
+
         self._outline_enabled_check = QCheckBox("Enable Outline")
         self._outline_enabled_check.toggled.connect(self._on_outline_enabled_toggled)
         layout.addWidget(self._outline_enabled_check)
@@ -569,6 +586,9 @@ class MeasurementCustomizeMenu(QFrame):
         self._start_cap_picker.setVisible(show_caps)
         self._end_cap_picker.set_value(meta.line_end_cap)
         self._end_cap_picker.setVisible(show_caps)
+        self._cap_size_control.set_value(meta.cap_size_scale)
+        self._cap_size_control.setVisible(show_caps)
+        self._cap_size_label.setVisible(show_caps)
         self._outline_enabled_check.setChecked(meta.outline_enabled)
         self._set_outline_controls_visible(meta.outline_enabled)
         self._outline_color_picker.set_color(meta.outline_color)
@@ -665,6 +685,7 @@ class MeasurementCustomizeMenu(QFrame):
             line_dash_style=self._line_style_picker.value(),
             line_start_cap=self._start_cap_picker.value(),
             line_end_cap=self._end_cap_picker.value(),
+            cap_size_scale=self._cap_size_control.value(),
             decimal_places=self._decimals_spin.value(),
             hidden=self._hidden_check.isChecked(),
             opacity=self._opacity_control.value(),

@@ -17,7 +17,9 @@ from PySide6.QtGui import (
     QTransform,
 )
 
-from UI.widgets.measurements.lines import CALIBRATION_KIND, arrow_dims, arrow_head_path, open_arrow_barbs_path
+from UI.widgets.measurements.lines import (
+    CALIBRATION_KIND, arrow_dims, arrow_head_path, bracket_path, open_arrow_barbs_path,
+)
 from UI.widgets.measurements.measurement_io import (
     DeserializeResult,
     deserialize_measurements,
@@ -447,12 +449,18 @@ class MeasurementOverlay(Overlay):
         default title template is actually set (e.g. "Wingspan 1",
         "Wingspan 2", ...), so a measurement placed with nothing
         configured stays untitled rather than falling back to its own
-        kind name.
+        kind name. A kind with its own ``meta_preset`` (see "Arrow"/
+        "Bracket" in measurement_kind.py) always gets those fields
+        forced, on top of whatever the panel's own defaults are.
         """
-        if not self._default_meta.title:
-            return self._default_meta
+        base = self._default_meta
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is not None and entry.meta_preset:
+            base = base._replace(**entry.meta_preset)
+        if not base.title:
+            return base
         self._kind_counts[kind] = self._kind_counts.get(kind, 0) + 1
-        return self._default_meta._replace(title=f"{self._default_meta.title} {self._kind_counts[kind]}")
+        return base._replace(title=f"{base.title} {self._kind_counts[kind]}")
 
     def measurement_meta(self, index: int) -> MeasurementMeta | None:
         measurements = self.measurements
@@ -863,6 +871,7 @@ class MeasurementOverlay(Overlay):
                 line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width,
                 dash_style=meta.line_dash_style, start_cap=meta.line_start_cap, end_cap=meta.line_end_cap,
+                cap_size=meta.cap_size_scale,
             )
             entry = DEFAULT_REGISTRY.get(measurement.kind)
             if entry is not None and entry.category == "line" and meta.midpoint_style != "none":
@@ -915,6 +924,7 @@ class MeasurementOverlay(Overlay):
         dash_style: str = "solid",
         start_cap: str = "curved",
         end_cap: str = "curved",
+        cap_size: float = 1.0,
     ) -> None:
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None:
@@ -923,7 +933,7 @@ class MeasurementOverlay(Overlay):
             self._draw_polyline(
                 painter, rect, points, stroke_scale, dashed=dashed,
                 line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
-                dash_style=dash_style, start_cap=start_cap, end_cap=end_cap,
+                dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
             )
         elif entry.category == "circle" and full_dims is not None:
             self._draw_circle(
@@ -1595,6 +1605,7 @@ class MeasurementOverlay(Overlay):
         dash_style: str = "solid",
         start_cap: str = "curved",
         end_cap: str = "curved",
+        cap_size: float = 1.0,
     ) -> None:
         last = len(points) - 2
         if dashed:
@@ -1605,6 +1616,7 @@ class MeasurementOverlay(Overlay):
                     dash_style=dash_style,
                     start_cap=start_cap if i == 0 else "curved",
                     end_cap=end_cap if i == last else "curved",
+                    cap_size=cap_size,
                 )
             return
 
@@ -1623,6 +1635,7 @@ class MeasurementOverlay(Overlay):
                 dash_style=dash_style,
                 start_cap=start_cap if i == 0 else "curved",
                 end_cap=end_cap if i == last else "curved",
+                cap_size=cap_size,
             )
             outline_path = outline_path.united(seg_outline)
             fill_path = fill_path.united(seg_fill)
@@ -1710,6 +1723,7 @@ class MeasurementOverlay(Overlay):
         dash_style: str = "solid",
         start_cap: str = "curved",
         end_cap: str = "curved",
+        cap_size: float = 1.0,
     ) -> None:
         """
         A stroke in *line_color* over a slightly wider *outline_color*
@@ -1765,7 +1779,7 @@ class MeasurementOverlay(Overlay):
         outline_path, fill_path = self._stroke_paths(
             rect, start, end, stroke_scale,
             line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
-            dash_style=dash_style, start_cap=start_cap, end_cap=end_cap,
+            dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
         )
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(outline_color))
@@ -1787,6 +1801,7 @@ class MeasurementOverlay(Overlay):
         dash_style: str = "solid",
         start_cap: str = "curved",
         end_cap: str = "curved",
+        cap_size: float = 1.0,
     ) -> tuple[QPainterPath, QPainterPath]:
         """
         (outline path, fill path) for one finalized (non-preview) segment
@@ -1802,8 +1817,8 @@ class MeasurementOverlay(Overlay):
         total_outline_width = line_width + outline_width * 2
         pattern = resolve_dash_pattern(dash_style, line_width)
 
-        body_p1 = self._point_along(p1, p2, self._cap_reach(start_cap, lw, stroke_scale))
-        body_p2 = self._point_along(p2, p1, self._cap_reach(end_cap, lw, stroke_scale))
+        body_p1 = self._point_along(p1, p2, self._cap_reach(start_cap, lw, stroke_scale, cap_size))
+        body_p2 = self._point_along(p2, p1, self._cap_reach(end_cap, lw, stroke_scale, cap_size))
 
         # Qt dash patterns are in multiples of the stroking width, so
         # each pass normalizes pattern's screen-pixel targets against its
@@ -1816,7 +1831,7 @@ class MeasurementOverlay(Overlay):
         outline_path = self._stroke_path(body_p1, body_p2, total_outline_width / stroke_scale, outline_pattern, round_caps)
         fill_path = self._stroke_path(body_p1, body_p2, lw, fill_pattern, round_caps)
         for origin, tip, cap in ((p2, p1, start_cap), (p1, p2, end_cap)):
-            cap_outline, cap_fill = self._cap_shapes(origin, tip, cap, lw, ow, stroke_scale)
+            cap_outline, cap_fill = self._cap_shapes(origin, tip, cap, lw, ow, stroke_scale, cap_size)
             if cap_outline is not None:
                 outline_path = outline_path.united(cap_outline)
                 fill_path = fill_path.united(cap_fill)
@@ -1835,26 +1850,48 @@ class MeasurementOverlay(Overlay):
         t = min(distance, length) / length
         return QPointF(origin.x() + dx * t, origin.y() + dy * t)
 
-    @classmethod
-    def _cap_reach(cls, cap: str, lw: float, stroke_scale: float) -> float:
+    @staticmethod
+    def _arrow_open_miter_overhang(lw: float, stroke_scale: float, cap_size: float = 1.0) -> float:
         """
-        How far the "arrow"/"arrow_open" cap's own shape extends back
-        from the true endpoint — the body is shortened by this much so
-        its flat end sits at the arrowhead's base instead of poking past
-        the tip once the two are unioned/overlaid. Every other style
-        unions its shape directly onto the shaft's own flat, unshortened
-        end: "square" and "curved" are no wider than the shaft (their
-        disc/rect never reaches past the true endpoint).
+        How far a mitered join of the two "arrow_open" barbs pokes out
+        past their shared vertex — shared by ``_cap_reach`` (shortens the
+        shaft by exactly this much) and ``_cap_shapes`` (shifts the barbs
+        back by exactly this much) so the two stay in sync: shift the
+        barbs alone and the shaft's unshortened flat end squares off the
+        now-receded point; shorten the shaft by more than this (e.g. the
+        full arrow length, as "arrow"'s solid triangle needs) and a gap
+        opens up, since the barbs — unlike a solid triangle's full-width
+        base — are only ``lw`` wide even at their own base, nowhere near
+        the shaft's width once you back off that far.
 
-        "arrow_open" needs this too, unlike a plain round/flat cap: its
-        barbs converge to a point only right at the tip, so without
-        shortening the shaft, the shaft's own full-width flat end would
-        sit right at that point and square it off — the same reasoning
-        "arrow" already needed, just with an open barb shape instead of
-        a solid triangle.
+        Derived from the standard miter-length formula, miterLength =
+        (strokeWidth/2) / sin(theta) where theta is the half-angle
+        between the two joined segments and their bisector — here
+        sin(theta) = arrow_half/barb_len from the barb triangle's own
+        sides (see arrow_dims).
         """
-        if cap in ("arrow", "arrow_open"):
-            return arrow_dims(lw, stroke_scale)[0]
+        arrow_len, arrow_half = arrow_dims(lw, stroke_scale, cap_size)
+        barb_len = math.hypot(arrow_len, arrow_half)
+        return (lw / 2) * barb_len / arrow_half
+
+    @classmethod
+    def _cap_reach(cls, cap: str, lw: float, stroke_scale: float, cap_size: float = 1.0) -> float:
+        """
+        How far a cap's own shape extends back from the true endpoint —
+        the body is shortened by this much so its flat end sits at the
+        arrowhead's base (or, for "arrow_open", just behind where its
+        barbs' miter join starts to flare wider than the shaft — see
+        ``_arrow_open_miter_overhang``) instead of poking past the tip,
+        or squaring it off, once the two are unioned/overlaid. Every
+        other style unions its shape directly onto the shaft's own flat,
+        unshortened end: "square", "curved", and "bracket" are no wider
+        than the shaft (their disc/rect/tick never reaches past the true
+        endpoint).
+        """
+        if cap == "arrow":
+            return arrow_dims(lw, stroke_scale, cap_size)[0]
+        if cap == "arrow_open":
+            return cls._arrow_open_miter_overhang(lw, stroke_scale, cap_size)
         return 0.0
 
     @staticmethod
@@ -1888,7 +1925,7 @@ class MeasurementOverlay(Overlay):
 
     @classmethod
     def _cap_shapes(
-        cls, origin: QPointF, tip: QPointF, cap: str, lw: float, ow: float, stroke_scale: float
+        cls, origin: QPointF, tip: QPointF, cap: str, lw: float, ow: float, stroke_scale: float, cap_size: float = 1.0
     ) -> tuple[QPainterPath | None, QPainterPath | None]:
         """
         (outline shape, fill shape) for *cap* at *tip*, pointing away
@@ -1931,11 +1968,14 @@ class MeasurementOverlay(Overlay):
             fill_shape.addRect(QRectF(0, -half, half, 2 * half))
             outline_shape = QPainterPath()
             outline_shape.addRect(QRectF(0, -(half + ow), half + ow, 2 * (half + ow)))
+        elif cap == "bracket":
+            fill_shape = bracket_path(lw, stroke_scale, cap_size)
+            outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.MiterJoin)
         elif cap == "arrow":
-            fill_shape = arrow_head_path(lw, stroke_scale)
+            fill_shape = arrow_head_path(lw, stroke_scale, cap_size)
             outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.RoundJoin)
         elif cap == "arrow_open":
-            barbs = open_arrow_barbs_path(lw, stroke_scale)
+            barbs = open_arrow_barbs_path(lw, stroke_scale, cap_size)
 
             # Stroking the barbs with a miter join pushes the apex's
             # sharp point past the true endpoint (the barb centerlines
@@ -1943,11 +1983,12 @@ class MeasurementOverlay(Overlay):
             # beyond it). Shift the barbs back by that overhang so the
             # visible tip lands on the endpoint, matching the solid
             # arrow's apex rather than poking past it. The shaft itself
-            # is separately shortened by the same reach (see
-            # _cap_reach) so its flat end doesn't square off the point.
-            arrow_len, arrow_half = arrow_dims(lw, stroke_scale)
-            barb_len = math.hypot(arrow_len, arrow_half)
-            miter_overhang = (lw / 2) * barb_len / arrow_half
+            # is separately shortened by the exact same amount (see
+            # _cap_reach/_arrow_open_miter_overhang) so its flat end
+            # meets the barbs' own width exactly where they start to
+            # flare — connected, with no gap, and without squaring off
+            # the point.
+            miter_overhang = cls._arrow_open_miter_overhang(lw, stroke_scale, cap_size)
             barbs.translate(-miter_overhang, 0)
 
             # MiterJoin (not RoundJoin) at the barbs' shared apex so the

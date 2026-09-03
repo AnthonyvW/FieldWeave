@@ -78,6 +78,14 @@ class MeasurementKind:
     move_point: Callable[[list[Point2D], int, Point2D], list[Point2D]] = _default_move_point
     circle_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], CircleGeometry | None] | None = None
     has_label: bool = True
+    # MeasurementMeta field overrides applied on top of the sidebar's
+    # default meta as a measurement of this kind is placed (see
+    # MeasurementOverlay._resolve_meta) — how "Arrow"/"Bracket" are
+    # "just the line type preset to X with a different icon": same
+    # placement/resolve/rendering as any other line, just with these
+    # fields forced regardless of what the Customize Measurements panel
+    # currently has set.
+    meta_preset: dict[str, object] | None = None
 
 
 class MeasurementKindRegistry:
@@ -220,6 +228,20 @@ DEFAULT_REGISTRY.register(MeasurementKind(
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Arbitrary Line", required_points=None, category="line", resolve=_arbitrary_line_resolve,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # A plain 2-point line whose only difference from "Arbitrary Line" is
+    # its placement default: end_cap forced to "arrow" so a single click-
+    # click gives a ready-made arrow annotation without visiting the
+    # customize menu — see MeasurementKind.meta_preset.
+    name="Arrow", required_points=2, category="line", resolve=_two_point_resolve,
+    meta_preset={"line_start_cap": "curved", "line_end_cap": "arrow"},
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Same idea as "Arrow" — a plain 2-point line preset to bracket caps
+    # on both ends, for a ready-made dimension-line-style annotation.
+    name="Bracket", required_points=2, category="line", resolve=_two_point_resolve,
+    meta_preset={"line_start_cap": "bracket", "line_end_cap": "bracket"},
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Radius Circle", required_points=2, category="circle",

@@ -27,6 +27,8 @@ from UI.widgets.measurements.circles import (
 )
 from UI.widgets.measurements.lines import (
     ArbitraryLineMeasurement,
+    ArrowMeasurement,
+    BracketMeasurement,
     HorizontalLineMeasurement,
     MEASUREMENT_LINE_CAPS,
     MEASUREMENT_MIDPOINT_STYLES,
@@ -51,6 +53,8 @@ _MEASUREMENT_TYPES = (
     ArbitraryLineMeasurement,
     HorizontalLineMeasurement,
     VerticalLineMeasurement,
+    ArrowMeasurement,
+    BracketMeasurement,
     RadiusCircleMeasurement,
     DiameterMeasurement,
     ThreePointCircleMeasurement,
@@ -288,6 +292,12 @@ class MeasurementsWidget(QWidget):
         self._default_end_cap_picker.value_changed.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_end_cap_picker)
 
+        layout.addWidget(_field_label("Arrow/Bracket Size"))
+        self._default_cap_size_control = _ThicknessControl(0.25, 3.0)
+        self._default_cap_size_control.set_value(1.0)
+        self._default_cap_size_control.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_cap_size_control)
+
         self._default_outline_enabled_check = QCheckBox("Enable Outline")
         self._default_outline_enabled_check.setChecked(True)
         self._default_outline_enabled_check.toggled.connect(self._on_default_outline_enabled_toggled)
@@ -327,6 +337,7 @@ class MeasurementsWidget(QWidget):
             line_dash_style=self._default_line_style_picker.value(),
             line_start_cap=self._default_start_cap_picker.value(),
             line_end_cap=self._default_end_cap_picker.value(),
+            cap_size_scale=self._default_cap_size_control.value(),
             outline_enabled=self._default_outline_enabled_check.isChecked(),
             outline_color=self._default_outline_color_picker.color(),
             outline_thickness=self._default_outline_thickness_control.value(),
