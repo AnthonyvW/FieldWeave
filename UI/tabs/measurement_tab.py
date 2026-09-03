@@ -8,14 +8,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
 )
+from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
-
-# Narrower than the shared RIGHT_SIDEBAR_WIDTH (380px) — this tab's tile
-# grid only needs GRID_COLUMNS(3) * TILE_WIDTH(84) + margins wide, so the
-# full shared width leaves the tab looking sparse; see _wrap_scroll for
-# the scrollbar-width compensation that keeps this figure accurate even
-# once a vertical scrollbar appears.
-_SIDEBAR_WIDTH = 340
 
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.capture_control_widget import CaptureControlWidget
@@ -53,7 +47,7 @@ class MeasurementTab(CameraWithSidebarPage):
 
     def _make_sidebar(self) -> QWidget:
         sidebar_container = QWidget()
-        sidebar_container.setFixedWidth(_SIDEBAR_WIDTH)
+        sidebar_container.setFixedWidth(RIGHT_SIDEBAR_WIDTH)
 
         sidebar_layout = QVBoxLayout(sidebar_container)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
@@ -98,7 +92,7 @@ class MeasurementTab(CameraWithSidebarPage):
 
         def _on_range_changed(min_val: int, max_val: int) -> None:
             needed = max_val > min_val
-            sidebar.setFixedWidth(_SIDEBAR_WIDTH + (scrollbar_width if needed else 0))
+            sidebar.setFixedWidth(RIGHT_SIDEBAR_WIDTH + (scrollbar_width if needed else 0))
             self.set_sidebar_flush_right(needed)
 
         scroll.verticalScrollBar().rangeChanged.connect(_on_range_changed)

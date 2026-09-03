@@ -443,40 +443,13 @@ class CaptureControlWidget(QWidget):
         self._format_combo = QComboBox()
         self._format_combo.addItems(f.value for f in FileFormat)
 
-        self._open_folder_button = QPushButton("Browse Output")
+        self._open_folder_button = QPushButton("Open Folder")
         self._open_folder_button.clicked.connect(self._open_folder)
 
         format_layout.addWidget(format_label)
         format_layout.addWidget(self._format_combo)
         format_layout.addWidget(self._open_folder_button)
         format_layout.addStretch()
-
-        # What "Take Photo" actually does — see _on_capture_clicked. Only
-        # "Full-res image (no measurements)" keeps doing a real camera
-        # sensor capture (Live mode only, unchanged from before); every
-        # other kind instead renders+saves whatever is currently
-        # displayed (works in Live or Loaded-Image mode) via
-        # _export_current_frame, the same operation the old standalone
-        # "Export..." button performed. AdjustToMinimumContentsLength
-        # keeps the combo's closed-state width from growing to fit its
-        # longest item's text, which otherwise stretched this group (and
-        # the sidebar) wider than intended.
-        capture_kind_layout = QHBoxLayout()
-        capture_kind_label = QLabel("Capture:")
-        capture_kind_label.setMinimumWidth(100)
-
-        self._export_kind_combo = QComboBox()
-        self._export_kind_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self._export_kind_combo.setMinimumContentsLength(1)
-        self._export_kind_combo.addItem("Preview image (measurements baked in)", "preview")
-        self._export_kind_combo.addItem("Preview image (no measurements)", "preview_no_measurements")
-        self._export_kind_combo.addItem("Full-res image (measurements baked in)", "full_res")
-        self._export_kind_combo.addItem("Full-res image (no measurements)", "full_res_no_measurements")
-        self._export_kind_combo.addItem("Full-res image + measurements file", "full_res_sidecar")
-        self._export_kind_combo.currentIndexChanged.connect(self._refresh_capture_availability)
-
-        capture_kind_layout.addWidget(capture_kind_label)
-        capture_kind_layout.addWidget(self._export_kind_combo, 1)
 
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(6)
@@ -486,11 +459,31 @@ class CaptureControlWidget(QWidget):
         self._capture_button.clicked.connect(self._on_capture_clicked)
         buttons_layout.addWidget(self._capture_button)
 
+        # What "Take Photo" actually does — see _on_capture_clicked. Only
+        # "Full-res image (no measurements)" keeps doing a real camera
+        # sensor capture (Live mode only, unchanged from before); every
+        # other kind instead renders+saves whatever is currently
+        # displayed (works in Live or Loaded-Image mode) via
+        # _export_current_frame, the same operation the old standalone
+        # "Export..." button performed. Sole widget in its own row (no
+        # label competing for space) so it's stretched to the group's
+        # full resolved width the same way _capture_button is — wide
+        # enough that every option's text is actually legible.
+        capture_kind_layout = QHBoxLayout()
+        self._export_kind_combo = QComboBox()
+        self._export_kind_combo.addItem("Preview image (measurements baked in)", "preview")
+        self._export_kind_combo.addItem("Preview image (no measurements)", "preview_no_measurements")
+        self._export_kind_combo.addItem("Full-res image (measurements baked in)", "full_res")
+        self._export_kind_combo.addItem("Full-res image (no measurements)", "full_res_no_measurements")
+        self._export_kind_combo.addItem("Full-res image + measurements file", "full_res_sidecar")
+        self._export_kind_combo.currentIndexChanged.connect(self._refresh_capture_availability)
+        capture_kind_layout.addWidget(self._export_kind_combo)
+
         layout.addLayout(folder_layout)
         layout.addLayout(filename_layout)
         layout.addLayout(format_layout)
-        layout.addLayout(capture_kind_layout)
         layout.addLayout(buttons_layout)
+        layout.addLayout(capture_kind_layout)
         return group
 
     # ------------------------------------------------------------------

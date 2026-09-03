@@ -41,7 +41,7 @@ from UI.widgets.preview_overlay.measurement_customize_menu import (
 )
 from UI.widgets.preview_overlay.measurement_overlay import MEASUREMENT_DASH_PATTERNS
 
-GRID_COLUMNS = 3
+GRID_COLUMNS = 4
 
 _MEASUREMENT_TYPES = (
     PointMeasurement,
@@ -160,14 +160,15 @@ class MeasurementsWidget(QWidget):
 
         outer_layout.addWidget(group)
 
-        data_row = QHBoxLayout()
+        data_group = QGroupBox("Import / Export")
+        data_row = QHBoxLayout(data_group)
         self._export_measurements_button = QPushButton("Export")
         self._export_measurements_button.clicked.connect(self.export_measurements_requested)
         self._import_measurements_button = QPushButton("Import")
         self._import_measurements_button.clicked.connect(self.import_measurements_requested)
         data_row.addWidget(self._export_measurements_button)
         data_row.addWidget(self._import_measurements_button)
-        outer_layout.addLayout(data_row)
+        outer_layout.addWidget(data_group)
 
         self._customize_panel = self._build_customize_panel()
         outer_layout.addWidget(self._customize_panel)
