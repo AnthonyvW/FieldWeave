@@ -19,6 +19,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from UI.widgets.measurements.angles import (
+    FourPointAngleMeasurement,
+    ThreePointAngleMeasurement,
+)
 from UI.widgets.measurements.calibration_line_button import CalibrationLineButton
 from UI.widgets.measurements.circles import (
     DiameterMeasurement,
@@ -64,6 +68,8 @@ _MEASUREMENT_TYPES = (
     ThreePointCircleMeasurement,
     ThreePointEllipseMeasurement,
     FivePointEllipseMeasurement,
+    ThreePointAngleMeasurement,
+    FourPointAngleMeasurement,
 )
 
 

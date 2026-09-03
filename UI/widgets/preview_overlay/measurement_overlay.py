@@ -601,6 +601,12 @@ class MeasurementOverlay(Overlay):
                 for a, b in zip(edge_points, edge_points[1:] + edge_points[:1]):
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
+            elif entry.category == "angle" and entry.segment_pairs is not None:
+                for pa, pb in entry.segment_pairs(measurement.points):
+                    a = self._screen_point(self._to_point(rect, pa), rect, widget_rect)
+                    b = self._screen_point(self._to_point(rect, pb), rect, widget_rect)
+                    if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
+                        return index
         return None
 
     _CIRCLE_EDGE_SAMPLES = 32
@@ -992,6 +998,19 @@ class MeasurementOverlay(Overlay):
                 dashed=dashed, line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
             )
+        elif entry.category == "angle" and entry.segment_pairs is not None:
+            # Each segment drawn independently rather than as one
+            # polyline — correct either way for "3 Point Angle" (whose
+            # segments happen to be consecutive), and necessary for
+            # "4 Point Angle" (two genuinely disconnected segments,
+            # which a single polyline would wrongly join at the middle).
+            for pair in entry.segment_pairs(points):
+                self._draw_polyline(
+                    painter, rect, pair, stroke_scale, dashed=dashed,
+                    line_color=line_color, line_width=line_width,
+                    outline_color=outline_color, outline_width=outline_width,
+                    dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
+                )
         elif entry.category == "point" and points:
             self._draw_point_marker(
                 painter, rect, points[0], scale_x, scale_y,
@@ -1283,6 +1302,15 @@ class MeasurementOverlay(Overlay):
                         area_unit = meta.area_unit if meta.area_unit is not None else unit
                         area_px = math.pi * suffix_rx_px * suffix_ry_px
                         suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi, area_unit, decimals)}"
+        elif entry.category == "angle":
+            if entry.angle_anchor is None or not points:
+                return None
+            anchor = entry.angle_anchor(points)
+            suffix = None
+            if full_dims is not None and entry.angle_value is not None:
+                angle_deg = entry.angle_value(points, full_dims)
+                if angle_deg is not None:
+                    suffix = f"{angle_deg:.{decimals}f}\u00b0"
         else:
             if not points:
                 return None

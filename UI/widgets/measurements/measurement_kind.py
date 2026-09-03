@@ -92,6 +92,16 @@ class MeasurementKind:
     # fields forced regardless of what the Customize Measurements panel
     # currently has set.
     meta_preset: dict[str, object] | None = None
+    # "angle" category only: the (possibly partial, while still placing
+    # — see MeasurementOverlay._draw_draft) line segments to draw/hit-
+    # test, and the angle (degrees) and tag anchor those points describe.
+    # Segments needn't be consecutive pairs of *points* — "4 Point Angle"
+    # draws two independent, disconnected segments — which is why this
+    # isn't just handled generically the way "line"'s always-consecutive
+    # polyline is.
+    segment_pairs: Callable[[tuple[Point2D, ...]], list[tuple[Point2D, Point2D]]] | None = None
+    angle_value: Callable[[tuple[Point2D, ...], tuple[int, int]], float | None] | None = None
+    angle_anchor: Callable[[tuple[Point2D, ...]], Point2D] | None = None
 
 
 class MeasurementKindRegistry:
@@ -392,6 +402,98 @@ def _ellipse_geometry_five_point(points: tuple[Point2D, ...], full_dims: tuple[i
     return (center_px[0] / full_w, center_px[1] / full_h), rx, ry, rotation
 
 
+# ----------------------------------------------------------------------
+# Angles — "3 Point Angle" (a vertex with two connected segments, like
+# "Arbitrary Line" capped at 3 points) and "4 Point Angle" (two
+# independent, disconnected segments). Both report the angle between
+# their two segments' directions as the tag's value instead of a length.
+# ----------------------------------------------------------------------
+
+
+def _angle_between_vectors(u: Point2D, v: Point2D) -> float | None:
+    """Unsigned angle in degrees (0-180) between *u* and *v*, or None if either is a zero vector."""
+    mag = math.hypot(*u) * math.hypot(*v)
+    if mag < _DEGENERATE_EPSILON:
+        return None
+    cos_angle = max(-1.0, min(1.0, (u[0] * v[0] + u[1] * v[1]) / mag))
+    return math.degrees(math.acos(cos_angle))
+
+
+def _three_point_angle_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3:
+        return None
+    p0, p1, p2 = points[0], points[1], points[2]
+    if p0 == p1 or p1 == p2:
+        return None
+    return p0, p1, p2
+
+
+def _three_point_angle_segments(points: tuple[Point2D, ...]) -> list[tuple[Point2D, Point2D]]:
+    """Segments to draw for whatever's been placed so far — partial while still placing (see MeasurementKind.segment_pairs)."""
+    pairs = []
+    if len(points) >= 2:
+        pairs.append((points[0], points[1]))
+    if len(points) >= 3:
+        pairs.append((points[1], points[2]))
+    return pairs
+
+
+def _three_point_angle_value(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> float | None:
+    if len(points) < 3:
+        return None
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+
+    def to_px(p: Point2D) -> Point2D:
+        return p[0] * full_w, p[1] * full_h
+
+    p0, p1, p2 = to_px(points[0]), to_px(points[1]), to_px(points[2])
+    return _angle_between_vectors((p0[0] - p1[0], p0[1] - p1[1]), (p2[0] - p1[0], p2[1] - p1[1]))
+
+
+def _three_point_angle_anchor(points: tuple[Point2D, ...]) -> Point2D:
+    return points[1]  # the vertex
+
+
+def _four_point_angle_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 4:
+        return None
+    p0, p1, p2, p3 = points[0], points[1], points[2], points[3]
+    if p0 == p1 or p2 == p3:
+        return None
+    return p0, p1, p2, p3
+
+
+def _four_point_angle_segments(points: tuple[Point2D, ...]) -> list[tuple[Point2D, Point2D]]:
+    pairs = []
+    if len(points) >= 2:
+        pairs.append((points[0], points[1]))
+    if len(points) >= 4:
+        pairs.append((points[2], points[3]))
+    return pairs
+
+
+def _four_point_angle_value(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> float | None:
+    if len(points) < 4:
+        return None
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+
+    def to_px(p: Point2D) -> Point2D:
+        return p[0] * full_w, p[1] * full_h
+
+    p0, p1, p2, p3 = (to_px(p) for p in points[:4])
+    return _angle_between_vectors((p1[0] - p0[0], p1[1] - p0[1]), (p3[0] - p2[0], p3[1] - p2[1]))
+
+
+def _four_point_angle_anchor(points: tuple[Point2D, ...]) -> Point2D:
+    xs = [p[0] for p in points[:4]]
+    ys = [p[1] for p in points[:4]]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
 DEFAULT_REGISTRY = MeasurementKindRegistry()
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Point", required_points=1, category="point", resolve=_point_resolve,
@@ -445,6 +547,21 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     # real, bounded ellipse.
     name="5 Point Ellipse", required_points=5, category="ellipse",
     resolve=_five_point_ellipse_resolve, ellipse_geometry=_ellipse_geometry_five_point,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # A vertex (the 2nd point) with two connected segments — same
+    # placement rhythm as "Arbitrary Line" but capped at 3 points —
+    # showing the angle at the vertex instead of a length.
+    name="3 Point Angle", required_points=3, category="angle",
+    resolve=_three_point_angle_resolve, segment_pairs=_three_point_angle_segments,
+    angle_value=_three_point_angle_value, angle_anchor=_three_point_angle_anchor,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Two independent, disconnected segments — showing the angle
+    # between them instead of a length.
+    name="4 Point Angle", required_points=4, category="angle",
+    resolve=_four_point_angle_resolve, segment_pairs=_four_point_angle_segments,
+    angle_value=_four_point_angle_value, angle_anchor=_four_point_angle_anchor,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real
