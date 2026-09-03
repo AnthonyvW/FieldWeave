@@ -71,21 +71,29 @@ class MeasurementInteraction:
         """Whether OverlayLabel should grab keyboard focus on enterEvent — purely so Delete reaches it from hovering a tag with no click needed first, so pointless whenever this isn't even active."""
         return self._active
 
-    def handle_mouse_press(self, event: QMouseEvent) -> bool:
-        """True if this fully handled the click (opened the menu, or deleted the hovered tag's measurement) — OverlayLabel should accept the event and stop there rather than fall through to placement/panning."""
+    def handle_delete_press(self, event: QMouseEvent) -> bool:
+        """
+        True if the click landed on a hovered tag's delete glyph and
+        removed that measurement — OverlayLabel should accept the event
+        and stop. A plain tag/point press (opening the customize menu or
+        starting a tag/endpoint drag) is handled by OverlayLabel's own
+        click-vs-drag logic, not here, so those cases return False.
+        """
         if not self._active or self._overlay.in_progress or event.button() != Qt.MouseButton.LeftButton:
             return False
         index = self._overlay.hovered_index
-        if index is None:
+        if index is None or not self._overlay.hover_delete:
             return False
-        if self._overlay.hover_delete:
-            self._overlay.remove_measurement(index)
-            self._close_for_removed_measurement()
-        else:
-            anchor = self._tag_anchor_point(index) or event.position().toPoint()
-            self._open_menu(index, anchor)
+        self._overlay.remove_measurement(index)
+        self._close_for_removed_measurement()
         self._video_label.update()
         return True
+
+    def open_menu_for(self, index: int, fallback_pos: QPoint) -> None:
+        """Open the customize menu for measurement *index*, anchored under its tag if it has one, or at *fallback_pos* (a click straight on a point with no tag — feature 3) otherwise."""
+        anchor = self._tag_anchor_point(index) or fallback_pos
+        self._open_menu(index, anchor)
+        self._video_label.update()
 
     def handle_mouse_move(self, event: QMouseEvent) -> None:
         """Tag hover and anchor-point proximity — a passive check alongside whatever else the move turns out to be, never a reason by itself to accept the event."""
@@ -97,7 +105,6 @@ class MeasurementInteraction:
         changed = self._overlay.update_proximity(pos, display_rect, widget_rect) or changed
         if changed:
             self._video_label.update()
-        self._update_hover_tooltip(event.globalPosition().toPoint())
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         """True if Delete/Backspace removed the hovered tag's measurement — OverlayLabel should accept the event rather than let it fall through to any other shortcut handling."""
@@ -138,15 +145,6 @@ class MeasurementInteraction:
         if box is None:
             return None
         return QPoint(round(box.center().x()), round(box.bottom()))
-
-    def _update_hover_tooltip(self, global_pos: QPoint) -> None:
-        """Show the hovered measurement's description as a tooltip, if it has one — hides any tooltip otherwise, since a tag can be hovered without a description or not hovered at all."""
-        index = self._overlay.hovered_index
-        meta = self._overlay.measurement_meta(index) if index is not None else None
-        if meta is None or not meta.description:
-            QToolTip.hideText()
-            return
-        QToolTip.showText(global_pos, meta.description, self._video_label)
 
     def _open_menu(self, index: int, anchor: QPoint) -> None:
         meta = self._overlay.measurement_meta(index)

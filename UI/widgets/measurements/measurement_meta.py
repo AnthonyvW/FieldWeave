@@ -48,6 +48,15 @@ class MeasurementMeta(NamedTuple):
     line_start_cap: str = "curved"
     line_end_cap: str = "curved"
     outline_enabled: bool = True
+    decimal_places: int = 2
+    hidden: bool = False
+    opacity: float = 1.0
+    tag_background_transparent: bool = False
+    midpoint_style: str = "none"
+    show_area: bool = False
+    area_unit: MeasurementUnit | None = None
+    tag_offset_x: float = 0.0
+    tag_offset_y: float = 0.0
 
 
 DEFAULT_META = MeasurementMeta()

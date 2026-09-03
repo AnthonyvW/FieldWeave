@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QPoint, QPointF, QSize
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
-    QPushButton, QSlider, QVBoxLayout, QWidget,
+    QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from UI.widgets.measurements.lines import MEASUREMENT_LINE_CAPS
+from UI.widgets.measurements.lines import MEASUREMENT_LINE_CAPS, MEASUREMENT_MIDPOINT_STYLES
 from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
-from UI.widgets.measurements.measurement_meta import MeasurementMeta
+from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.measurement_style import (
     OVERLAY_LINE_COLOR, OVERLAY_LINE_WIDTH, OVERLAY_OUTLINE_COLOR, OVERLAY_OUTLINE_WIDTH,
 )
@@ -91,6 +91,29 @@ def _line_cap_icon(cap: str) -> QIcon:
         painter.drawLine(tip, QPointF(x2 - 4, y - 5))
         painter.drawLine(tip, QPointF(x2 - 4, y + 5))
 
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _midpoint_style_icon(style: str) -> QIcon:
+    """A short horizontal stroke with *style*'s midpoint marker on it — nothing for "none", a perpendicular tick, or an x — mirroring MeasurementOverlay._draw_midpoint_marker closely enough to read as the same choice."""
+    pixmap = QPixmap(_ICON_SIZE)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#333333"))
+    pen.setWidth(2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    cx = _ICON_SIZE.width() / 2
+    cy = _ICON_SIZE.height() / 2
+    painter.drawLine(QPointF(4, cy), QPointF(_ICON_SIZE.width() - 4, cy))
+    half = 5.0
+    if style == "tick":
+        painter.drawLine(QPointF(cx, cy - half), QPointF(cx, cy + half))
+    elif style == "x":
+        painter.drawLine(QPointF(cx - half, cy - half), QPointF(cx + half, cy + half))
+        painter.drawLine(QPointF(cx + half, cy - half), QPointF(cx - half, cy + half))
     painter.end()
     return QIcon(pixmap)
 
@@ -346,6 +369,13 @@ class MeasurementCustomizeMenu(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._index: int | None = None
         self._original_meta: MeasurementMeta | None = None
+        # Suppresses live preview_changed emissions while open_for is
+        # populating the fields.
+        self._loading: bool = False
+        # Once the user drags the panel out of the way (feature 2), it
+        # stops auto-following its tag until reopened.
+        self._manually_moved: bool = False
+        self._drag_origin: QPoint | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -369,12 +399,38 @@ class MeasurementCustomizeMenu(QFrame):
         self._unit_combo = QComboBox()
         for unit in MeasurementUnit:
             self._unit_combo.addItem(unit.value, unit)
+        self._unit_combo.currentIndexChanged.connect(self._on_live_field_changed)
         unit_row.addWidget(self._unit_combo, 1)
+        unit_row.addWidget(_field_label("Decimals"))
+        self._decimals_spin = QSpinBox()
+        self._decimals_spin.setRange(0, 6)
+        self._decimals_spin.valueChanged.connect(self._on_live_field_changed)
+        unit_row.addWidget(self._decimals_spin)
         layout.addLayout(unit_row)
+
+        self._area_check = QCheckBox("Show area")
+        self._area_check.toggled.connect(self._on_area_toggled)
+        area_row = QHBoxLayout()
+        area_row.addWidget(self._area_check)
+        self._area_unit_combo = QComboBox()
+        for unit in MeasurementUnit:
+            self._area_unit_combo.addItem(unit.value, unit)
+        self._area_unit_combo.currentIndexChanged.connect(self._on_live_field_changed)
+        area_row.addWidget(self._area_unit_combo, 1)
+        layout.addLayout(area_row)
 
         self._always_show_description_check = QCheckBox("Always show description")
         self._always_show_description_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._always_show_description_check)
+
+        self._hidden_check = QCheckBox("Hide measurement")
+        self._hidden_check.toggled.connect(self._on_live_field_changed)
+        layout.addWidget(self._hidden_check)
+
+        layout.addWidget(_field_label("Opacity"))
+        self._opacity_control = _ThicknessControl(0.0, 1.0)
+        self._opacity_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._opacity_control)
 
         self._build_tag_style_controls(layout)
         self._build_line_style_controls(layout)
@@ -391,6 +447,10 @@ class MeasurementCustomizeMenu(QFrame):
         self.hide()
 
     def _build_tag_style_controls(self, layout: QVBoxLayout) -> None:
+        self._tag_transparent_check = QCheckBox("Transparent tag background")
+        self._tag_transparent_check.toggled.connect(self._on_tag_transparent_toggled)
+        layout.addWidget(self._tag_transparent_check)
+
         self._tag_bg_picker = _ColorPicker("Tag Background Color", OVERLAY_LINE_COLOR.name())
         self._tag_bg_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._tag_bg_picker)
@@ -414,6 +474,12 @@ class MeasurementCustomizeMenu(QFrame):
         )
         self._line_style_picker.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._line_style_picker)
+
+        self._midpoint_picker = _StylePicker(
+            "Midpoint", [(style, _midpoint_style_icon(style)) for style in MEASUREMENT_MIDPOINT_STYLES]
+        )
+        self._midpoint_picker.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._midpoint_picker)
 
         # Caps are a line-only decoration (MeasurementOverlay never
         # passes start_cap/end_cap when drawing a circle) — open_for
@@ -466,20 +532,35 @@ class MeasurementCustomizeMenu(QFrame):
         MeasurementKind.category in measurement_kind.py) — not just
         whether they're editable.
         """
+        self._loading = True
+        self._manually_moved = False
         self._index = index
         self._original_meta = meta
+        entry = DEFAULT_REGISTRY.get(kind)
+        show_caps = entry is not None and entry.category == "line"
+        show_area = entry is not None and entry.category == "circle"
         self._title_edit.setText(meta.title)
         self._description_edit.setPlainText(meta.description)
         unit = meta.unit if meta.unit is not None else MeasurementUnit.MM
         self._unit_combo.setCurrentIndex(self._unit_combo.findData(unit))
+        self._decimals_spin.setValue(meta.decimal_places)
+        self._area_check.setChecked(meta.show_area)
+        self._area_check.setVisible(show_area)
+        area_unit = meta.area_unit if meta.area_unit is not None else unit
+        self._area_unit_combo.setCurrentIndex(self._area_unit_combo.findData(area_unit))
+        self._area_unit_combo.setVisible(show_area and meta.show_area)
         self._always_show_description_check.setChecked(meta.always_show_description)
+        self._hidden_check.setChecked(meta.hidden)
+        self._opacity_control.set_value(meta.opacity)
+        self._tag_transparent_check.setChecked(meta.tag_background_transparent)
+        self._tag_bg_picker.setVisible(not meta.tag_background_transparent)
         self._tag_bg_picker.set_color(meta.tag_background_color)
         self._tag_text_picker.set_color(meta.tag_text_color)
         self._line_color_picker.set_color(meta.line_color)
         self._line_thickness_control.set_value(meta.line_thickness or OVERLAY_LINE_WIDTH)
         self._line_style_picker.set_value(meta.line_dash_style)
-        entry = DEFAULT_REGISTRY.get(kind)
-        show_caps = entry is not None and entry.category == "line"
+        self._midpoint_picker.set_value(meta.midpoint_style)
+        self._midpoint_picker.setVisible(show_caps)
         self._start_cap_picker.set_value(meta.line_start_cap)
         self._start_cap_picker.setVisible(show_caps)
         self._end_cap_picker.set_value(meta.line_end_cap)
@@ -488,6 +569,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._set_outline_controls_visible(meta.outline_enabled)
         self._outline_color_picker.set_color(meta.outline_color)
         self._outline_thickness_control.set_value(meta.outline_thickness or OVERLAY_OUTLINE_WIDTH)
+        self._loading = False
         self.adjustSize()
         self.reposition(anchor)
         self.show()
@@ -495,9 +577,34 @@ class MeasurementCustomizeMenu(QFrame):
         self._title_edit.setFocus()
 
     def reposition(self, anchor: QPoint) -> None:
-        """Move without touching any field's value — used both by open_for and by CameraPreview to keep the panel following its tag while the user pans/zooms with it still open."""
+        """Move without touching any field's value — used both by open_for and by CameraPreview to keep the panel following its tag while the user pans/zooms with it still open. A no-op once the user has dragged the panel themselves (feature 2)."""
+        if self._manually_moved:
+            return
         target = QPoint(anchor.x() - self.width() // 2, anchor.y() + self._ANCHOR_GAP_PX)
         self.move(self._clamped(target))
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Press on the panel's own background (not a child control) begins dragging it out of the way — feature 2."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_origin = event.globalPosition().toPoint() - self.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_origin is not None:
+            self._manually_moved = True
+            self.move(self._clamped(event.globalPosition().toPoint() - self._drag_origin))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._drag_origin is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_origin = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def close_immediately(self) -> None:
         """Used when the measurement being edited is deleted out from under this menu (e.g. via the tag's own delete glyph, or the Delete key while hovering it) — closes without emitting applied/cancelled, since there's nothing left to apply or revert."""
@@ -524,8 +631,22 @@ class MeasurementCustomizeMenu(QFrame):
         self.adjustSize()
         self._on_live_field_changed()
 
+    def _on_area_toggled(self, enabled: bool) -> None:
+        self._area_unit_combo.setVisible(enabled)
+        self.adjustSize()
+        self._on_live_field_changed()
+
+    def _on_tag_transparent_toggled(self, transparent: bool) -> None:
+        self._tag_bg_picker.setVisible(not transparent)
+        self.adjustSize()
+        self._on_live_field_changed()
+
     def _current_meta(self) -> MeasurementMeta:
-        return MeasurementMeta(
+        # Built from the original so per-measurement state the menu
+        # doesn't edit — style_id and the tag's dragged offset — carries
+        # through an edit rather than resetting to the default.
+        base = self._original_meta if self._original_meta is not None else DEFAULT_META
+        return base._replace(
             title=self._title_edit.text().strip(),
             description=self._description_edit.toPlainText().strip(),
             unit=self._unit_combo.currentData(),
@@ -540,10 +661,17 @@ class MeasurementCustomizeMenu(QFrame):
             line_dash_style=self._line_style_picker.value(),
             line_start_cap=self._start_cap_picker.value(),
             line_end_cap=self._end_cap_picker.value(),
+            decimal_places=self._decimals_spin.value(),
+            hidden=self._hidden_check.isChecked(),
+            opacity=self._opacity_control.value(),
+            tag_background_transparent=self._tag_transparent_check.isChecked(),
+            midpoint_style=self._midpoint_picker.value(),
+            show_area=self._area_check.isChecked(),
+            area_unit=self._area_unit_combo.currentData(),
         )
 
     def _on_live_field_changed(self, *_args: object) -> None:
-        if self._index is not None:
+        if self._index is not None and not self._loading:
             self.preview_changed.emit(self._index, self._current_meta())
 
     def _on_apply_clicked(self) -> None:

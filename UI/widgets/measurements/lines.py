@@ -20,6 +20,10 @@ CALIBRATION_KIND = "Calibration Line"
 # drawing a circle), hence living here.
 MEASUREMENT_LINE_CAPS = ("curved", "square", "arrow", "arrow_open")
 
+# Marker drawn at a line's midpoint (see MeasurementOverlay._draw_midpoint_marker).
+# "none" is first since it's what an unset style resolves to.
+MEASUREMENT_MIDPOINT_STYLES = ("none", "tick", "x")
+
 
 def arrow_dims(line_width: float) -> tuple[float, float]:
     """(length, half-width) of an arrowhead sized for *line_width* (already counter-scaled to screen pixels) — shared by the solid and open arrow caps so they read as the same size arrowhead."""
@@ -38,12 +42,11 @@ def arrow_head_path(line_width: float) -> QPainterPath:
 
 
 def open_arrow_barbs_path(line_width: float) -> QPainterPath:
-    """Two open barb strokes flaring back from the origin for an ("arrow_open") arrowhead — an open path meant to be stroked rather than filled, tip at the origin and pointing in the -x direction like arrow_head_path."""
+    """A single connected V flaring back from the origin for an ("arrow_open") arrowhead — meant to be stroked with a miter join so its apex at the origin comes to a sharp point like arrow_head_path's tip, rather than the rounded nub two separate round-capped strokes would leave. Tip at the origin, pointing in the -x direction."""
     arrow_len, arrow_half_width = arrow_dims(line_width)
     path = QPainterPath()
-    path.moveTo(0, 0)
-    path.lineTo(-arrow_len, -arrow_half_width)
-    path.moveTo(0, 0)
+    path.moveTo(-arrow_len, -arrow_half_width)
+    path.lineTo(0, 0)
     path.lineTo(-arrow_len, arrow_half_width)
     return path
 

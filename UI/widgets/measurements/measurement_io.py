@@ -34,14 +34,19 @@ class DeserializeResult:
 
 def _meta_to_dict(meta: MeasurementMeta) -> dict:
     data = meta._asdict()
+    # Units serialize by their display value; None stays None. area_unit
+    # is the same kind of optional-unit override as unit (feature 13).
     data["unit"] = meta.unit.value if meta.unit is not None else None
+    data["area_unit"] = meta.area_unit.value if meta.area_unit is not None else None
     return data
 
 
 def _meta_from_dict(data: dict) -> MeasurementMeta:
-    unit_value = data.get("unit")
     fields = {k: v for k, v in data.items() if k in MeasurementMeta._fields}
-    fields["unit"] = MeasurementUnit(unit_value) if unit_value is not None else None
+    for unit_field in ("unit", "area_unit"):
+        if unit_field in fields:
+            value = fields[unit_field]
+            fields[unit_field] = MeasurementUnit(value) if value is not None else None
     return MeasurementMeta(**fields)
 
 

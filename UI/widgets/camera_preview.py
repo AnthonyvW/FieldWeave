@@ -217,6 +217,7 @@ class OverlayLabel(QLabel):
         if self._measurement_handler is not None:
             self._measurement_handler.cancel_placement()
             self._measurement_handler.end_endpoint_drag()
+            self._measurement_handler.end_tag_drag()
         if self._measurement_interaction is not None:
             self._measurement_interaction.set_active(active)
 
@@ -320,10 +321,14 @@ class OverlayLabel(QLabel):
         dispatcher = ToolDispatcher()
         dispatcher.register(MeasurementTagInteractionTool(
             interaction=self._measurement_interaction,
+            measurement=self._measurement_handler,
+            video_label=self,
+            active=lambda: self._measurement_active,
             placement_pending=lambda: placement_tool.pending,
         ))
         dispatcher.register(MeasurementEndpointDragTool(
             measurement=self._measurement_handler,
+            interaction=self._measurement_interaction,
             video_label=self,
             active=lambda: self._measurement_active,
         ))

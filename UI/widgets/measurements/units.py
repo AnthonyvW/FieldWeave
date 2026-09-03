@@ -32,8 +32,18 @@ def pixels_to_unit(pixels: float, dpi: float, unit: MeasurementUnit) -> float:
     return mm
 
 
-def format_length(pixels: float, dpi: float, unit: MeasurementUnit) -> str:
-    return f"{pixels_to_unit(pixels, dpi, unit):.2f} {unit.value}"
+def format_length(pixels: float, dpi: float, unit: MeasurementUnit, decimals: int = 2) -> str:
+    return f"{pixels_to_unit(pixels, dpi, unit):.{max(0, decimals)}f} {unit.value}"
+
+
+def area_pixels_to_unit(area_pixels: float, dpi: float, unit: MeasurementUnit) -> float:
+    """Convert an area given in square pixels to square *unit*, given the source's DPI."""
+    per_pixel = pixels_to_unit(1.0, dpi, unit)
+    return area_pixels * per_pixel * per_pixel
+
+
+def format_area(area_pixels: float, dpi: float, unit: MeasurementUnit, decimals: int = 2) -> str:
+    return f"{area_pixels_to_unit(area_pixels, dpi, unit):.{max(0, decimals)}f} {unit.value}²"
 
 
 def unit_to_mm(value: float, unit: MeasurementUnit) -> float:

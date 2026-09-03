@@ -659,6 +659,41 @@ class CaptureControlWidget(QWidget):
         if no_dpi_found:
             self.loaded_dpi_missing.emit()
 
+        self._maybe_load_measurement_sidecar(path)
+
+    def _maybe_load_measurement_sidecar(self, path: Path) -> None:
+        """
+        If a JSON file sharing the loaded image's name sits beside it,
+        offer to load the measurements it holds (feature 6). Runs after
+        the image itself is shown and its mode is active, so importing
+        writes into the now-active loaded-image source. Only ever prompts
+        when such a file actually exists.
+        """
+        sidecar = path.with_suffix(".json")
+        if not sidecar.exists():
+            return
+        reply = QMessageBox.question(
+            self,
+            "Load Measurements?",
+            f"A measurements file \"{sidecar.name}\" was found next to this image. Load its measurements?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        ctx = get_app_context()
+        if ctx.camera_preview is None:
+            return
+        result = ctx.camera_preview.overlays.measurement.import_measurements_from_file(str(sidecar))
+        for message in result.warnings:
+            warning(f"CaptureControlWidget: measurements sidecar {sidecar.name}: {message}")
+        if result.warnings and ctx.toast:
+            ctx.toast.warning(
+                f"Loaded {len(result.entries)} measurement(s); {len(result.warnings)} entry(ies) skipped.",
+                title="Measurements Loaded",
+            )
+
     # ------------------------------------------------------------------
     # Output folder / format
     # ------------------------------------------------------------------

@@ -17,16 +17,51 @@ class _Repaintable(Protocol):
 
 
 class MeasurementTagInteractionTool(InputTool):
-    """Tag hover/click/delete for already-placed measurements — a thin adapter around MeasurementInteraction, which already owns this UI; see its own docstring."""
+    """
+    Tag hover/click/delete/drag for already-placed measurements. A press
+    on the tag's delete glyph removes it; a plain click opens the
+    customize menu (via MeasurementInteraction, which owns the popup); a
+    drag past the threshold moves the tag itself (feature 4), accumulating
+    a fraction-space offset into the measurement's meta.
+    """
 
-    def __init__(self, interaction: MeasurementInteraction, placement_pending: Callable[[], bool]) -> None:
+    def __init__(
+        self,
+        interaction: MeasurementInteraction,
+        measurement: MeasurementOverlay,
+        video_label: _Repaintable,
+        active: Callable[[], bool],
+        placement_pending: Callable[[], bool],
+    ) -> None:
         self._interaction = interaction
+        self._measurement = measurement
+        self._video_label = video_label
+        self._active = active
         self._placement_pending = placement_pending
+        self._drag = DragGestureRecognizer()
+        self._index: int | None = None
 
     def handle_press(self, event: QMouseEvent, ctx: InputContext) -> bool:
-        return self._interaction.handle_mouse_press(event)
+        if not self._active() or self._measurement.in_progress or event.button() != Qt.MouseButton.LeftButton:
+            return False
+        index = self._measurement.hovered_index
+        if index is None:
+            return False
+        if self._measurement.hover_delete:
+            return self._interaction.handle_delete_press(event)
+        self._index = index
+        self._drag.begin(event.position().toPoint())
+        return True
 
     def handle_move(self, event: QMouseEvent, ctx: InputContext) -> bool:
+        if self._drag.pending:
+            pos = event.position().toPoint()
+            if self._drag.crossed_threshold(pos) and self._index is not None:
+                self._measurement.begin_tag_drag(self._drag.press_pos, ctx.widget_rect, self._index)
+            if self._drag.dragging:
+                self._measurement.update_tag_drag(pos, ctx.widget_rect)
+                self._video_label.update()
+            return True
         # A passive observer alongside whatever else the move turns out
         # to be — paused only while a measurement click-vs-drag is still
         # being disambiguated (see MeasurementPlacementTool.pending).
@@ -34,35 +69,82 @@ class MeasurementTagInteractionTool(InputTool):
             self._interaction.handle_mouse_move(event)
         return False
 
+    def handle_release(self, event: QMouseEvent, ctx: InputContext) -> bool:
+        if not self._drag.pending or event.button() != Qt.MouseButton.LeftButton:
+            return False
+        pos = event.position().toPoint()
+        was_dragging = self._drag.dragging
+        index = self._index
+        self._drag.end()
+        self._index = None
+        if was_dragging:
+            self._measurement.end_tag_drag()
+            self._video_label.update()
+        elif index is not None:
+            # A plain click on the tag opens the customize menu.
+            self._interaction.open_menu_for(index, pos)
+        return True
+
     def handle_key(self, event: QKeyEvent, ctx: InputContext) -> bool:
         return self._interaction.handle_key_press(event)
 
 
 class MeasurementEndpointDragTool(InputTool):
-    """Dragging an already-placed measurement's endpoint to a new position."""
+    """
+    Dragging an already-placed measurement's endpoint to a new position;
+    a plain click on a point (no drag) opens the customize menu instead
+    (feature 3), which is what lets a bare "Point" measurement — with no
+    tag to click — have its style edited.
+    """
 
-    def __init__(self, measurement: MeasurementOverlay, video_label: _Repaintable, active: Callable[[], bool]) -> None:
+    def __init__(
+        self,
+        measurement: MeasurementOverlay,
+        interaction: MeasurementInteraction,
+        video_label: _Repaintable,
+        active: Callable[[], bool],
+    ) -> None:
         self._measurement = measurement
+        self._interaction = interaction
         self._video_label = video_label
         self._active = active
+        self._drag = DragGestureRecognizer()
+        self._index: int | None = None
 
     def handle_press(self, event: QMouseEvent, ctx: InputContext) -> bool:
         if not self._active() or self._measurement.in_progress or event.button() != Qt.MouseButton.LeftButton:
             return False
-        return self._measurement.begin_endpoint_drag(event.position().toPoint(), ctx.display_rect, ctx.widget_rect)
+        hit = self._measurement.hit_test_endpoint(event.position().toPoint(), ctx.display_rect, ctx.widget_rect)
+        if hit is None:
+            return False
+        self._index = hit[0]
+        self._drag.begin(event.position().toPoint())
+        return True
 
     def handle_move(self, event: QMouseEvent, ctx: InputContext) -> bool:
-        if not self._measurement.dragging_endpoint:
+        if not self._drag.pending:
             return False
-        self._measurement.update_endpoint_drag(event.position().toPoint(), ctx.widget_rect)
-        self._video_label.update()
+        pos = event.position().toPoint()
+        if self._drag.crossed_threshold(pos):
+            self._measurement.begin_endpoint_drag(self._drag.press_pos, ctx.display_rect, ctx.widget_rect)
+        if self._drag.dragging:
+            self._measurement.update_endpoint_drag(pos, ctx.widget_rect)
+            self._video_label.update()
         return True
 
     def handle_release(self, event: QMouseEvent, ctx: InputContext) -> bool:
-        if not self._measurement.dragging_endpoint:
+        if not self._drag.pending or event.button() != Qt.MouseButton.LeftButton:
             return False
-        self._measurement.end_endpoint_drag()
-        self._video_label.update()
+        pos = event.position().toPoint()
+        was_dragging = self._drag.dragging
+        index = self._index
+        self._drag.end()
+        self._index = None
+        if was_dragging:
+            self._measurement.end_endpoint_drag()
+            self._video_label.update()
+        elif index is not None:
+            self._interaction.open_menu_for(index, pos)
         return True
 
 

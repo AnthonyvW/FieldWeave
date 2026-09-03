@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +29,7 @@ from UI.widgets.measurements.lines import (
     ArbitraryLineMeasurement,
     HorizontalLineMeasurement,
     MEASUREMENT_LINE_CAPS,
+    MEASUREMENT_MIDPOINT_STYLES,
     VerticalLineMeasurement,
 )
 from UI.widgets.measurements.measurement_meta import MeasurementMeta
@@ -38,6 +40,7 @@ from UI.widgets.measurements.points import PointMeasurement
 from UI.widgets.measurements.units import MeasurementUnit
 from UI.widgets.preview_overlay.measurement_customize_menu import (
     _ColorPicker, _StylePicker, _ThicknessControl, _dash_style_icon, _field_label, _line_cap_icon,
+    _midpoint_style_icon,
 )
 from UI.widgets.preview_overlay.measurement_overlay import MEASUREMENT_DASH_PATTERNS
 
@@ -211,11 +214,31 @@ class MeasurementsWidget(QWidget):
         self._default_unit_combo.setCurrentIndex(self._default_unit_combo.findData(MeasurementUnit.MM))
         self._default_unit_combo.currentIndexChanged.connect(self._on_default_meta_edited)
         default_unit_row.addWidget(self._default_unit_combo, 1)
+        default_unit_row.addWidget(_field_label("Decimals"))
+        self._default_decimals_spin = QSpinBox()
+        self._default_decimals_spin.setRange(0, 6)
+        self._default_decimals_spin.setValue(2)
+        self._default_decimals_spin.valueChanged.connect(self._on_default_meta_edited)
+        default_unit_row.addWidget(self._default_decimals_spin)
         layout.addLayout(default_unit_row)
+
+        self._default_show_area_check = QCheckBox("Show area (circles)")
+        self._default_show_area_check.toggled.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_show_area_check)
 
         self._default_always_show_description_check = QCheckBox("Always show description")
         self._default_always_show_description_check.toggled.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_always_show_description_check)
+
+        layout.addWidget(_field_label("Opacity"))
+        self._default_opacity_control = _ThicknessControl(0.0, 1.0)
+        self._default_opacity_control.set_value(1.0)
+        self._default_opacity_control.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_opacity_control)
+
+        self._default_tag_transparent_check = QCheckBox("Transparent tag background")
+        self._default_tag_transparent_check.toggled.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_tag_transparent_check)
 
         self._default_tag_bg_picker = _ColorPicker("Tag Background Color", OVERLAY_LINE_COLOR.name())
         self._default_tag_bg_picker.color_changed.connect(self._on_default_meta_edited)
@@ -240,6 +263,12 @@ class MeasurementsWidget(QWidget):
         )
         self._default_line_style_picker.value_changed.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_line_style_picker)
+
+        self._default_midpoint_picker = _StylePicker(
+            "Midpoint", [(style, _midpoint_style_icon(style)) for style in MEASUREMENT_MIDPOINT_STYLES]
+        )
+        self._default_midpoint_picker.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_midpoint_picker)
 
         # Caps only ever apply to line-category measurements (see
         # MeasurementKind.category in measurement_kind.py) but, unlike
@@ -301,6 +330,11 @@ class MeasurementsWidget(QWidget):
             outline_enabled=self._default_outline_enabled_check.isChecked(),
             outline_color=self._default_outline_color_picker.color(),
             outline_thickness=self._default_outline_thickness_control.value(),
+            decimal_places=self._default_decimals_spin.value(),
+            opacity=self._default_opacity_control.value(),
+            tag_background_transparent=self._default_tag_transparent_check.isChecked(),
+            midpoint_style=self._default_midpoint_picker.value(),
+            show_area=self._default_show_area_check.isChecked(),
         )
 
     def current_default_meta(self) -> MeasurementMeta:

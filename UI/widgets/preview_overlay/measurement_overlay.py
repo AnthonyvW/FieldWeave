@@ -48,7 +48,7 @@ from UI.widgets.measurements.measurement_style import (
     OVERLAY_POINT_RADIUS,
     OVERLAY_TAG_HOVER_COLOR,
 )
-from UI.widgets.measurements.units import MeasurementUnit, format_length
+from UI.widgets.measurements.units import MeasurementUnit, format_area, format_length
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.coordinate_space import CoordinateSpace
@@ -65,12 +65,17 @@ _DASH_PATTERNS: dict[str, list[float] | None] = {
     "solid": None,
     "dash": [4, 3],
     "dot": [1, 2],
+    "round_dot": [0.1, 2.5],
     "dash_dot": [4, 2, 1, 2],
     "dash_dot_dot": [4, 2, 1, 2, 1, 2],
     "long_dash": [9, 4],
 }
 MEASUREMENT_DASH_STYLES = tuple(_DASH_PATTERNS.keys())
 MEASUREMENT_DASH_PATTERNS = _DASH_PATTERNS
+
+# Dash styles whose dashes are drawn with round caps, turning each short
+# on-segment into a circular dot rather than a flat-ended tick.
+ROUND_CAP_DASH_STYLES = frozenset({"round_dot"})
 
 # Dash/gap values as multiples of the line's own chosen thickness,
 # for the actual overlay rendering (see resolve_dash_pattern) — a fixed
@@ -83,11 +88,16 @@ _DASH_MULTIPLIERS: dict[str, list[float] | None] = {
     "solid": None,
     "dash": [4.0, 3.0],
     "dot": [1.2, 3.0],
+    "round_dot": [0.1, 2.6],
     "dash_dot": [4.0, 2.5, 1.2, 2.5],
     "dash_dot_dot": [4.0, 2.0, 1.2, 2.0, 1.2, 2.0],
     "long_dash": [7.0, 3.5],
 }
 _DASH_REFERENCE_MIN = 3.0  # keeps a thin line's dashes/gaps from shrinking below a legible size
+
+# Wrap width for a description-only tag (no title line to borrow a width
+# from) — see MeasurementOverlay._draw_label.
+_DESC_ONLY_WRAP_WIDTH = 150.0
 
 
 def resolve_dash_pattern(dash_style: str, line_width: float) -> list[float] | None:
@@ -183,6 +193,14 @@ class MeasurementOverlay(Overlay):
 
         self._drag_measurement_index: int | None = None
         self._drag_point_index: int | None = None
+
+        # Tag dragging — moving a measurement's tag away from its anchor
+        # by accumulating a fraction-space offset into its meta (feature
+        # 4). Kept apart from endpoint dragging: a tag drag moves only the
+        # label, never the measurement's geometry.
+        self._tag_drag_index: int | None = None
+        self._tag_drag_start_fraction: tuple[float, float] | None = None
+        self._tag_drag_start_offset: tuple[float, float] = (0.0, 0.0)
 
         # Template applied to a measurement's meta as it's finalized —
         # set from MeasurementsWidget's "Customize Measurements" section
@@ -697,6 +715,49 @@ class MeasurementOverlay(Overlay):
         self._drag_measurement_index = None
         self._drag_point_index = None
 
+    @property
+    def drag_measurement_index(self) -> int | None:
+        """Which measurement an endpoint drag is currently moving, if any — read by OverlayLabel to tell a plain click on a point (which opens the customize menu) from a drag (which moves it)."""
+        return self._drag_measurement_index
+
+    # ------------------------------------------------------------------
+    # Tag dragging — see feature 4. Moves only a measurement's tag,
+    # accumulating a fraction-space offset into its meta so the tag stays
+    # put relative to the anchor through pans/zooms and endpoint edits.
+    # ------------------------------------------------------------------
+
+    @property
+    def dragging_tag(self) -> bool:
+        return self._tag_drag_index is not None
+
+    def begin_tag_drag(self, pos: QPoint, widget_rect: QRect, index: int) -> bool:
+        fraction = self._to_fraction(pos, widget_rect)
+        meta = self.measurement_meta(index)
+        if fraction is None or meta is None:
+            return False
+        self._tag_drag_index = index
+        self._tag_drag_start_fraction = fraction
+        self._tag_drag_start_offset = (meta.tag_offset_x, meta.tag_offset_y)
+        return True
+
+    def update_tag_drag(self, pos: QPoint, widget_rect: QRect) -> bool:
+        if self._tag_drag_index is None or self._tag_drag_start_fraction is None:
+            return False
+        fraction = self._to_fraction(pos, widget_rect)
+        meta = self.measurement_meta(self._tag_drag_index)
+        if fraction is None or meta is None:
+            return False
+        offset_x = self._tag_drag_start_offset[0] + (fraction[0] - self._tag_drag_start_fraction[0])
+        offset_y = self._tag_drag_start_offset[1] + (fraction[1] - self._tag_drag_start_fraction[1])
+        self.set_measurement_meta(
+            self._tag_drag_index, meta._replace(tag_offset_x=offset_x, tag_offset_y=offset_y)
+        )
+        return True
+
+    def end_tag_drag(self) -> None:
+        self._tag_drag_index = None
+        self._tag_drag_start_fraction = None
+
     def _move_point(self, m_index: int, p_index: int, new_point: tuple[float, float]) -> None:
         """
         Apply a dragged point's new position to the measurement at
@@ -782,25 +843,42 @@ class MeasurementOverlay(Overlay):
 
         for index, measurement in enumerate(self.measurements):
             meta = measurement.meta
-            line_color = self._resolve_color(meta.line_color, OVERLAY_LINE_COLOR)
-            line_width = meta.line_thickness or OVERLAY_LINE_WIDTH
-            outline_color = self._resolve_color(meta.outline_color, OVERLAY_OUTLINE_COLOR)
-            # A disabled outline is drawn at zero width rather than
-            # skipped outright: its pass then paints the exact same
-            # shape as the fill pass drawn right after it (same dash
-            # pattern, same cap shapes — see _cap_shapes/_stroke_path),
-            # which fully covers it, rather than needing a second code
-            # path through every draw method just to omit one pass.
-            outline_width = (meta.outline_thickness or OVERLAY_OUTLINE_WIDTH) if meta.outline_enabled else 0.0
-            self._draw_measurement(
-                painter, rect, measurement.kind, measurement.points, stroke_scale, scale_x, scale_y, full_dims,
-                line_color=line_color, line_width=line_width,
-                outline_color=outline_color, outline_width=outline_width,
-                dash_style=meta.line_dash_style, start_cap=meta.line_start_cap, end_cap=meta.line_end_cap,
-            )
-            if index == self._near_index or index == self._drag_measurement_index:
-                for point in measurement.points:
-                    self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
+            # A hidden measurement draws no geometry (line/circle/point,
+            # its midpoint marker, or its anchor handles) at all — only
+            # its tag may still show, per _draw_measurement_label's own
+            # rules (see feature 12).
+            if not meta.hidden:
+                line_color = self._resolve_color(meta.line_color, OVERLAY_LINE_COLOR)
+                line_width = meta.line_thickness or OVERLAY_LINE_WIDTH
+                outline_color = self._resolve_color(meta.outline_color, OVERLAY_OUTLINE_COLOR)
+                # A disabled outline is drawn at zero width rather than
+                # skipped outright: its pass then paints the exact same
+                # shape as the fill pass drawn right after it (same dash
+                # pattern, same cap shapes — see _cap_shapes/_stroke_path),
+                # which fully covers it, rather than needing a second code
+                # path through every draw method just to omit one pass.
+                outline_width = (meta.outline_thickness or OVERLAY_OUTLINE_WIDTH) if meta.outline_enabled else 0.0
+                # Opacity fades the line fill and its border together
+                # (feature 10) by wrapping both passes at once.
+                painter.save()
+                painter.setOpacity(max(0.0, min(1.0, meta.opacity)))
+                self._draw_measurement(
+                    painter, rect, measurement.kind, measurement.points, stroke_scale, scale_x, scale_y, full_dims,
+                    line_color=line_color, line_width=line_width,
+                    outline_color=outline_color, outline_width=outline_width,
+                    dash_style=meta.line_dash_style, start_cap=meta.line_start_cap, end_cap=meta.line_end_cap,
+                )
+                entry = DEFAULT_REGISTRY.get(measurement.kind)
+                if entry is not None and entry.category == "line" and meta.midpoint_style != "none":
+                    self._draw_midpoint_marker(
+                        painter, rect, measurement.points, meta.midpoint_style, stroke_scale,
+                        line_color=line_color, line_width=line_width,
+                        outline_color=outline_color, outline_width=outline_width,
+                    )
+                painter.restore()
+                if index == self._near_index or index == self._drag_measurement_index:
+                    for point in measurement.points:
+                        self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
 
     def draw_placed_measurements_with_coordinate_space(
@@ -913,6 +991,63 @@ class MeasurementOverlay(Overlay):
         painter.setBrush(QBrush(line_color))
         painter.drawEllipse(center, rx, ry)
 
+    def _draw_midpoint_marker(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        points: tuple[tuple[float, float], ...],
+        style: str,
+        stroke_scale: float,
+        *,
+        line_color: QColor,
+        line_width: float,
+        outline_color: QColor,
+        outline_width: float,
+    ) -> None:
+        """
+        A small tick (a single stroke perpendicular to the line) or x (a
+        pair of crossed strokes) centered on the line's midpoint, oriented
+        from the overall first-to-last direction so a tick reads as square
+        across the line at any angle. Sized in fixed on-screen pixels
+        (counter-scaled by *stroke_scale*) and drawn line-color over a
+        slightly wider outline-color pass, the same legible-on-any-
+        background treatment as the stroke itself (feature 8).
+        """
+        if len(points) < 2:
+            return
+        mid = self._to_point(rect, self._midpoint(points))
+        start = self._to_point(rect, points[0])
+        end = self._to_point(rect, points[-1])
+        dx, dy = end.x() - start.x(), end.y() - start.y()
+        length = math.hypot(dx, dy)
+        if length <= 0:
+            return
+        ux, uy = dx / length, dy / length
+        px, py = -uy, ux  # unit perpendicular
+        half = (OVERLAY_POINT_RADIUS * (line_width / OVERLAY_LINE_WIDTH) + 2.0) / stroke_scale
+
+        if style == "x":
+            axes = ((ux + px, uy + py), (ux - px, uy - py))
+        else:  # "tick"
+            axes = ((px, py),)
+
+        segments = []
+        for ax, ay in axes:
+            norm = math.hypot(ax, ay) or 1.0
+            hx, hy = ax / norm * half, ay / norm * half
+            segments.append((QPointF(mid.x() - hx, mid.y() - hy), QPointF(mid.x() + hx, mid.y() + hy)))
+
+        for width, color in (
+            ((line_width + outline_width * 2) / stroke_scale, outline_color),
+            (line_width / stroke_scale, line_color),
+        ):
+            pen = QPen(color)
+            pen.setWidthF(width)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            for a, b in segments:
+                painter.drawLine(a, b)
+
     def _draw_measurement_label(
         self,
         painter: QPainter,
@@ -935,17 +1070,24 @@ class MeasurementOverlay(Overlay):
         mouse event can hit-test against it — see _hit_test_tag.
         """
         dims = self._reference_dims(full_dims)
-        text_and_anchor = self._measurement_label(measurement.kind, measurement.points, measurement.meta, full_dims, dims)
+        meta = measurement.meta
+        text_and_anchor = self._measurement_label(measurement.kind, measurement.points, meta, full_dims, dims)
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
-        meta = measurement.meta
+        description = meta.description if meta.always_show_description else None
+        # Feature 12: with no title and the measurement hidden (so no
+        # value suffix either), the tag shows only if a description is
+        # set to always show — otherwise there's nothing worth a box.
+        if not text and not description:
+            return
         box, delete_box = self._draw_label(
             painter, rect, anchor, text, scale_x, scale_y,
             show_delete=index == self._hovered_index,
             bg_color=self._resolve_color(meta.tag_background_color, OVERLAY_LINE_COLOR),
             text_color=self._resolve_color(meta.tag_text_color, OVERLAY_OUTLINE_COLOR),
-            description=meta.description if meta.always_show_description else None,
+            description=description,
+            transparent_bg=meta.tag_background_transparent,
         )
         self._label_boxes[index] = box
         if delete_box is not None:
@@ -991,6 +1133,8 @@ class MeasurementOverlay(Overlay):
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
+        if not text:
+            return
         self._draw_label(painter, rect, anchor, text, scale_x, scale_y)
 
     def _measurement_label(
@@ -1027,32 +1171,37 @@ class MeasurementOverlay(Overlay):
             return None
 
         unit = meta.unit if meta.unit is not None else self._unit
+        decimals = meta.decimal_places
 
         if entry.category == "line":
-            suffix = self._length_suffix(points, dims, unit)
-            text = self._compose_label_text(meta.title, suffix)
-            return (text, self._midpoint(points)) if text else None
-
-        if entry.category == "circle":
+            suffix = None if meta.hidden else self._length_suffix(points, dims, unit, decimals)
+            anchor = self._midpoint(points)
+        elif entry.category == "circle":
             if full_dims is None:
                 return None
             geometry = self._circle_geometry(kind, points, full_dims)
             if geometry is None:
                 return None
-            center, _radius_px = geometry
+            anchor, _radius_px = geometry
             suffix = None
-            if self.dpi is not None and dims is not None:
+            if not meta.hidden and self.dpi is not None and dims is not None:
                 suffix_geometry = self._circle_geometry(kind, points, dims)
                 if suffix_geometry is not None:
                     _, suffix_radius_px = suffix_geometry
-                    suffix = f"\u00d8 {format_length(suffix_radius_px * 2, self.dpi, unit)}"
-            text = self._compose_label_text(meta.title, suffix)
-            return (text, center) if text else None
+                    suffix = f"\u00d8 {format_length(suffix_radius_px * 2, self.dpi, unit, decimals)}"
+                    if meta.show_area:
+                        area_unit = meta.area_unit if meta.area_unit is not None else unit
+                        area_px = math.pi * suffix_radius_px * suffix_radius_px
+                        suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi, area_unit, decimals)}"
+        else:
+            if not points:
+                return None
+            anchor = points[0]
+            suffix = None
 
-        if not points:
-            return None
-        text = self._compose_label_text(meta.title, None)
-        return (text, points[0]) if text else None
+        text = self._compose_label_text(meta.title, suffix)
+        anchor = (anchor[0] + meta.tag_offset_x, anchor[1] + meta.tag_offset_y)
+        return text, anchor
 
     @staticmethod
     def _compose_label_text(title: str, suffix: str | None) -> str:
@@ -1065,13 +1214,14 @@ class MeasurementOverlay(Overlay):
         points: tuple[tuple[float, float], ...],
         full_dims: tuple[int, int] | None,
         unit: MeasurementUnit,
+        decimals: int = 2,
     ) -> str | None:
         if full_dims is None or self.dpi is None:
             return None
         length_px = self._polyline_length_px(points, full_dims)
         if length_px <= 0:
             return None
-        return format_length(length_px, self.dpi, unit)
+        return format_length(length_px, self.dpi, unit, decimals)
 
     @staticmethod
     def _polyline_length_px(points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]) -> float:
@@ -1132,6 +1282,7 @@ class MeasurementOverlay(Overlay):
         bg_color: QColor = OVERLAY_LINE_COLOR,
         text_color: QColor = OVERLAY_OUTLINE_COLOR,
         description: str | None = None,
+        transparent_bg: bool = False,
     ) -> tuple[QRectF, QRectF | None]:
         """
         Rounded-rect background (bg_color, defaulting to white) with a
@@ -1182,10 +1333,13 @@ class MeasurementOverlay(Overlay):
         pad_y = OVERLAY_LABEL_PADDING_Y
         delete_width = (OVERLAY_DELETE_SIZE + OVERLAY_DELETE_MARGIN) if show_delete else 0.0
 
-        text_line_height = metrics.height() + pad_y * 2
-        text_w = metrics.horizontalAdvance(text)
-        box_w = text_w + pad_x * 2 + delete_width
-        text_area_w = text_w  # description wraps within the title's own width rather than widening the box
+        # With no title line (a description-only tag — see feature 12),
+        # there's no title row or divider, and the box is sized to the
+        # description's own wrapped width rather than the title's.
+        has_title = bool(text)
+        text_line_height = (metrics.height() + pad_y * 2) if has_title else 0.0
+        text_w = metrics.horizontalAdvance(text) if has_title else 0.0
+        wrap_width = text_w if has_title else _DESC_ONLY_WRAP_WIDTH
 
         desc_font: QFont | None = None
         desc_block_height = 0.0
@@ -1195,13 +1349,15 @@ class MeasurementOverlay(Overlay):
             desc_font.setPixelSize(max(1, round(OVERLAY_LABEL_FONT_SIZE - 2)))
             desc_metrics = QFontMetricsF(desc_font)
             desc_wrap_rect = desc_metrics.boundingRect(
-                QRectF(0, 0, max(text_area_w, 1.0), 10_000), Qt.TextFlag.TextWordWrap, description
+                QRectF(0, 0, max(wrap_width, 1.0), 10_000), Qt.TextFlag.TextWordWrap, description
             )
             # Extra padding above and below (not just the usual pad_y)
             # so the description reads as its own block under the
             # divider rather than crowding it.
-            desc_block_height = desc_wrap_rect.height() + pad_y * 3
+            desc_block_height = desc_wrap_rect.height() + (pad_y * 3 if has_title else pad_y * 2)
 
+        content_width = text_w if has_title else desc_wrap_rect.width()
+        box_w = content_width + pad_x * 2 + delete_width
         box_h = text_line_height + desc_block_height
 
         local_box = QRectF(-box_w / 2, -OVERLAY_LABEL_OFFSET - box_h, box_w, box_h)
@@ -1212,20 +1368,36 @@ class MeasurementOverlay(Overlay):
             painter.scale(1.0 / scale_x, 1.0 / scale_y)
 
         painter.setFont(font)
-        painter.setPen(QPen(OVERLAY_TAG_HOVER_COLOR if show_delete else OVERLAY_OUTLINE_COLOR, OVERLAY_OUTLINE_WIDTH))
-        painter.setBrush(QBrush(bg_color))
+        # A transparent tag paints no fill (feature 9), and drops its
+        # border too unless hovered — the hover outline is the click
+        # affordance and always shows regardless.
+        if show_delete:
+            painter.setPen(QPen(OVERLAY_TAG_HOVER_COLOR, OVERLAY_OUTLINE_WIDTH))
+        elif transparent_bg:
+            painter.setPen(Qt.PenStyle.NoPen)
+        else:
+            painter.setPen(QPen(OVERLAY_OUTLINE_COLOR, OVERLAY_OUTLINE_WIDTH))
+        painter.setBrush(Qt.BrushStyle.NoBrush if transparent_bg else QBrush(bg_color))
         painter.drawRoundedRect(local_box, OVERLAY_LABEL_CORNER_RADIUS, OVERLAY_LABEL_CORNER_RADIUS)
 
         content_w = local_box.width() - delete_width
-        painter.setPen(QPen(text_color))
-        painter.drawText(QRectF(local_box.x(), local_box.y(), content_w, text_line_height), Qt.AlignmentFlag.AlignCenter, text)
+        if has_title:
+            painter.setPen(QPen(text_color))
+            painter.drawText(
+                QRectF(local_box.x(), local_box.y(), content_w, text_line_height),
+                Qt.AlignmentFlag.AlignCenter, text,
+            )
 
         if description:
-            divider_y = local_box.top() + text_line_height
-            divider_pen = QPen(text_color)
-            divider_pen.setWidthF(1.0)
-            painter.setPen(divider_pen)
-            painter.drawLine(QPointF(local_box.left(), divider_y), QPointF(local_box.right(), divider_y))
+            desc_top = local_box.top() + text_line_height
+            if has_title:
+                divider_pen = QPen(text_color)
+                divider_pen.setWidthF(1.0)
+                painter.setPen(divider_pen)
+                painter.drawLine(QPointF(local_box.left(), desc_top), QPointF(local_box.right(), desc_top))
+                desc_top += pad_y * 1.5
+            else:
+                desc_top += pad_y
 
             muted = QColor(text_color)
             muted.setAlpha(180)
@@ -1233,7 +1405,7 @@ class MeasurementOverlay(Overlay):
             painter.setPen(QPen(muted))
             desc_box = QRectF(
                 local_box.x() + (content_w - desc_wrap_rect.width()) / 2,
-                divider_y + pad_y * 1.5,
+                desc_top,
                 desc_wrap_rect.width(),
                 desc_wrap_rect.height(),
             )
@@ -1449,8 +1621,10 @@ class MeasurementOverlay(Overlay):
 
         total_outline_width = line_width + outline_width * 2
         pattern = None if dashed else resolve_dash_pattern(dash_style, line_width)
+        dash_cap = Qt.PenCapStyle.RoundCap if dash_style in ROUND_CAP_DASH_STYLES else Qt.PenCapStyle.FlatCap
         outline = QPen(outline_color)
         outline.setWidthF(total_outline_width / stroke_scale)
+        outline.setCapStyle(dash_cap)
         self._apply_dash(outline, total_outline_width, dashed, pattern)
         painter.setPen(outline)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1458,6 +1632,7 @@ class MeasurementOverlay(Overlay):
 
         fill = QPen(line_color)
         fill.setWidthF(line_width / stroke_scale)
+        fill.setCapStyle(dash_cap)
         self._apply_dash(fill, line_width, dashed, pattern)
         painter.setPen(fill)
         painter.drawEllipse(center_point, rx, ry)
@@ -1592,8 +1767,9 @@ class MeasurementOverlay(Overlay):
         # widths.
         outline_pattern = [value / total_outline_width for value in pattern] if pattern else None
         fill_pattern = [value / line_width for value in pattern] if pattern else None
-        outline_path = self._stroke_path(body_p1, body_p2, total_outline_width / stroke_scale, outline_pattern)
-        fill_path = self._stroke_path(body_p1, body_p2, lw, fill_pattern)
+        round_caps = dash_style in ROUND_CAP_DASH_STYLES
+        outline_path = self._stroke_path(body_p1, body_p2, total_outline_width / stroke_scale, outline_pattern, round_caps)
+        fill_path = self._stroke_path(body_p1, body_p2, lw, fill_pattern, round_caps)
         for origin, tip, cap in ((p2, p1, start_cap), (p1, p2, end_cap)):
             cap_outline, cap_fill = self._cap_shapes(origin, tip, cap, lw, ow)
             if cap_outline is not None:
@@ -1622,13 +1798,20 @@ class MeasurementOverlay(Overlay):
         return 0.0
 
     @staticmethod
-    def _stroke_path(p1: QPointF, p2: QPointF, width: float, dash_pattern: list[float] | None = None) -> QPainterPath:
-        """A filled flat-ended band from *p1* to *p2*, *width* wide (or that band split into dashes, given a *dash_pattern* already normalized to multiples of *width*) — the shaft as a shape rather than a stroked QPen line, so it can be unioned with a cap's own shape into one seamless path. Flat rather than round-ended so it never bulges past a true endpoint on its own; "curved" gets its round look from an explicit disc unioned in by _cap_shapes instead, the same way "square"/"arrow" get theirs."""
+    def _stroke_path(
+        p1: QPointF, p2: QPointF, width: float, dash_pattern: list[float] | None = None, round_caps: bool = False
+    ) -> QPainterPath:
+        """A filled flat-ended band from *p1* to *p2*, *width* wide (or that band split into dashes, given a *dash_pattern* already normalized to multiples of *width*) — the shaft as a shape rather than a stroked QPen line, so it can be unioned with a cap's own shape into one seamless path. Flat rather than round-ended so it never bulges past a true endpoint on its own; "curved" gets its round look from an explicit disc unioned in by _cap_shapes instead, the same way "square"/"arrow" get theirs. *round_caps* rounds each dash instead (turning a near-zero on-segment into a circular dot — see ROUND_CAP_DASH_STYLES)."""
         line = QPainterPath()
         line.moveTo(p1)
         line.lineTo(p2)
         stroker = QPainterPathStroker()
         stroker.setWidth(width)
+        if round_caps:
+            stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+            if dash_pattern:
+                stroker.setDashPattern(dash_pattern)
+            return stroker.createStroke(line)
         # A dashed shaft needs each dash's own ends covered too — a
         # FlatCap here leaves the fill dash's flat end flush with the
         # outline dash's identical flat end, so the fill covers the
@@ -1694,16 +1877,22 @@ class MeasurementOverlay(Overlay):
         elif cap == "arrow_open":
             barbs = open_arrow_barbs_path(lw)
 
+            # MiterJoin (not RoundJoin) at the barbs' shared apex so the
+            # tip comes to a sharp point like the solid arrow's, rather
+            # than the rounded nub a round join leaves; the outer barb
+            # ends stay round.
             fill_stroker = QPainterPathStroker()
             fill_stroker.setWidth(lw)
             fill_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
-            fill_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            fill_stroker.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+            fill_stroker.setMiterLimit(10.0)
             fill_shape = fill_stroker.createStroke(barbs)
 
             outline_stroker = QPainterPathStroker()
             outline_stroker.setWidth(lw + ow * 2)
             outline_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
-            outline_stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            outline_stroker.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+            outline_stroker.setMiterLimit(10.0)
             outline_shape = outline_stroker.createStroke(barbs)
         else:  # "curved" (and any unrecognized style, as a safe default)
             fill_shape = QPainterPath()
