@@ -41,7 +41,7 @@ from UI.widgets.preview_overlay.measurement_customize_menu import (
 )
 from UI.widgets.preview_overlay.measurement_overlay import MEASUREMENT_DASH_PATTERNS
 
-GRID_COLUMNS = 4
+GRID_COLUMNS = 3
 
 _MEASUREMENT_TYPES = (
     PointMeasurement,
@@ -108,15 +108,11 @@ class MeasurementsWidget(QWidget):
     """
 
     selection_changed = Signal(object)  # str | None
-    unit_changed = Signal(object)  # MeasurementUnit
     dpi_value_submitted = Signal(float)
     manual_calibration_started = Signal()
     calibration_dpi_submitted = Signal(float, object)  # value, MeasurementUnit
     calibration_cancelled = Signal()
     default_meta_changed = Signal(object)  # MeasurementMeta, applied to newly placed measurements
-    export_measurements_requested = Signal()
-    import_measurements_requested = Signal()
-    export_image_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -145,16 +141,6 @@ class MeasurementsWidget(QWidget):
         self._calibration_panel.setVisible(False)
         outer_layout.addWidget(self._calibration_panel)
 
-        unit_row = QHBoxLayout()
-        unit_row.addWidget(QLabel("Unit:"))
-        self._unit_combo = QComboBox()
-        for unit in MeasurementUnit:
-            self._unit_combo.addItem(unit.value, unit)
-        self._unit_combo.setCurrentIndex(self._unit_combo.findData(MeasurementUnit.MM))
-        self._unit_combo.currentIndexChanged.connect(self._on_unit_index_changed)
-        unit_row.addWidget(self._unit_combo, 1)
-        outer_layout.addLayout(unit_row)
-
         group = QGroupBox("Measurement Types")
         grid = QGridLayout(group)
         grid.setContentsMargins(4, 12, 4, 4)
@@ -170,21 +156,6 @@ class MeasurementsWidget(QWidget):
 
         self._customize_panel = self._build_customize_panel()
         outer_layout.addWidget(self._customize_panel)
-
-        data_group = QGroupBox("Import / Export")
-        data_layout = QVBoxLayout(data_group)
-        export_row = QHBoxLayout()
-        export_button = QPushButton("Export...")
-        export_button.clicked.connect(self.export_measurements_requested)
-        import_button = QPushButton("Import...")
-        import_button.clicked.connect(self.import_measurements_requested)
-        export_row.addWidget(export_button)
-        export_row.addWidget(import_button)
-        data_layout.addLayout(export_row)
-        export_image_button = QPushButton("Export Image with Measurements...")
-        export_image_button.clicked.connect(self.export_image_requested)
-        data_layout.addWidget(export_image_button)
-        outer_layout.addWidget(data_group)
 
     def _build_customize_panel(self) -> QGroupBox:
         """
@@ -299,8 +270,8 @@ class MeasurementsWidget(QWidget):
         self._set_default_outline_controls_visible(self._default_outline_enabled_check.isChecked())
         self._on_default_meta_edited()
 
-    def _on_default_meta_edited(self, *_args: object) -> None:
-        meta = MeasurementMeta(
+    def _build_default_meta(self) -> MeasurementMeta:
+        return MeasurementMeta(
             title=self._default_title_edit.text().strip(),
             unit=self._default_unit_combo.currentData(),
             always_show_description=self._default_always_show_description_check.isChecked(),
@@ -315,7 +286,13 @@ class MeasurementsWidget(QWidget):
             outline_color=self._default_outline_color_picker.color(),
             outline_thickness=self._default_outline_thickness_control.value(),
         )
-        self.default_meta_changed.emit(meta)
+
+    def current_default_meta(self) -> MeasurementMeta:
+        """The Customize Measurements panel's current template — used to seed the preview's fallback unit/default meta at startup, since this panel (not the removed top-level unit dropdown) is now the only source of a newly placed measurement's unit."""
+        return self._build_default_meta()
+
+    def _on_default_meta_edited(self, *_args: object) -> None:
+        self.default_meta_changed.emit(self._build_default_meta())
 
     def _build_calibration_panel(self) -> QGroupBox:
         panel = QGroupBox("DPI Calibration")
@@ -382,9 +359,6 @@ class MeasurementsWidget(QWidget):
         button = self._button_group.checkedButton()
         return button.name if button is not None else None
 
-    def current_unit(self) -> MeasurementUnit:
-        return self._unit_combo.currentData()
-
     def set_dpi_display(self, dpi: float | None, is_live: bool) -> None:
         self._current_dpi = dpi
         self._dpi_label.setText(f"DPI: {dpi:g}" if dpi is not None else "DPI: not set")
@@ -408,9 +382,6 @@ class MeasurementsWidget(QWidget):
         self._button_group.setExclusive(True)
         self._selected_button = None
         self.selection_changed.emit(None)
-
-    def _on_unit_index_changed(self, index: int) -> None:
-        self.unit_changed.emit(self._unit_combo.itemData(index))
 
     def _on_calibrate_dpi_clicked(self) -> None:
         if self._calibration_panel.isVisible():

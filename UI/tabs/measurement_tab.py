@@ -1,25 +1,28 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import (
-    QFileDialog,
     QVBoxLayout,
     QWidget,
     QScrollArea,
     QFrame,
 )
-from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
+
+# Narrower than the shared RIGHT_SIDEBAR_WIDTH (380px) — this tab's tile
+# grid only needs GRID_COLUMNS(3) * TILE_WIDTH(84) + margins wide, so the
+# full shared width leaves the tab looking sparse; see _wrap_scroll for
+# the scrollbar-width compensation that keeps this figure accurate even
+# once a vertical scrollbar appears.
+_SIDEBAR_WIDTH = 340
 
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.capture_control_widget import CaptureControlWidget
 from UI.widgets.measurements_widget import MeasurementsWidget
 from UI.widgets.measurements.measurement_meta import MeasurementMeta
-from UI.widgets.measurements.units import MeasurementUnit
 from UI.widgets.preview_overlay.interaction_mode import MEASUREMENT_MODE, ModeToken
 
 from common.app_context import get_app_context, open_settings
-from common.logger import warning
 
 
 class MeasurementTab(CameraWithSidebarPage):
@@ -29,17 +32,13 @@ class MeasurementTab(CameraWithSidebarPage):
         self._mode_token: ModeToken | None = None
 
         self._measurements.selection_changed.connect(self._on_measurement_selected)
-        self._measurements.unit_changed.connect(self._on_unit_changed)
         self._measurements.default_meta_changed.connect(self._on_default_meta_changed)
-        self._on_unit_changed(self._measurements.current_unit())
+        self._on_default_meta_changed(self._measurements.current_default_meta())
 
         self._measurements.dpi_value_submitted.connect(self._capture_control.submit_dpi_value)
         self._measurements.manual_calibration_started.connect(self._capture_control.request_manual_calibration)
         self._measurements.calibration_dpi_submitted.connect(self._capture_control.submit_calibration_dpi)
         self._measurements.calibration_cancelled.connect(self._capture_control.cancel_calibration)
-        self._measurements.export_measurements_requested.connect(self._on_export_measurements_clicked)
-        self._measurements.import_measurements_requested.connect(self._on_import_measurements_clicked)
-        self._measurements.export_image_requested.connect(self._on_export_image_clicked)
 
         self._capture_control.dpi_changed.connect(self._measurements.set_dpi_display)
         self._capture_control.calibration_line_ready.connect(self._measurements.set_calibration_line_ready)
@@ -50,7 +49,7 @@ class MeasurementTab(CameraWithSidebarPage):
 
     def _make_sidebar(self) -> QWidget:
         sidebar_container = QWidget()
-        sidebar_container.setFixedWidth(RIGHT_SIDEBAR_WIDTH)
+        sidebar_container.setFixedWidth(_SIDEBAR_WIDTH)
 
         sidebar_layout = QVBoxLayout(sidebar_container)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
@@ -70,14 +69,35 @@ class MeasurementTab(CameraWithSidebarPage):
         content_layout.addWidget(measurements)
 
         content_layout.addStretch(1)
-        sidebar_layout.addWidget(self._wrap_scroll(content), 1)
+        sidebar_layout.addWidget(self._wrap_scroll(content, sidebar_container), 1)
         return sidebar_container
 
-    def _wrap_scroll(self, widget: QWidget) -> QScrollArea:
+    def _wrap_scroll(self, widget: QWidget, sidebar: QWidget) -> QScrollArea:
+        """
+        Disables the horizontal scrollbar outright and grows *sidebar*
+        by exactly the vertical scrollbar's own width whenever one
+        appears — same pattern as every other tab's sidebar (see
+        ProjectTab._wrap_scroll) — rather than letting a vertical
+        scrollbar eat into the tile grid's already-tight width budget
+        and force a second, horizontal scrollbar.
+        """
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(widget)
+
+        scrollbar_width = scroll.style().pixelMetric(
+            scroll.style().PixelMetric.PM_ScrollBarExtent
+        )
+
+        def _on_range_changed(min_val: int, max_val: int) -> None:
+            needed = max_val > min_val
+            sidebar.setFixedWidth(_SIDEBAR_WIDTH + (scrollbar_width if needed else 0))
+            self.set_sidebar_flush_right(needed)
+
+        scroll.verticalScrollBar().rangeChanged.connect(_on_range_changed)
         return scroll
 
     # ------------------------------------------------------------------
@@ -110,69 +130,14 @@ class MeasurementTab(CameraWithSidebarPage):
         if kind is not None:
             self._capture_control.cancel_calibration()
 
-    def _on_unit_changed(self, unit: MeasurementUnit) -> None:
-        preview = get_app_context().camera_preview
-        if preview is not None:
-            preview.overlays.measurement.set_unit(unit)
-
     def _on_default_meta_changed(self, meta: MeasurementMeta) -> None:
         preview = get_app_context().camera_preview
         if preview is not None:
             preview.overlays.measurement.set_default_meta(meta)
-
-    # ------------------------------------------------------------------
-    # Import/export — see MeasurementOverlayController and measurement_io.py
-    # for the actual serialization/validation; this just supplies the
-    # file dialogs and toast feedback.
-    # ------------------------------------------------------------------
-
-    def _on_export_measurements_clicked(self) -> None:
-        preview = get_app_context().camera_preview
-        if preview is None:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Measurements", "", "Measurement files (*.json)")
-        if not path:
-            return
-        if not path.lower().endswith(".json"):
-            path += ".json"
-        preview.overlays.measurement.export_measurements_to_file(path)
-        ctx = get_app_context()
-        if ctx.toast is not None:
-            ctx.toast.success(path, title="Measurements Exported")
-
-    def _on_import_measurements_clicked(self) -> None:
-        preview = get_app_context().camera_preview
-        if preview is None:
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "Import Measurements", "", "Measurement files (*.json)")
-        if not path:
-            return
-        result = preview.overlays.measurement.import_measurements_from_file(path)
-        for issue in result.warnings:
-            warning(f"[MeasurementImport] {issue}")
-        ctx = get_app_context()
-        if ctx.toast is None:
-            return
-        if result.warnings:
-            ctx.toast.warning(f"{len(result.entries)} loaded, {len(result.warnings)} skipped — see log", title="Import Completed With Issues")
-        else:
-            ctx.toast.success(f"{len(result.entries)} measurement(s) loaded", title="Measurements Imported")
-
-    def _on_export_image_clicked(self) -> None:
-        preview = get_app_context().camera_preview
-        ctx = get_app_context()
-        if preview is None:
-            return
-        image = preview.export_measurement_image()
-        if image is None:
-            if ctx.toast is not None:
-                ctx.toast.warning("Nothing to export yet", title="Export Image")
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Image with Measurements", "", "PNG image (*.png)")
-        if not path:
-            return
-        if not path.lower().endswith(".png"):
-            path += ".png"
-        image.save(path)
-        if ctx.toast is not None:
-            ctx.toast.success(path, title="Image Exported")
+            # meta.unit is always concrete now that the Customize panel's
+            # own combo is the only source of a default unit (see
+            # MeasurementsWidget.current_default_meta) — keeps
+            # MeasurementOverlay._unit's fallback (used only when an
+            # imported measurement has no unit override) in sync with
+            # whatever the panel currently has selected.
+            preview.overlays.measurement.set_unit(meta.unit)

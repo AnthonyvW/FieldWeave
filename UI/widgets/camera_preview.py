@@ -150,44 +150,6 @@ class OverlayLabel(QLabel):
         """
         self._content_dims = dims
 
-    def render_content_pixmap(self) -> QPixmap | None:
-        """
-        Render just the image content and its active overlays onto a fresh,
-        isolated pixmap — sized to the actual image (no letterbox bars) and
-        painted directly from the stored pixmap and each overlay's own
-        ``draw()``, with no other widget in the picture at all. This is
-        deliberately not a grab()/render() of the live widget tree: sibling
-        widgets (the crosshair/grid/zoom toolbar buttons, which sit on top
-        of this label at the same screen position) have shown up in a
-        plain widget grab in practice, and painting onto a bare QPixmap
-        here can't pick them up regardless. Used for "capture with UI"
-        style photos. Returns None if there's nothing to render yet.
-        """
-        pixmap = self.pixmap()
-        has_pixmap = pixmap is not None and not pixmap.isNull() and pixmap.width() > 0 and pixmap.height() > 0
-        if not has_pixmap and self._content_dims is None:
-            return None
-
-        display_rect = self._display_rect(pixmap if has_pixmap else None)
-        if display_rect.isEmpty():
-            return None
-
-        content = QPixmap(display_rect.size())
-        content.fill(Qt.GlobalColor.black)
-
-        painter = QPainter(content)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if has_pixmap:
-            painter.drawPixmap(0, 0, pixmap)
-        # Overlays draw using this label's own (larger, letterboxed)
-        # coordinate space; shift so display_rect's origin lands at (0, 0)
-        # on this smaller, isolated canvas.
-        painter.translate(-display_rect.topLeft())
-        self._paint_overlays(painter, display_rect)
-        painter.end()
-
-        return content
-
     def add_overlay(self, overlay: Overlay) -> None:
         self._overlays.append(overlay)
 
@@ -456,11 +418,8 @@ class OverlayLabel(QLabel):
 
     def _paint_overlays(self, painter: QPainter, display_rect: QRect) -> None:
         """
-        Draw every active overlay against *display_rect*. Shared by
-        ``paintEvent`` (drawing onto this label, in its own coordinate
-        space) and ``render_content_pixmap`` (drawing onto an isolated,
-        differently-offset canvas) — both hand this the same *display_rect*
-        and let the transform math work out identically either way.
+        Draw every active overlay against *display_rect*, in this
+        label's own coordinate space — called from ``paintEvent``.
         """
         pen = QPen(QColor(0, 0, 0, 180))
         pen.setWidth(2)
@@ -551,6 +510,8 @@ class OverlayController:
     @focus.setter
     def focus(self, enabled: bool) -> None:
         self._preview._focus_overlay.set_enabled(enabled)
+        if enabled:
+            self._preview._refresh_loaded_image_analysis()
         self._preview._video_label.update()
 
     @property
@@ -560,6 +521,8 @@ class OverlayController:
     @inspect_calibration.setter
     def inspect_calibration(self, enabled: bool) -> None:
         self._preview._inspect_calibration_overlay.set_enabled(enabled)
+        if enabled:
+            self._preview._refresh_loaded_image_analysis()
         self._preview._video_label.update()
 
     @property
@@ -569,6 +532,8 @@ class OverlayController:
     @red_mark.setter
     def red_mark(self, enabled: bool) -> None:
         self._preview._red_mark_overlay.set_enabled(enabled)
+        if enabled:
+            self._preview._refresh_loaded_image_analysis()
         self._preview._video_label.update()
 
     @property
@@ -578,6 +543,8 @@ class OverlayController:
     @background.setter
     def background(self, enabled: bool) -> None:
         self._preview._background_overlay.set_enabled(enabled)
+        if enabled:
+            self._preview._refresh_loaded_image_analysis()
         self._preview._video_label.update()
 
     @property
@@ -614,6 +581,7 @@ class OverlayController:
         """
         self._preview._loaded_image_overlay.set_enabled(enabled)
         self._sync_content_dims()
+        self._preview._refresh_loaded_image_analysis()
         self._preview._video_label.refresh_cursor()
         self._preview._video_label.update()
 
@@ -633,6 +601,7 @@ class OverlayController:
         self._preview._loaded_image_overlay.set_source(source)
         self._preview._zoom_preview_overlay.reset_loaded()
         self._sync_content_dims()
+        self._preview._refresh_loaded_image_analysis()
         self._preview._video_label.update()
 
     def _confirm_discard_measurements(self) -> bool:
@@ -865,19 +834,36 @@ class CameraPreview(QFrame):
             self._loaded_image_seen_version = version
             self._video_label.update()
 
-    def grab_display(self) -> QPixmap:
+    def _current_full_frame_image(self) -> QImage | None:
         """
-        Render just the image content and its active overlays — crosshair,
-        grid, the loaded-image overlay, and so on — excluding letterbox
-        bars and, just as importantly, excluding the toolbar buttons
-        overlaid on this widget (crosshair/grid/zoom/etc.), which sit at
-        the same screen position as the label and can otherwise end up in
-        a plain widget grab. Used for "capture with UI" style photos, as
-        opposed to a raw sensor capture via the camera itself. Returns a
-        null QPixmap if there's nothing to capture yet.
+        The current full-resolution base image — the loaded image's own
+        true-resolution pixels if one is active, otherwise the last live
+        frame — with no measurements burned in. None if there's nothing
+        to export yet. Shared by export_plain_image and
+        export_measurement_image.
         """
-        content = self._video_label.render_content_pixmap()
-        return content if content is not None else QPixmap()
+        loaded_source = self._loaded_image_overlay.source if self._loaded_image_overlay.enabled else None
+        if loaded_source is not None:
+            full_h, full_w = loaded_source.dims()
+            if full_w <= 0 or full_h <= 0:
+                return None
+            array = loaded_source.region((0, 0, full_w, full_h), 1)
+            return QImage(
+                array.data, array.shape[1], array.shape[0], array.strides[0], QImage.Format.Format_RGB888
+            ).copy()
+        if self._last_full_image is None:
+            return None
+        return self._last_full_image.copy()
+
+    def export_plain_image(self) -> QImage | None:
+        """
+        The current full-resolution base image with no measurements
+        burned in at all — pairs with a measurements JSON sidecar
+        (MeasurementOverlayController.export_measurements_to_file)
+        rather than baking measurements into pixels. Returns None if
+        there's nothing to export yet.
+        """
+        return self._current_full_frame_image()
 
     def export_measurement_image(self) -> QImage | None:
         """
@@ -890,20 +876,45 @@ class CameraPreview(QFrame):
         MeasurementOverlay.draw_placed_measurements_with_coordinate_space.
         Returns None if there's nothing to export yet.
         """
-        loaded_source = self._loaded_image_overlay.source if self._loaded_image_overlay.enabled else None
-        if loaded_source is not None:
-            full_h, full_w = loaded_source.dims()
-            if full_w <= 0 or full_h <= 0:
+        image = self._current_full_frame_image()
+        if image is None:
+            return None
+        return self._burn_in_measurements(image)
+
+    def export_preview_measurement_image(self) -> QImage | None:
+        """
+        Preview-resolution sibling to export_measurement_image — the
+        base image is the loaded image's own resident thumbnail, or the
+        last live frame scaled to the video label's current displayed
+        size, with measurements burned in the same way. Deliberately
+        doesn't paint the label's own active overlays (the old "Take
+        Photo with UI" screenshot approach did) — that would also draw
+        ZoomPreviewOverlay's own crop/minimap chrome, which doesn't
+        belong in an exported image. Returns None if there's nothing to
+        export yet.
+        """
+        if self._loaded_image_overlay.enabled:
+            source = self._loaded_image_overlay.source
+            if source is None or source.preview is None:
                 return None
-            array = loaded_source.region((0, 0, full_w, full_h), 1)
+            array = np.ascontiguousarray(source.preview)
             image = QImage(
                 array.data, array.shape[1], array.shape[0], array.strides[0], QImage.Format.Format_RGB888
             ).copy()
         else:
             if self._last_full_image is None:
                 return None
-            image = self._last_full_image.copy()
+            lw = self._video_label.width()
+            lh = self._video_label.height()
+            if lw <= 0 or lh <= 0:
+                return None
+            image = self._last_full_image.scaled(
+                lw, lh, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
+            )
+        return self._burn_in_measurements(image)
 
+    def _burn_in_measurements(self, image: QImage) -> QImage:
+        """Paint every placed measurement onto *image* (already the exact size to export at) via IdentityCoordinateSpace — shared by export_measurement_image and export_preview_measurement_image."""
         rect = QRect(0, 0, image.width(), image.height())
         coords = IdentityCoordinateSpace((image.width(), image.height()))
         painter = QPainter(image)
@@ -911,6 +922,39 @@ class CameraPreview(QFrame):
         self._measurement_overlay.draw_placed_measurements_with_coordinate_space(painter, rect, coords)
         painter.end()
         return image
+
+    def _refresh_loaded_image_analysis(self) -> None:
+        """
+        Feed a frame from the loaded static image to whichever
+        machine-vision overlays (focus, inspect-calibration, red-mark,
+        background) are currently enabled.
+
+        ``_render_display`` early-returns while the loaded-image overlay
+        is shown (see its own comment there) so these overlays never see
+        a live per-frame call to ``update_full`` — without this, toggling
+        one on over a loaded image draws nothing at all. Call this only
+        from explicit trigger points (a loaded image or one of these
+        overlays being toggled on) rather than any per-frame path, so
+        the early return's whole point — not redoing this work at the
+        live frame rate — still holds.
+        """
+        if not self._loaded_image_overlay.enabled:
+            return
+        source = self._loaded_image_overlay.source
+        if source is None:
+            return
+        full_h, full_w = source.dims()
+        if full_w <= 0 or full_h <= 0:
+            return
+        array = source.region((0, 0, full_w, full_h), 1)
+        for overlay in (
+            self._focus_overlay,
+            self._inspect_calibration_overlay,
+            self._red_mark_overlay,
+            self._background_overlay,
+        ):
+            if overlay.enabled:
+                overlay.update_full(array)
 
     @property
     def overlays(self) -> OverlayController:
@@ -986,6 +1030,7 @@ class CameraPreview(QFrame):
         self._red_mark_overlay.set_enabled(red_mark)
         self._inspect_calibration_overlay.set_enabled(scale)
         self._background_overlay.set_enabled(background)
+        self._refresh_loaded_image_analysis()
         self._video_label.update()
 
     def _on_zoom_step(self, direction: int) -> None:

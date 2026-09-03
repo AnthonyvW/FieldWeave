@@ -935,7 +935,7 @@ class MeasurementOverlay(Overlay):
         mouse event can hit-test against it — see _hit_test_tag.
         """
         dims = self._reference_dims(full_dims)
-        text_and_anchor = self._measurement_label(measurement.kind, measurement.points, measurement.meta, dims)
+        text_and_anchor = self._measurement_label(measurement.kind, measurement.points, measurement.meta, full_dims, dims)
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
@@ -987,7 +987,7 @@ class MeasurementOverlay(Overlay):
         _label_boxes/_delete_boxes.
         """
         dims = self._reference_dims(full_dims)
-        text_and_anchor = self._measurement_label(kind, points, self._default_meta, dims)
+        text_and_anchor = self._measurement_label(kind, points, self._default_meta, full_dims, dims)
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
@@ -999,6 +999,7 @@ class MeasurementOverlay(Overlay):
         points: tuple[tuple[float, float], ...],
         meta: MeasurementMeta,
         full_dims: tuple[int, int] | None,
+        dims: tuple[int, int] | None,
     ) -> tuple[str, tuple[float, float]] | None:
         """
         Text and anchor for *kind*'s tag: its title (only if one was
@@ -1009,6 +1010,17 @@ class MeasurementOverlay(Overlay):
         behavior — a "Point" with no title never has anything to show,
         and a line/circle placed before DPI is set stays untagged until
         either a title or DPI arrives.
+
+        *full_dims* (raw, matching whatever the shape was actually drawn
+        against — see _draw_circle) anchors a circle's tag; *dims* (the
+        DPI reference resolution — see _reference_dims) sizes the
+        length/diameter suffix. The two differ for live view (the
+        preview stream vs. the still-capture resolution DPI was
+        calibrated against) — a circle's center is a nonlinear function
+        of aspect ratio for "3 Point Circle" (not for "Radius Circle"/
+        "Diameter", whose center formula is aspect-invariant), so
+        anchoring against one dims and measuring against the other
+        visibly mislocates the tag.
         """
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None or not entry.has_label:
@@ -1017,7 +1029,7 @@ class MeasurementOverlay(Overlay):
         unit = meta.unit if meta.unit is not None else self._unit
 
         if entry.category == "line":
-            suffix = self._length_suffix(points, full_dims, unit)
+            suffix = self._length_suffix(points, dims, unit)
             text = self._compose_label_text(meta.title, suffix)
             return (text, self._midpoint(points)) if text else None
 
@@ -1027,8 +1039,13 @@ class MeasurementOverlay(Overlay):
             geometry = self._circle_geometry(kind, points, full_dims)
             if geometry is None:
                 return None
-            center, radius_px = geometry
-            suffix = f"\u00d8 {format_length(radius_px * 2, self.dpi, unit)}" if self.dpi is not None else None
+            center, _radius_px = geometry
+            suffix = None
+            if self.dpi is not None and dims is not None:
+                suffix_geometry = self._circle_geometry(kind, points, dims)
+                if suffix_geometry is not None:
+                    _, suffix_radius_px = suffix_geometry
+                    suffix = f"\u00d8 {format_length(suffix_radius_px * 2, self.dpi, unit)}"
             text = self._compose_label_text(meta.title, suffix)
             return (text, center) if text else None
 
@@ -1363,14 +1380,41 @@ class MeasurementOverlay(Overlay):
         end_cap: str = "curved",
     ) -> None:
         last = len(points) - 2
+        if dashed:
+            for i in range(len(points) - 1):
+                self._draw_stroke(
+                    painter, rect, points[i], points[i + 1], stroke_scale, dashed=dashed,
+                    line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
+                    dash_style=dash_style,
+                    start_cap=start_cap if i == 0 else "curved",
+                    end_cap=end_cap if i == last else "curved",
+                )
+            return
+
+        # Finalized (non-preview) polylines union every segment's paths
+        # into one running outline/fill path and paint each exactly once
+        # — painting per-segment instead would composite two independent
+        # antialiased passes on top of each other at every interior
+        # joint (each segment unions an identical "curved" cap disc
+        # there), reading as a doubled border ring.
+        outline_path = QPainterPath()
+        fill_path = QPainterPath()
         for i in range(len(points) - 1):
-            self._draw_stroke(
-                painter, rect, points[i], points[i + 1], stroke_scale, dashed=dashed,
+            seg_outline, seg_fill = self._stroke_paths(
+                rect, points[i], points[i + 1], stroke_scale,
                 line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
                 dash_style=dash_style,
                 start_cap=start_cap if i == 0 else "curved",
                 end_cap=end_cap if i == last else "curved",
             )
+            outline_path = outline_path.united(seg_outline)
+            fill_path = fill_path.united(seg_fill)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(outline_color))
+        painter.drawPath(outline_path)
+        painter.setBrush(QBrush(line_color))
+        painter.drawPath(fill_path)
 
     def _draw_circle(
         self,
@@ -1476,14 +1520,13 @@ class MeasurementOverlay(Overlay):
         drawn over it afterward so the point stays sharp rather than
         rounded.
         """
-        p1 = self._to_point(rect, start)
-        p2 = self._to_point(rect, end)
-        lw = line_width / stroke_scale
-        ow = outline_width / stroke_scale
-        total_outline_width = line_width + outline_width * 2
-        pattern = None if dashed else resolve_dash_pattern(dash_style, line_width)
-
         if dashed:
+            p1 = self._to_point(rect, start)
+            p2 = self._to_point(rect, end)
+            lw = line_width / stroke_scale
+            total_outline_width = line_width + outline_width * 2
+            pattern = None
+
             outline = QPen(outline_color)
             outline.setWidthF(total_outline_width / stroke_scale)
             outline.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -1498,6 +1541,46 @@ class MeasurementOverlay(Overlay):
             painter.setPen(fill)
             painter.drawLine(p1, p2)
             return
+
+        outline_path, fill_path = self._stroke_paths(
+            rect, start, end, stroke_scale,
+            line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
+            dash_style=dash_style, start_cap=start_cap, end_cap=end_cap,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(outline_color))
+        painter.drawPath(outline_path)
+        painter.setBrush(QBrush(line_color))
+        painter.drawPath(fill_path)
+
+    def _stroke_paths(
+        self,
+        rect: QRect,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        stroke_scale: float,
+        *,
+        line_color: QColor = OVERLAY_LINE_COLOR,
+        line_width: float = OVERLAY_LINE_WIDTH,
+        outline_color: QColor = OVERLAY_OUTLINE_COLOR,
+        outline_width: float = OVERLAY_OUTLINE_WIDTH,
+        dash_style: str = "solid",
+        start_cap: str = "curved",
+        end_cap: str = "curved",
+    ) -> tuple[QPainterPath, QPainterPath]:
+        """
+        (outline path, fill path) for one finalized (non-preview) segment
+        — everything ``_draw_stroke``'s non-dashed branch used to paint
+        immediately, now just returned so ``_draw_polyline`` can union
+        several segments' paths into one before painting (see its own
+        docstring for why that matters at interior joints).
+        """
+        p1 = self._to_point(rect, start)
+        p2 = self._to_point(rect, end)
+        lw = line_width / stroke_scale
+        ow = outline_width / stroke_scale
+        total_outline_width = line_width + outline_width * 2
+        pattern = resolve_dash_pattern(dash_style, line_width)
 
         body_p1 = self._point_along(p1, p2, self._cap_reach(start_cap, lw))
         body_p2 = self._point_along(p2, p1, self._cap_reach(end_cap, lw))
@@ -1517,11 +1600,7 @@ class MeasurementOverlay(Overlay):
                 outline_path = outline_path.united(cap_outline)
                 fill_path = fill_path.united(cap_fill)
 
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(outline_color))
-        painter.drawPath(outline_path)
-        painter.setBrush(QBrush(line_color))
-        painter.drawPath(fill_path)
+        return outline_path, fill_path
 
     @staticmethod
     def _point_along(origin: QPointF, toward: QPointF, distance: float) -> QPointF:
@@ -1550,7 +1629,16 @@ class MeasurementOverlay(Overlay):
         line.lineTo(p2)
         stroker = QPainterPathStroker()
         stroker.setWidth(width)
-        stroker.setCapStyle(Qt.PenCapStyle.FlatCap)
+        # A dashed shaft needs each dash's own ends covered too — a
+        # FlatCap here leaves the fill dash's flat end flush with the
+        # outline dash's identical flat end, so the fill covers the
+        # outline everywhere except the dash's long sides. SquareCap
+        # over-extends both passes equally, restoring the same per-dash
+        # outline a circle's plain (default-SquareCap) QPen already gets.
+        # Solid shafts must stay FlatCap — _cap_shapes unions its own
+        # end-cap shapes exactly at the true endpoint, which depends on
+        # the shaft ending flat there.
+        stroker.setCapStyle(Qt.PenCapStyle.SquareCap if dash_pattern else Qt.PenCapStyle.FlatCap)
         if dash_pattern:
             stroker.setDashPattern(dash_pattern)
         return stroker.createStroke(line)

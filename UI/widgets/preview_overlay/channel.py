@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QRect, Signal, Slot
 from PySide6.QtGui import QImage, QPainter
@@ -67,11 +68,8 @@ class ChannelOverlay(Overlay):
             total = r_w + g_w + b_w
             if total > 0:
                 r_w, g_w, b_w = r_w / total, g_w / total, b_w / total
-            gray = (
-                r_w * arr[:, :, 0].astype(np.float32)
-                + g_w * arr[:, :, 1].astype(np.float32)
-                + b_w * arr[:, :, 2].astype(np.float32)
-            ).astype(np.uint8)
+            weights = np.array([[r_w, g_w, b_w]], dtype=np.float32)
+            gray = cv2.transform(arr, weights)
             arr[:, :, 0] = gray
             arr[:, :, 1] = gray
             arr[:, :, 2] = gray

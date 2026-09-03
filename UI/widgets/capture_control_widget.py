@@ -457,18 +457,42 @@ class CaptureControlWidget(QWidget):
         self._capture_button = QPushButton("Take Photo")
         self._capture_button.setMinimumHeight(36)
         self._capture_button.clicked.connect(self._take_photo)
-
-        self._capture_ui_button = QPushButton("Take Photo with UI")
-        self._capture_ui_button.setMinimumHeight(36)
-        self._capture_ui_button.clicked.connect(self._take_photo_with_ui)
-
         buttons_layout.addWidget(self._capture_button)
-        buttons_layout.addWidget(self._capture_ui_button)
+
+        # "Export..." offers three clearly-labeled kinds of image export
+        # (see _on_export_clicked) — baked-in measurements only ever show
+        # up as pixels in the first two, only ever as a separate file in
+        # the third, so which is which is unambiguous by construction
+        # rather than needing a separate toggle to explain it. Replaces
+        # the old "Take Photo with UI" button, which just screenshotted
+        # the live display (including ZoomPreviewOverlay's own crop/
+        # minimap chrome) rather than rendering a clean export.
+        export_row = QHBoxLayout()
+        export_row.setSpacing(6)
+        self._export_kind_combo = QComboBox()
+        self._export_kind_combo.addItem("Preview image (measurements baked in)", "preview")
+        self._export_kind_combo.addItem("Full-res image (measurements baked in)", "full_res")
+        self._export_kind_combo.addItem("Full-res image + measurements file", "full_res_sidecar")
+        self._export_button = QPushButton("Export...")
+        self._export_button.clicked.connect(self._on_export_clicked)
+        export_row.addWidget(self._export_kind_combo, 1)
+        export_row.addWidget(self._export_button)
+
+        data_row = QHBoxLayout()
+        data_row.setSpacing(6)
+        self._export_measurements_button = QPushButton("Export Measurements...")
+        self._export_measurements_button.clicked.connect(self._on_export_measurements_clicked)
+        self._import_measurements_button = QPushButton("Import Measurements...")
+        self._import_measurements_button.clicked.connect(self._on_import_measurements_clicked)
+        data_row.addWidget(self._export_measurements_button)
+        data_row.addWidget(self._import_measurements_button)
 
         layout.addLayout(folder_layout)
         layout.addLayout(filename_layout)
         layout.addLayout(format_layout)
         layout.addLayout(buttons_layout)
+        layout.addLayout(export_row)
+        layout.addLayout(data_row)
         return group
 
     # ------------------------------------------------------------------
@@ -933,35 +957,100 @@ class CaptureControlWidget(QWidget):
             ctx.toast.error("Unable to capture image from camera", title="Capture Failed", dismiss_id=self._capture_toast_id)
         self._capture_toast_id = None
 
+    # ------------------------------------------------------------------
+    # Image / measurement export & import — see CameraPreview's own
+    # export_plain_image/export_measurement_image/
+    # export_preview_measurement_image for the actual rendering, and
+    # MeasurementOverlayController/measurement_io.py for measurement
+    # JSON serialization; this just supplies the file dialogs, defaults,
+    # and toast feedback. Moved here (from the Measurements widget) since
+    # this widget already owns the output folder/filename state a
+    # sensible default draws from — see _default_export_stem.
+    # ------------------------------------------------------------------
+
+    def _default_export_stem(self) -> str:
+        """Default filename stem for an export dialog — the loaded image's own name while one is active, else a fresh timestamped stem matching _generate_filename's own pattern."""
+        if self._mode == CaptureMode.LOADED_IMAGE and self._loaded_image_path is not None:
+            return self._loaded_image_path.stem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"measurement_{timestamp}"
+
     @Slot()
-    def _take_photo_with_ui(self) -> None:
-        """Screenshot the display as shown — active overlays only, no letterbox bars, no toolbar buttons — rather than a raw sensor capture."""
+    def _on_export_clicked(self) -> None:
         ctx = get_app_context()
         preview = ctx.camera_preview
         if preview is None:
-            warning("Attempted UI capture but no camera preview is registered")
-            if ctx.toast:
-                ctx.toast.warning("Camera preview not available", title="Capture Failed")
             return
 
-        pixmap = preview.grab_display()
-        if pixmap.isNull():
-            warning("Attempted UI capture but there was nothing to render yet")
-            if ctx.toast:
-                ctx.toast.warning("Nothing to capture", title="Capture Failed")
-            return
-
-        filepath = self._get_filepath()
-        if not self._ensure_output_folder():
-            return
-
-        saved = pixmap.save(str(filepath))
-        if saved:
-            info(f"Captured UI screenshot to: {filepath}")
-            if ctx.toast:
-                ctx.toast.success(f"Saved to: {filepath.name}", title="Image Captured")
-            self._filename_edit.clear()
+        kind = self._export_kind_combo.currentData()
+        if kind == "preview":
+            image = preview.export_preview_measurement_image()
         else:
-            error(f"Failed to save UI screenshot to: {filepath}")
+            image = preview.export_measurement_image() if kind == "full_res" else preview.export_plain_image()
+        if image is None:
             if ctx.toast:
-                ctx.toast.error("Unable to save captured image", title="Capture Failed")
+                ctx.toast.warning("Nothing to export yet", title="Export Image")
+            return
+
+        stem = self._default_export_stem()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Image", str(self._current_folder / f"{stem}.png"), "PNG image (*.png)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+
+        if not image.save(path):
+            error(f"Failed to save exported image to: {path}")
+            if ctx.toast:
+                ctx.toast.error("Unable to save exported image", title="Export Failed")
+            return
+        info(f"Exported image to: {path}")
+        if ctx.toast:
+            ctx.toast.success(path, title="Image Exported")
+
+        if kind == "full_res_sidecar":
+            sidecar = str(Path(path).with_suffix(".json"))
+            preview.overlays.measurement.export_measurements_to_file(sidecar)
+            if ctx.toast:
+                ctx.toast.success(sidecar, title="Measurements Exported")
+
+    @Slot()
+    def _on_export_measurements_clicked(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is None:
+            return
+        stem = self._default_export_stem()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Measurements", str(self._current_folder / f"{stem}.json"), "Measurement files (*.json)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        preview.overlays.measurement.export_measurements_to_file(path)
+        ctx = get_app_context()
+        if ctx.toast:
+            ctx.toast.success(path, title="Measurements Exported")
+
+    @Slot()
+    def _on_import_measurements_clicked(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Measurements", str(self._current_folder), "Measurement files (*.json)"
+        )
+        if not path:
+            return
+        result = preview.overlays.measurement.import_measurements_from_file(path)
+        for issue in result.warnings:
+            warning(f"[MeasurementImport] {issue}")
+        ctx = get_app_context()
+        if ctx.toast is None:
+            return
+        if result.warnings:
+            ctx.toast.warning(f"{len(result.entries)} loaded, {len(result.warnings)} skipped — see log", title="Import Completed With Issues")
+        else:
+            ctx.toast.success(f"{len(result.entries)} measurement(s) loaded", title="Measurements Imported")

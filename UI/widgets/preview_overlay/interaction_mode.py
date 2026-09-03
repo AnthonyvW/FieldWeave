@@ -123,10 +123,21 @@ class PreviewModeController:
             token.pop()
 
     def _pop(self, token: ModeToken) -> None:
+        """
+        Callers are expected to pop in LIFO order (see ModeToken's
+        docstring), but if one doesn't, only restore *token*'s own
+        snapshot when it was actually the top of the stack — otherwise
+        the current top's applied state is still authoritative and must
+        be left alone; the out-of-order token is just spliced out so its
+        snapshot doesn't leak, and it's re-applied whenever the real top
+        eventually pops in turn.
+        """
         for i in range(len(self._stack) - 1, -1, -1):
             if self._stack[i][0] is token:
+                is_top = i == len(self._stack) - 1
                 _, _, snapshot = self._stack.pop(i)
-                self._restore(snapshot)
+                if is_top:
+                    self._restore(snapshot)
                 return
 
     def _capture(self, spec: PreviewModeSpec) -> _Snapshot:
