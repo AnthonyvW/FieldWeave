@@ -4,10 +4,15 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
+import numpy as np
+
 from UI.widgets.measurements.lines import CALIBRATION_KIND
 
 Point2D = tuple[float, float]
 CircleGeometry = tuple[Point2D, float]
+# (center, rx_px, ry_px, rotation_deg) — rx points along *rotation_deg*
+# from the +x axis, ry perpendicular to it.
+EllipseGeometry = tuple[Point2D, float, float, float]
 
 # Points closer together than this (in frame fractions) are treated as a
 # single point rather than a real second click — mirrors
@@ -73,10 +78,11 @@ class MeasurementKind:
 
     name: str
     required_points: int | None  # None = unbounded (e.g. Arbitrary Line)
-    category: str  # "line" | "circle" | "point"
+    category: str  # "line" | "circle" | "point" | "ellipse" | "angle" | "arc"
     resolve: Callable[[list[Point2D]], tuple[Point2D, ...] | None]
     move_point: Callable[[list[Point2D], int, Point2D], list[Point2D]] = _default_move_point
     circle_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], CircleGeometry | None] | None = None
+    ellipse_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], EllipseGeometry | None] | None = None
     has_label: bool = True
     # MeasurementMeta field overrides applied on top of the sidebar's
     # default meta as a measurement of this kind is placed (see
@@ -214,6 +220,178 @@ def _circle_geometry_from_three_points(points: tuple[Point2D, ...], full_dims: t
     return (center_px[0] / full_w, center_px[1] / full_h), radius
 
 
+# ----------------------------------------------------------------------
+# Ellipses — "3 Point Ellipse" (two points mark the minor axis, a third
+# marks the major-axis extent) and "5 Point Ellipse" (five points on the
+# boundary, fit to a general conic). Ellipse-ness (bounded, real,
+# non-degenerate) is affine-invariant — it survives the frame's own
+# anisotropic aspect ratio — so ``resolve`` can validate it directly in
+# fraction space without needing ``full_dims``; only the actual on-screen
+# parameters (computed by ``ellipse_geometry``, which does get
+# ``full_dims``) need true pixel space.
+# ----------------------------------------------------------------------
+
+
+def _three_point_ellipse_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3:
+        return None
+    p0, p1, p2 = points[0], points[1], points[2]
+    if p0 == p1 or _collinear(p0, p1, p2):
+        return None
+    return p0, p1, p2
+
+
+def _ellipse_geometry_three_point(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> EllipseGeometry | None:
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0 or len(points) < 3:
+        return None
+
+    def to_px(p: Point2D) -> Point2D:
+        return p[0] * full_w, p[1] * full_h
+
+    a, b, c = to_px(points[0]), to_px(points[1]), to_px(points[2])
+    center = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    ux, uy = b[0] - a[0], b[1] - a[1]
+    minor_len = math.hypot(ux, uy)
+    if minor_len < _DEGENERATE_EPSILON:
+        return None
+    # Unit minor-axis direction (along p0->p1) and its perpendicular
+    # (the major-axis direction, along which p2's offset from center is
+    # measured — see the class docstring's "minor axis with two points,
+    # then the major axis with one point").
+    ux, uy = ux / minor_len, uy / minor_len
+    vx, vy = -uy, ux
+    cx, cy = c[0] - center[0], c[1] - center[1]
+    major_r = abs(cx * vx + cy * vy)
+    minor_r = minor_len / 2
+    if major_r < _DEGENERATE_EPSILON:
+        return None
+    rotation = math.degrees(math.atan2(vy, vx))
+    return (center[0] / full_w, center[1] / full_h), major_r, minor_r, rotation
+
+
+def _conic_fit(points_px: list[Point2D]) -> tuple[float, float, float, float, float, float] | None:
+    """
+    General conic ``Ax²+Bxy+Cy²+Dx+Ey+F=0`` through exactly 5
+    points, via the null space of the 5×6 design matrix (each row
+    ``[x², xy, y², x, y, 1]``) — the coefficients up to a
+    shared scale factor, found as the right singular vector for the
+    smallest singular value. None if the points don't determine a
+    (numerically) unique conic — near-duplicate or otherwise degenerate
+    points leave the design matrix without a clean 1-D null space.
+    """
+    if len(points_px) != 5:
+        return None
+    rows = [[x * x, x * y, y * y, x, y, 1.0] for x, y in points_px]
+    matrix = np.array(rows, dtype=float)
+    norm = np.linalg.norm(matrix)
+    if norm < _DEGENERATE_EPSILON:
+        return None
+    matrix = matrix / norm  # keeps singular values in a comparable, scale-independent range
+    try:
+        _, singular_values, vh = np.linalg.svd(matrix)
+    except np.linalg.LinAlgError:
+        return None
+    # svd on a 5x6 matrix returns only 5 singular values (min(5,6)) — the
+    # null-space vector (the conic's coefficients, up to scale) is
+    # ``vh[5]``, the one row of ``vh`` with *no* corresponding singular
+    # value at all, and it's meaningful only when the matrix has full
+    # row rank 5 (a genuine 1-D null space) — i.e. its smallest reported
+    # singular value isn't itself close to zero. If it is, the 5 points
+    # don't pin down a single conic (duplicates, or an otherwise
+    # degenerate configuration) and ``vh[5]`` would just be numerical
+    # noise rather than the real null direction.
+    if len(singular_values) < 5 or singular_values[-1] < 1e-9 * max(singular_values[0], 1e-12):
+        return None
+    a, b, c, d, e, f = vh[5]
+    return float(a), float(b), float(c), float(d), float(e), float(f)
+
+
+def _ellipse_params_from_conic(
+    a: float, b: float, c: float, d: float, e: float, f: float
+) -> tuple[Point2D, float, float, float] | None:
+    """
+    Center, semi-axis lengths, and rotation of the real conic
+    ``Ax²+Bxy+Cy²+Dx+Ey+F=0``, or None if it isn't a genuine
+    bounded ellipse (a parabola/hyperbola, an imaginary "ellipse" with no
+    real points, or a degenerate single point/line pair). Standard
+    conic-to-ellipse reduction: recenter to kill the linear terms, then
+    diagonalize the remaining quadratic form.
+    """
+    discriminant = b * b - 4 * a * c
+    if discriminant >= 0:
+        return None  # parabola or hyperbola, not an ellipse
+
+    # Center: where both partial derivatives vanish — 2Ax+By+D=0, Bx+2Cy+E=0.
+    det = 4 * a * c - b * b
+    if abs(det) < _DEGENERATE_EPSILON:
+        return None
+    x0 = (b * e - 2 * c * d) / det
+    y0 = (b * d - 2 * a * e) / det
+
+    # Value of the conic at its own center — the "radius" scale factor;
+    # zero means a degenerate single point instead of a real ellipse.
+    f0 = a * x0 * x0 + b * x0 * y0 + c * y0 * y0 + d * x0 + e * y0 + f
+    if abs(f0) < _DEGENERATE_EPSILON:
+        return None
+
+    # Eigen-decomposition of the symmetric [[A, B/2], [B/2, C]] quadratic
+    # form — closed form for a 2×2 symmetric matrix, so this needs
+    # no general eigensolver.
+    trace = a + c
+    diff = a - c
+    radius_term = math.hypot(diff, b)
+    lambda1 = (trace + radius_term) / 2
+    lambda2 = (trace - radius_term) / 2
+    if abs(lambda1) < _DEGENERATE_EPSILON or abs(lambda2) < _DEGENERATE_EPSILON:
+        return None
+
+    axis1_sq = -f0 / lambda1
+    axis2_sq = -f0 / lambda2
+    if axis1_sq <= 0 or axis2_sq <= 0:
+        return None
+    axis1, axis2 = math.sqrt(axis1_sq), math.sqrt(axis2_sq)
+
+    # Rotation of the eigenvector for lambda1 (axis1's own direction) —
+    # the standard closed-form principal-axis angle for a symmetric 2x2
+    # quadratic form. A harmless +-180 degree ambiguity in the result
+    # (atan2's branch choice) never matters: an ellipse is unchanged by
+    # a 180 degree rotation.
+    angle = math.atan2(b, a - c) / 2
+    rx, ry, rotation = (axis1, axis2, angle) if axis1 >= axis2 else (axis2, axis1, angle + math.pi / 2)
+    return (x0, y0), rx, ry, math.degrees(rotation)
+
+
+def _five_point_ellipse_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 5:
+        return None
+    pts = points[:5]
+    conic = _conic_fit(pts)
+    if conic is None:
+        return None
+    if _ellipse_params_from_conic(*conic) is None:
+        return None
+    return tuple(pts)
+
+
+def _ellipse_geometry_five_point(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> EllipseGeometry | None:
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0 or len(points) < 5:
+        return None
+
+    def to_px(p: Point2D) -> Point2D:
+        return p[0] * full_w, p[1] * full_h
+
+    conic = _conic_fit([to_px(p) for p in points[:5]])
+    if conic is None:
+        return None
+    params = _ellipse_params_from_conic(*conic)
+    if params is None:
+        return None
+    center_px, rx, ry, rotation = params
+    return (center_px[0] / full_w, center_px[1] / full_h), rx, ry, rotation
+
+
 DEFAULT_REGISTRY = MeasurementKindRegistry()
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Point", required_points=1, category="point", resolve=_point_resolve,
@@ -254,6 +432,19 @@ DEFAULT_REGISTRY.register(MeasurementKind(
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="3 Point Circle", required_points=3, category="circle",
     resolve=_three_point_circle_resolve, circle_geometry=_circle_geometry_from_three_points,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # First two points mark the minor axis (its endpoints), the third
+    # marks how far the ellipse extends perpendicular to it.
+    name="3 Point Ellipse", required_points=3, category="ellipse",
+    resolve=_three_point_ellipse_resolve, ellipse_geometry=_ellipse_geometry_three_point,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Five points on the boundary, fit to a general conic — rejected at
+    # placement (resolve returns None) unless they actually describe a
+    # real, bounded ellipse.
+    name="5 Point Ellipse", required_points=5, category="ellipse",
+    resolve=_five_point_ellipse_resolve, ellipse_geometry=_ellipse_geometry_five_point,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real

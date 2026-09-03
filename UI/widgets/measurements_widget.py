@@ -25,6 +25,10 @@ from UI.widgets.measurements.circles import (
     RadiusCircleMeasurement,
     ThreePointCircleMeasurement,
 )
+from UI.widgets.measurements.ellipses import (
+    FivePointEllipseMeasurement,
+    ThreePointEllipseMeasurement,
+)
 from UI.widgets.measurements.lines import (
     ArbitraryLineMeasurement,
     ArrowMeasurement,
@@ -58,6 +62,8 @@ _MEASUREMENT_TYPES = (
     RadiusCircleMeasurement,
     DiameterMeasurement,
     ThreePointCircleMeasurement,
+    ThreePointEllipseMeasurement,
+    FivePointEllipseMeasurement,
 )
 
 

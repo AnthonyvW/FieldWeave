@@ -594,6 +594,13 @@ class MeasurementOverlay(Overlay):
                 for a, b in zip(edge_points, edge_points[1:] + edge_points[:1]):
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
+            elif entry.category == "ellipse" and full_dims is not None:
+                edge_points = self._ellipse_edge_screen_points(
+                    measurement.kind, measurement.points, rect, widget_rect, full_dims
+                )
+                for a, b in zip(edge_points, edge_points[1:] + edge_points[:1]):
+                    if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
+                        return index
         return None
 
     _CIRCLE_EDGE_SAMPLES = 32
@@ -628,6 +635,32 @@ class MeasurementOverlay(Overlay):
                 cx + (radius_px * math.cos(angle)) / full_w,
                 cy + (radius_px * math.sin(angle)) / full_h,
             )
+            result.append(self._screen_point(self._to_point(rect, fraction), rect, widget_rect))
+        return result
+
+    def _ellipse_edge_screen_points(
+        self,
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        rect: QRect,
+        widget_rect: QRect,
+        full_dims: tuple[int, int],
+    ) -> list[QPointF]:
+        """Same sampling approach as _circle_edge_screen_points, generalized to a rotated ellipse."""
+        geometry = self._ellipse_geometry(kind, points, full_dims)
+        if geometry is None:
+            return []
+        (cx, cy), rx_px, ry_px, rotation_deg = geometry
+        full_w, full_h = full_dims
+        rot = math.radians(rotation_deg)
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        result = []
+        for i in range(self._CIRCLE_EDGE_SAMPLES):
+            angle = 2 * math.pi * i / self._CIRCLE_EDGE_SAMPLES
+            local_x, local_y = rx_px * math.cos(angle), ry_px * math.sin(angle)
+            px = local_x * cos_r - local_y * sin_r
+            py = local_x * sin_r + local_y * cos_r
+            fraction = (cx + px / full_w, cy + py / full_h)
             result.append(self._screen_point(self._to_point(rect, fraction), rect, widget_rect))
         return result
 
@@ -817,6 +850,18 @@ class MeasurementOverlay(Overlay):
             return None
         return entry.circle_geometry(points, full_dims)
 
+    @staticmethod
+    def _ellipse_geometry(
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        full_dims: tuple[int, int],
+    ) -> tuple[tuple[float, float], float, float, float] | None:
+        """(center_fraction, rx_px, ry_px, rotation_deg) for an ellipse kind — see MeasurementKind.ellipse_geometry, the ellipse counterpart of _circle_geometry above."""
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None or entry.ellipse_geometry is None:
+            return None
+        return entry.ellipse_geometry(points, full_dims)
+
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
@@ -937,6 +982,12 @@ class MeasurementOverlay(Overlay):
             )
         elif entry.category == "circle" and full_dims is not None:
             self._draw_circle(
+                painter, rect, kind, points, stroke_scale, full_dims,
+                dashed=dashed, line_color=line_color, line_width=line_width,
+                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
+            )
+        elif entry.category == "ellipse" and full_dims is not None:
+            self._draw_ellipse(
                 painter, rect, kind, points, stroke_scale, full_dims,
                 dashed=dashed, line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
@@ -1212,6 +1263,25 @@ class MeasurementOverlay(Overlay):
                     if meta.show_area:
                         area_unit = meta.area_unit if meta.area_unit is not None else unit
                         area_px = math.pi * suffix_radius_px * suffix_radius_px
+                        suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi, area_unit, decimals)}"
+        elif entry.category == "ellipse":
+            if full_dims is None:
+                return None
+            geometry = self._ellipse_geometry(kind, points, full_dims)
+            if geometry is None:
+                return None
+            anchor, _rx_px, _ry_px, _rotation = geometry
+            suffix = None
+            if self.dpi is not None and dims is not None:
+                suffix_geometry = self._ellipse_geometry(kind, points, dims)
+                if suffix_geometry is not None:
+                    _, suffix_rx_px, suffix_ry_px, _ = suffix_geometry
+                    major = format_length(suffix_rx_px * 2, self.dpi, unit, decimals)
+                    minor = format_length(suffix_ry_px * 2, self.dpi, unit, decimals)
+                    suffix = f"{major} \u00d7 {minor}"
+                    if meta.show_area:
+                        area_unit = meta.area_unit if meta.area_unit is not None else unit
+                        area_px = math.pi * suffix_rx_px * suffix_ry_px
                         suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi, area_unit, decimals)}"
         else:
             if not points:
@@ -1566,12 +1636,14 @@ class MeasurementOverlay(Overlay):
 
             self._draw_measurement(painter, rect, kind, display_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True)
 
-            if entry.category == "circle" and len(preview_points) >= 2:
+            if entry.category in ("circle", "ellipse") and len(preview_points) >= 2:
                 required = entry.required_points or len(preview_points)
                 if len(preview_points) < required:
-                    # Not enough points for a circle yet — a straight
-                    # guide between what's placed so far is still useful
-                    # feedback (e.g. two of three "3 Point Circle" clicks).
+                    # Not enough points for a circle/ellipse yet — a
+                    # straight guide between what's placed so far is
+                    # still useful feedback (e.g. two of three "3 Point
+                    # Circle"/"3 Point Ellipse" clicks, or the first few
+                    # of a "5 Point Ellipse").
                     self._draw_polyline(painter, rect, preview_points, stroke_scale, dashed=True)
 
             if kind == CALIBRATION_KIND:
@@ -1706,6 +1778,64 @@ class MeasurementOverlay(Overlay):
                 painter, rect, points[0], points[1], stroke_scale, dashed=dashed,
                 line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
             )
+
+    def _draw_ellipse(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        stroke_scale: float,
+        full_dims: tuple[int, int],
+        *,
+        dashed: bool,
+        line_color: QColor = OVERLAY_LINE_COLOR,
+        line_width: float = OVERLAY_LINE_WIDTH,
+        outline_color: QColor = OVERLAY_OUTLINE_COLOR,
+        outline_width: float = OVERLAY_OUTLINE_WIDTH,
+        dash_style: str = "solid",
+    ) -> None:
+        """
+        Same treatment as _draw_circle — genuine image content, sized
+        from the frame's own true pixel geometry and left for the
+        ambient paint transform to pan/zoom — generalized to a rotated
+        ellipse via painter.rotate() rather than drawEllipse's own
+        (axis-aligned only) rect.
+        """
+        geometry = self._ellipse_geometry(kind, points, full_dims)
+        if geometry is None:
+            return
+        center, rx_px, ry_px, rotation_deg = geometry
+        full_w, full_h = full_dims
+
+        center_point = self._to_point(rect, center)
+        rx = rx_px * (rect.width() / full_w)
+        ry = ry_px * (rect.height() / full_h)
+
+        total_outline_width = line_width + outline_width * 2
+        pattern = None if dashed else resolve_dash_pattern(dash_style, line_width)
+        dash_cap = Qt.PenCapStyle.RoundCap if dash_style in ROUND_CAP_DASH_STYLES else Qt.PenCapStyle.FlatCap
+
+        painter.save()
+        painter.translate(center_point)
+        painter.rotate(rotation_deg)
+        ellipse_rect = QRectF(-rx, -ry, 2 * rx, 2 * ry)
+
+        outline = QPen(outline_color)
+        outline.setWidthF(total_outline_width / stroke_scale)
+        outline.setCapStyle(dash_cap)
+        self._apply_dash(outline, total_outline_width, dashed, pattern)
+        painter.setPen(outline)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ellipse_rect)
+
+        fill = QPen(line_color)
+        fill.setWidthF(line_width / stroke_scale)
+        fill.setCapStyle(dash_cap)
+        self._apply_dash(fill, line_width, dashed, pattern)
+        painter.setPen(fill)
+        painter.drawEllipse(ellipse_rect)
+        painter.restore()
 
     def _draw_stroke(
         self,
