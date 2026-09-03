@@ -14,7 +14,7 @@ from common.logger import info, error, warning
 from UI.widgets.preview_overlay.channel import ChannelButton, ChannelOverlay
 from UI.widgets.preview_overlay.machine_vision import MachineVisionButton
 from UI.widgets.preview_overlay.click_to_move import ClickToMoveOverlay
-from UI.widgets.preview_overlay.coordinate_space import IdentityCoordinateSpace
+from UI.widgets.preview_overlay.coordinate_space import CoordinateSpace, IdentityCoordinateSpace
 from UI.widgets.preview_overlay.crosshair import CrosshairButton, CrosshairOverlay
 from UI.widgets.preview_overlay.focus import FocusOverlay
 from UI.widgets.preview_overlay.inspect_calibration import InspectCalibrationOverlay
@@ -889,11 +889,31 @@ class CameraPreview(QFrame):
         measurements burned in. None if there's nothing to export yet.
         Shared by export_preview_image and export_preview_measurement_image.
 
+        While zoomed/panned (see ZoomPreviewOverlay), crops to the
+        current viewport first via ZoomPreviewOverlay.extract_current_view,
+        then scales that crop — not the whole frame — to the video
+        label's display size, so the export actually matches what's on
+        screen right now instead of always the fully zoomed-out view.
+
         Deliberately doesn't paint the label's own active overlays (the
         old "Take Photo with UI" screenshot approach did) — that would
         also draw ZoomPreviewOverlay's own crop/minimap chrome, which
         doesn't belong in an exported image.
         """
+        lw = self._video_label.width()
+        lh = self._video_label.height()
+        if lw <= 0 or lh <= 0:
+            return None
+
+        self._zoom_preview_overlay.display_rect(self._video_label.rect())
+        crop_array = self._zoom_preview_overlay.extract_current_view()
+        if crop_array is not None:
+            image = QImage(
+                crop_array.data, crop_array.shape[1], crop_array.shape[0], crop_array.strides[0],
+                QImage.Format.Format_RGB888,
+            ).copy()
+            return image.scaled(lw, lh, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
         if self._loaded_image_overlay.enabled:
             source = self._loaded_image_overlay.source
             if source is None or source.preview is None:
@@ -903,10 +923,6 @@ class CameraPreview(QFrame):
                 array.data, array.shape[1], array.shape[0], array.strides[0], QImage.Format.Format_RGB888
             ).copy()
         if self._last_full_image is None:
-            return None
-        lw = self._video_label.width()
-        lh = self._video_label.height()
-        if lw <= 0 or lh <= 0:
             return None
         return self._last_full_image.scaled(
             lw, lh, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
@@ -920,20 +936,39 @@ class CameraPreview(QFrame):
         """
         Preview-resolution sibling to export_measurement_image — same
         base image as export_preview_image, with measurements burned in
-        the same way export_measurement_image does. Returns None if
-        there's nothing to export yet.
+        the same way export_measurement_image does. While zoomed, burns
+        measurements in via ZoomPreviewOverlay itself (rather than a
+        plain IdentityCoordinateSpace) so their position and on-screen-
+        constant stroke width match the live, zoomed view exactly.
+        Returns None if there's nothing to export yet.
         """
         image = self._current_preview_frame_image()
         if image is None:
             return None
-        return self._burn_in_measurements(image)
+        coords = self._zoom_preview_overlay if self._zoom_preview_overlay.active else None
+        return self._burn_in_measurements(image, coords)
 
-    def _burn_in_measurements(self, image: QImage) -> QImage:
-        """Paint every placed measurement onto *image* (already the exact size to export at) via IdentityCoordinateSpace — shared by export_measurement_image and export_preview_measurement_image."""
+    def _burn_in_measurements(self, image: QImage, coords: CoordinateSpace | None = None) -> QImage:
+        """
+        Paint every placed measurement onto *image* (already the exact
+        size to export at) — shared by export_measurement_image and
+        export_preview_measurement_image. *coords* defaults to a plain
+        IdentityCoordinateSpace sized to *image* itself (the full-
+        resolution export's case — there's no pan/zoom viewport at all,
+        just a 1:1 target). export_preview_measurement_image instead
+        passes the live ZoomPreviewOverlay when zoomed, whose
+        paint_transform maps the "as if rect were the whole frame"
+        drawing convention every overlay uses onto *image*'s actual
+        (cropped) content — see MeasurementOverlay's own class docstring.
+        """
         rect = QRect(0, 0, image.width(), image.height())
-        coords = IdentityCoordinateSpace((image.width(), image.height()))
+        if coords is None:
+            coords = IdentityCoordinateSpace((image.width(), image.height()))
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        transform = coords.paint_transform(rect)
+        if transform is not None:
+            painter.setTransform(transform, True)
         self._measurement_overlay.draw_placed_measurements_with_coordinate_space(painter, rect, coords)
         painter.end()
         return image

@@ -542,6 +542,23 @@ class ZoomPreviewOverlay(Overlay):
             return 1.0, 1.0
         return w / crop_w, h / crop_h
 
+    def extract_current_view(self) -> np.ndarray | None:
+        """
+        The current pan/zoom viewport's pixels, extracted directly from
+        the source at full resolution — not decimated for on-screen
+        display the way ``_rebuild_draw_cache``'s draw cache is, since a
+        caller here wants the real content, not a fast paint. None when
+        not zoomed (the caller should fall back to the plain, un-zoomed
+        full frame) or there's no frame yet. Used by CameraPreview's
+        preview-resolution image export, so "export the current preview"
+        actually reflects whatever crop is currently shown rather than
+        always the fully zoomed-out view.
+        """
+        if not self.active or self._crop is None or self._frame is None:
+            return None
+        x0, y0, crop_w, crop_h = self._crop
+        return np.ascontiguousarray(self._frame.region((x0, y0, x0 + crop_w, y0 + crop_h), 1))
+
     def current_frame_dims(self) -> tuple[int, int] | None:
         """
         The full source frame's (width, height), or None if there's no
