@@ -105,6 +105,7 @@ class MeasurementInteraction:
         changed = self._overlay.update_proximity(pos, display_rect, widget_rect) or changed
         if changed:
             self._video_label.update()
+        self._update_hover_tooltip(event.globalPosition().toPoint())
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         """True if Delete/Backspace removed the hovered tag's measurement — OverlayLabel should accept the event rather than let it fall through to any other shortcut handling."""
@@ -145,6 +146,15 @@ class MeasurementInteraction:
         if box is None:
             return None
         return QPoint(round(box.center().x()), round(box.bottom()))
+
+    def _update_hover_tooltip(self, global_pos: QPoint) -> None:
+        """Show the hovered measurement's description as a tooltip, if it has one — hides any tooltip otherwise, since a tag can be hovered without a description or not hovered at all."""
+        index = self._overlay.hovered_index
+        meta = self._overlay.measurement_meta(index) if index is not None else None
+        if meta is None or not meta.description:
+            QToolTip.hideText()
+            return
+        QToolTip.showText(global_pos, meta.description, self._video_label)
 
     def _open_menu(self, index: int, anchor: QPoint) -> None:
         meta = self._overlay.measurement_meta(index)

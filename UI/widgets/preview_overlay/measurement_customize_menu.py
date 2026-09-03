@@ -423,7 +423,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._always_show_description_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._always_show_description_check)
 
-        self._hidden_check = QCheckBox("Hide measurement")
+        self._hidden_check = QCheckBox("Hide tag")
         self._hidden_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._hidden_check)
 
@@ -559,6 +559,10 @@ class MeasurementCustomizeMenu(QFrame):
         self._line_color_picker.set_color(meta.line_color)
         self._line_thickness_control.set_value(meta.line_thickness or OVERLAY_LINE_WIDTH)
         self._line_style_picker.set_value(meta.line_dash_style)
+        # A point has no line to dash, so its dash-style picker is hidden;
+        # circles and lines both keep it.
+        is_point = entry is not None and entry.category == "point"
+        self._line_style_picker.setVisible(not is_point)
         self._midpoint_picker.set_value(meta.midpoint_style)
         self._midpoint_picker.setVisible(show_caps)
         self._start_cap_picker.set_value(meta.line_start_cap)

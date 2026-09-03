@@ -95,9 +95,10 @@ _DASH_MULTIPLIERS: dict[str, list[float] | None] = {
 }
 _DASH_REFERENCE_MIN = 3.0  # keeps a thin line's dashes/gaps from shrinking below a legible size
 
-# Wrap width for a description-only tag (no title line to borrow a width
-# from) — see MeasurementOverlay._draw_label.
-_DESC_ONLY_WRAP_WIDTH = 150.0
+# Minimum wrap width for a tag's description block, so a short title (or
+# none) doesn't force it down to one word per line — see
+# MeasurementOverlay._draw_label.
+_DESC_MIN_WRAP_WIDTH = 150.0
 
 
 def resolve_dash_pattern(dash_style: str, line_width: float) -> list[float] | None:
@@ -843,42 +844,39 @@ class MeasurementOverlay(Overlay):
 
         for index, measurement in enumerate(self.measurements):
             meta = measurement.meta
-            # A hidden measurement draws no geometry (line/circle/point,
-            # its midpoint marker, or its anchor handles) at all — only
-            # its tag may still show, per _draw_measurement_label's own
-            # rules (see feature 12).
-            if not meta.hidden:
-                line_color = self._resolve_color(meta.line_color, OVERLAY_LINE_COLOR)
-                line_width = meta.line_thickness or OVERLAY_LINE_WIDTH
-                outline_color = self._resolve_color(meta.outline_color, OVERLAY_OUTLINE_COLOR)
-                # A disabled outline is drawn at zero width rather than
-                # skipped outright: its pass then paints the exact same
-                # shape as the fill pass drawn right after it (same dash
-                # pattern, same cap shapes — see _cap_shapes/_stroke_path),
-                # which fully covers it, rather than needing a second code
-                # path through every draw method just to omit one pass.
-                outline_width = (meta.outline_thickness or OVERLAY_OUTLINE_WIDTH) if meta.outline_enabled else 0.0
-                # Opacity fades the line fill and its border together
-                # (feature 10) by wrapping both passes at once.
-                painter.save()
-                painter.setOpacity(max(0.0, min(1.0, meta.opacity)))
-                self._draw_measurement(
-                    painter, rect, measurement.kind, measurement.points, stroke_scale, scale_x, scale_y, full_dims,
+            line_color = self._resolve_color(meta.line_color, OVERLAY_LINE_COLOR)
+            line_width = meta.line_thickness or OVERLAY_LINE_WIDTH
+            outline_color = self._resolve_color(meta.outline_color, OVERLAY_OUTLINE_COLOR)
+            # A disabled outline is drawn at zero width rather than
+            # skipped outright: its pass then paints the exact same
+            # shape as the fill pass drawn right after it (same dash
+            # pattern, same cap shapes — see _cap_shapes/_stroke_path),
+            # which fully covers it, rather than needing a second code
+            # path through every draw method just to omit one pass.
+            outline_width = (meta.outline_thickness or OVERLAY_OUTLINE_WIDTH) if meta.outline_enabled else 0.0
+            # Opacity fades the line fill and its border together
+            # (feature 10) by wrapping both passes at once.
+            painter.save()
+            painter.setOpacity(max(0.0, min(1.0, meta.opacity)))
+            self._draw_measurement(
+                painter, rect, measurement.kind, measurement.points, stroke_scale, scale_x, scale_y, full_dims,
+                line_color=line_color, line_width=line_width,
+                outline_color=outline_color, outline_width=outline_width,
+                dash_style=meta.line_dash_style, start_cap=meta.line_start_cap, end_cap=meta.line_end_cap,
+            )
+            entry = DEFAULT_REGISTRY.get(measurement.kind)
+            if entry is not None and entry.category == "line" and meta.midpoint_style != "none":
+                self._draw_midpoint_marker(
+                    painter, rect, measurement.points, meta.midpoint_style, stroke_scale,
                     line_color=line_color, line_width=line_width,
                     outline_color=outline_color, outline_width=outline_width,
-                    dash_style=meta.line_dash_style, start_cap=meta.line_start_cap, end_cap=meta.line_end_cap,
                 )
-                entry = DEFAULT_REGISTRY.get(measurement.kind)
-                if entry is not None and entry.category == "line" and meta.midpoint_style != "none":
-                    self._draw_midpoint_marker(
-                        painter, rect, measurement.points, meta.midpoint_style, stroke_scale,
-                        line_color=line_color, line_width=line_width,
-                        outline_color=outline_color, outline_width=outline_width,
-                    )
-                painter.restore()
-                if index == self._near_index or index == self._drag_measurement_index:
-                    for point in measurement.points:
-                        self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
+            painter.restore()
+            if index == self._near_index or index == self._drag_measurement_index:
+                for point in measurement.points:
+                    self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
+            # meta.hidden hides only the tag (feature 11 clarified), not
+            # the measurement's geometry drawn just above.
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
 
     def draw_placed_measurements_with_coordinate_space(
@@ -1069,16 +1067,20 @@ class MeasurementOverlay(Overlay):
         sub-rect) is recorded into _label_boxes/_delete_boxes so a later
         mouse event can hit-test against it — see _hit_test_tag.
         """
-        dims = self._reference_dims(full_dims)
         meta = measurement.meta
+        # "Hide measurement" hides the tag only (feature 11 clarified);
+        # the geometry is drawn regardless, by the caller.
+        if meta.hidden:
+            return
+        dims = self._reference_dims(full_dims)
         text_and_anchor = self._measurement_label(measurement.kind, measurement.points, meta, full_dims, dims)
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
         description = meta.description if meta.always_show_description else None
-        # Feature 12: with no title and the measurement hidden (so no
-        # value suffix either), the tag shows only if a description is
-        # set to always show — otherwise there's nothing worth a box.
+        # No title and no value suffix (e.g. a bare point, or before DPI
+        # is set) → the tag shows only if a description is set to always
+        # show; otherwise there's nothing worth a box.
         if not text and not description:
             return
         box, delete_box = self._draw_label(
@@ -1174,7 +1176,7 @@ class MeasurementOverlay(Overlay):
         decimals = meta.decimal_places
 
         if entry.category == "line":
-            suffix = None if meta.hidden else self._length_suffix(points, dims, unit, decimals)
+            suffix = self._length_suffix(points, dims, unit, decimals)
             anchor = self._midpoint(points)
         elif entry.category == "circle":
             if full_dims is None:
@@ -1184,7 +1186,7 @@ class MeasurementOverlay(Overlay):
                 return None
             anchor, _radius_px = geometry
             suffix = None
-            if not meta.hidden and self.dpi is not None and dims is not None:
+            if self.dpi is not None and dims is not None:
                 suffix_geometry = self._circle_geometry(kind, points, dims)
                 if suffix_geometry is not None:
                     _, suffix_radius_px = suffix_geometry
@@ -1333,13 +1335,15 @@ class MeasurementOverlay(Overlay):
         pad_y = OVERLAY_LABEL_PADDING_Y
         delete_width = (OVERLAY_DELETE_SIZE + OVERLAY_DELETE_MARGIN) if show_delete else 0.0
 
-        # With no title line (a description-only tag — see feature 12),
-        # there's no title row or divider, and the box is sized to the
-        # description's own wrapped width rather than the title's.
+        # With no title line (a description-only tag), there's no title
+        # row or divider. A description wraps within the title's width,
+        # but never narrower than _DESC_MIN_WRAP_WIDTH — otherwise a
+        # short title forces the description down to one word per line —
+        # and the box widens to fit the description when it's wider than
+        # the title.
         has_title = bool(text)
         text_line_height = (metrics.height() + pad_y * 2) if has_title else 0.0
         text_w = metrics.horizontalAdvance(text) if has_title else 0.0
-        wrap_width = text_w if has_title else _DESC_ONLY_WRAP_WIDTH
 
         desc_font: QFont | None = None
         desc_block_height = 0.0
@@ -1348,15 +1352,16 @@ class MeasurementOverlay(Overlay):
             desc_font = QFont(font)
             desc_font.setPixelSize(max(1, round(OVERLAY_LABEL_FONT_SIZE - 2)))
             desc_metrics = QFontMetricsF(desc_font)
+            wrap_width = max(text_w, _DESC_MIN_WRAP_WIDTH)
             desc_wrap_rect = desc_metrics.boundingRect(
-                QRectF(0, 0, max(wrap_width, 1.0), 10_000), Qt.TextFlag.TextWordWrap, description
+                QRectF(0, 0, wrap_width, 10_000), Qt.TextFlag.TextWordWrap, description
             )
             # Extra padding above and below (not just the usual pad_y)
             # so the description reads as its own block under the
             # divider rather than crowding it.
             desc_block_height = desc_wrap_rect.height() + (pad_y * 3 if has_title else pad_y * 2)
 
-        content_width = text_w if has_title else desc_wrap_rect.width()
+        content_width = max(text_w, desc_wrap_rect.width())
         box_w = content_width + pad_x * 2 + delete_width
         box_h = text_line_height + desc_block_height
 
@@ -1876,6 +1881,17 @@ class MeasurementOverlay(Overlay):
             outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.RoundJoin)
         elif cap == "arrow_open":
             barbs = open_arrow_barbs_path(lw)
+
+            # Stroking the barbs with a miter join pushes the apex's
+            # sharp point past the true endpoint (the barb centerlines
+            # meet at the origin, but the miter extends the outer edge
+            # beyond it). Shift the barbs back by that overhang so the
+            # visible tip lands on the endpoint, matching the solid
+            # arrow's apex rather than poking past it.
+            arrow_len, arrow_half = arrow_dims(lw)
+            barb_len = math.hypot(arrow_len, arrow_half)
+            miter_overhang = (lw / 2) * barb_len / arrow_half
+            barbs.translate(-miter_overhang, 0)
 
             # MiterJoin (not RoundJoin) at the barbs' shared apex so the
             # tip comes to a sharp point like the solid arrow's, rather
