@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QKeyEvent, QMouseEvent
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtWidgets import QWidget
 
 from UI.widgets.measurements.measurement_meta import MeasurementMeta
 from UI.widgets.preview_overlay.measurement_customize_menu import MeasurementCustomizeMenu
@@ -43,9 +43,9 @@ class MeasurementInteraction:
 
     def set_active(self, active: bool) -> None:
         """
-        Called from OverlayLabel.set_measurement_mode_active — tag
-        hover/tooltip state and an open popup shouldn't survive
-        switching away from the measurement tab.
+        Called from OverlayLabel.set_measurement_mode_active — tag hover
+        state and an open popup shouldn't survive switching away from
+        the measurement tab.
 
         Checks the menu's own tracked index rather than ``isVisible()``:
         by the time this runs on a tab switch, CameraPreview (the
@@ -60,7 +60,6 @@ class MeasurementInteraction:
         self._active = active
         if active:
             return
-        QToolTip.hideText()
         if self._menu.current_index() is not None:
             self._menu.close_immediately()
         self._popup_tracking_index = None
@@ -96,7 +95,15 @@ class MeasurementInteraction:
         self._video_label.update()
 
     def handle_mouse_move(self, event: QMouseEvent) -> None:
-        """Tag hover and anchor-point proximity — a passive check alongside whatever else the move turns out to be, never a reason by itself to accept the event."""
+        """
+        Tag hover and anchor-point proximity — a passive check alongside
+        whatever else the move turns out to be, never a reason by itself
+        to accept the event. Hovering a tag reveals its description
+        in-box, the same rendering "always show description" uses (see
+        MeasurementOverlay._draw_measurement_label) rather than a
+        separate floating tooltip, so a hover change needs a repaint the
+        same as any other hover-driven redraw.
+        """
         if not self._active or self._overlay.dragging_endpoint or self._overlay.in_progress:
             return
         pos = event.position().toPoint()
@@ -105,7 +112,6 @@ class MeasurementInteraction:
         changed = self._overlay.update_proximity(pos, display_rect, widget_rect) or changed
         if changed:
             self._video_label.update()
-        self._update_hover_tooltip(event.globalPosition().toPoint())
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         """True if Delete/Backspace removed the hovered tag's measurement — OverlayLabel should accept the event rather than let it fall through to any other shortcut handling."""
@@ -123,7 +129,6 @@ class MeasurementInteraction:
         repaint = self._overlay.clear_proximity() or repaint
         if repaint:
             self._video_label.update()
-        QToolTip.hideText()
 
     def handle_paint_finished(self) -> None:
         """Called after every OverlayLabel repaint — keeps an open customize menu following its tag's current on-screen position through pans/zooms instead of drifting away once positioned."""
@@ -146,15 +151,6 @@ class MeasurementInteraction:
         if box is None:
             return None
         return QPoint(round(box.center().x()), round(box.bottom()))
-
-    def _update_hover_tooltip(self, global_pos: QPoint) -> None:
-        """Show the hovered measurement's description as a tooltip, if it has one — hides any tooltip otherwise, since a tag can be hovered without a description or not hovered at all."""
-        index = self._overlay.hovered_index
-        meta = self._overlay.measurement_meta(index) if index is not None else None
-        if meta is None or not meta.description:
-            QToolTip.hideText()
-            return
-        QToolTip.showText(global_pos, meta.description, self._video_label)
 
     def _open_menu(self, index: int, anchor: QPoint) -> None:
         meta = self._overlay.measurement_meta(index)

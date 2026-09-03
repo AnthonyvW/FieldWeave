@@ -1077,15 +1077,23 @@ class MeasurementOverlay(Overlay):
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
-        description = meta.description if meta.always_show_description else None
-        # No title and no value suffix (e.g. a bare point, or before DPI
-        # is set) → the tag shows only if a description is set to always
-        # show; otherwise there's nothing worth a box.
-        if not text and not description:
+        # Whether the tag exists at all (independent of hover — a tag
+        # that doesn't draw a box has no hit-test region, so it could
+        # never become hovered in the first place): no title and no
+        # value suffix (e.g. a bare point, or before DPI is set) means
+        # there's nothing worth a box unless a description is set to
+        # always show.
+        always_show = meta.description if meta.always_show_description else None
+        if not text and not always_show:
             return
+        # The description also reveals on hover, same as always-show,
+        # so hovering a tag whose box already exists shows its
+        # description without needing the checkbox on.
+        hovered = index == self._hovered_index
+        description = meta.description if (meta.always_show_description or hovered) else None
         box, delete_box = self._draw_label(
             painter, rect, anchor, text, scale_x, scale_y,
-            show_delete=index == self._hovered_index,
+            show_delete=hovered,
             bg_color=self._resolve_color(meta.tag_background_color, OVERLAY_LINE_COLOR),
             text_color=self._resolve_color(meta.tag_text_color, OVERLAY_OUTLINE_COLOR),
             description=description,
@@ -1258,15 +1266,27 @@ class MeasurementOverlay(Overlay):
         return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
 
     @staticmethod
-    def _right_rounded_path(rect: QRectF, radius: float) -> QPainterPath:
-        """Rect with only its right two corners rounded (matching the tag's own rounding where the delete strip meets the tag's edge) and square left corners (where it meets the tag's text, not an outer edge)."""
+    def _right_rounded_path(rect: QRectF, radius: float, round_bottom: bool = True) -> QPainterPath:
+        """
+        Rect with its right corners rounded (matching the tag's own
+        rounding where the delete strip meets the tag's edge) and square
+        left corners (where it meets the tag's text, not an outer edge).
+        *round_bottom* rounds the bottom-right corner too — true when
+        *rect* is the tag's full height, false when it's just the header
+        row (a description block continues below it — see feature 3's
+        "delete only in the header" — so that corner is an interior seam,
+        not a real edge, and stays square).
+        """
         r = min(radius, rect.width() / 2, rect.height() / 2)
         path = QPainterPath()
         path.moveTo(rect.left(), rect.top())
         path.lineTo(rect.right() - r, rect.top())
         path.arcTo(rect.right() - 2 * r, rect.top(), 2 * r, 2 * r, 90, -90)
-        path.lineTo(rect.right(), rect.bottom() - r)
-        path.arcTo(rect.right() - 2 * r, rect.bottom() - 2 * r, 2 * r, 2 * r, 0, -90)
+        if round_bottom:
+            path.lineTo(rect.right(), rect.bottom() - r)
+            path.arcTo(rect.right() - 2 * r, rect.bottom() - 2 * r, 2 * r, 2 * r, 0, -90)
+        else:
+            path.lineTo(rect.right(), rect.bottom())
         path.lineTo(rect.left(), rect.bottom())
         path.closeSubpath()
         return path
@@ -1317,9 +1337,11 @@ class MeasurementOverlay(Overlay):
         the same pre-paint-transform "rect" frame *anchor* was given in
         (see _local_rect_to_rect_space) so callers and _hit_test_tag
         keep working with the coordinate system they already expect.
-        The delete strip spans the box's full height and sits flush
-        against its right edge, rather than floating as a small chip, so
-        it reads as the whole right end of the tag rather than a
+        The delete strip spans the header row's height (the whole tag's
+        height if there's no header — see local_delete_box) and sits
+        flush against its right edge, rather than floating as a small
+        chip, so it reads as the whole right end of the header rather
+        than a
         separate control on top of it. ``_draw_measurement_label``
         records the box/delete rects per measurement index so a later
         mouse event can hit-test against them (see ``_hit_test_tag``);
@@ -1344,6 +1366,13 @@ class MeasurementOverlay(Overlay):
         has_title = bool(text)
         text_line_height = (metrics.height() + pad_y * 2) if has_title else 0.0
         text_w = metrics.horizontalAdvance(text) if has_title else 0.0
+        # The delete strip lives in the header row only (see below), so
+        # it only needs to widen the box on the title's own account; a
+        # title-less tag has no header row for it to sit in, so it falls
+        # back to spanning the tag's full height instead — see
+        # local_delete_box below — and needs to widen the description
+        # row it then overlaps.
+        header_w = text_w + delete_width if has_title else 0.0
 
         desc_font: QFont | None = None
         desc_block_height = 0.0
@@ -1361,8 +1390,9 @@ class MeasurementOverlay(Overlay):
             # divider rather than crowding it.
             desc_block_height = desc_wrap_rect.height() + (pad_y * 3 if has_title else pad_y * 2)
 
-        content_width = max(text_w, desc_wrap_rect.width())
-        box_w = content_width + pad_x * 2 + delete_width
+        desc_w = desc_wrap_rect.width() + (delete_width if not has_title else 0.0)
+        content_width = max(header_w, desc_w)
+        box_w = content_width + pad_x * 2
         box_h = text_line_height + desc_block_height
 
         local_box = QRectF(-box_w / 2, -OVERLAY_LABEL_OFFSET - box_h, box_w, box_h)
@@ -1385,11 +1415,17 @@ class MeasurementOverlay(Overlay):
         painter.setBrush(Qt.BrushStyle.NoBrush if transparent_bg else QBrush(bg_color))
         painter.drawRoundedRect(local_box, OVERLAY_LABEL_CORNER_RADIUS, OVERLAY_LABEL_CORNER_RADIUS)
 
-        content_w = local_box.width() - delete_width
+        # The header row (title) makes room for the delete strip; the
+        # description row below it doesn't need to — the strip lives only
+        # in the header (see local_delete_box below) — except when there
+        # is no header at all, in which case the strip spans the tag's
+        # full height and the description row must dodge it too.
+        header_content_w = local_box.width() - delete_width
+        desc_content_w = local_box.width() - (delete_width if not has_title else 0.0)
         if has_title:
             painter.setPen(QPen(text_color))
             painter.drawText(
-                QRectF(local_box.x(), local_box.y(), content_w, text_line_height),
+                QRectF(local_box.x(), local_box.y(), header_content_w, text_line_height),
                 Qt.AlignmentFlag.AlignCenter, text,
             )
 
@@ -1409,7 +1445,7 @@ class MeasurementOverlay(Overlay):
             painter.setFont(desc_font)
             painter.setPen(QPen(muted))
             desc_box = QRectF(
-                local_box.x() + (content_w - desc_wrap_rect.width()) / 2,
+                local_box.x() + (desc_content_w - desc_wrap_rect.width()) / 2,
                 desc_top,
                 desc_wrap_rect.width(),
                 desc_wrap_rect.height(),
@@ -1419,10 +1455,14 @@ class MeasurementOverlay(Overlay):
 
         local_delete_box: QRectF | None = None
         if show_delete:
-            local_delete_box = QRectF(local_box.right() - delete_width, local_box.top(), delete_width, local_box.height())
+            # Confined to the header row (feature: "only in a tag's
+            # header") — or, lacking one, the tag's full height, since
+            # there's no header/body split to confine it to.
+            delete_height = text_line_height if has_title else local_box.height()
+            local_delete_box = QRectF(local_box.right() - delete_width, local_box.top(), delete_width, delete_height)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(OVERLAY_DELETE_BG_COLOR))
-            painter.drawPath(self._right_rounded_path(local_delete_box, OVERLAY_LABEL_CORNER_RADIUS))
+            painter.drawPath(self._right_rounded_path(local_delete_box, OVERLAY_LABEL_CORNER_RADIUS, round_bottom=not has_title))
 
             glyph_size = min(OVERLAY_DELETE_SIZE, local_delete_box.width(), local_delete_box.height()) * 0.7
             glyph_box = QRectF(
@@ -1762,8 +1802,8 @@ class MeasurementOverlay(Overlay):
         total_outline_width = line_width + outline_width * 2
         pattern = resolve_dash_pattern(dash_style, line_width)
 
-        body_p1 = self._point_along(p1, p2, self._cap_reach(start_cap, lw))
-        body_p2 = self._point_along(p2, p1, self._cap_reach(end_cap, lw))
+        body_p1 = self._point_along(p1, p2, self._cap_reach(start_cap, lw, stroke_scale))
+        body_p2 = self._point_along(p2, p1, self._cap_reach(end_cap, lw, stroke_scale))
 
         # Qt dash patterns are in multiples of the stroking width, so
         # each pass normalizes pattern's screen-pixel targets against its
@@ -1776,7 +1816,7 @@ class MeasurementOverlay(Overlay):
         outline_path = self._stroke_path(body_p1, body_p2, total_outline_width / stroke_scale, outline_pattern, round_caps)
         fill_path = self._stroke_path(body_p1, body_p2, lw, fill_pattern, round_caps)
         for origin, tip, cap in ((p2, p1, start_cap), (p1, p2, end_cap)):
-            cap_outline, cap_fill = self._cap_shapes(origin, tip, cap, lw, ow)
+            cap_outline, cap_fill = self._cap_shapes(origin, tip, cap, lw, ow, stroke_scale)
             if cap_outline is not None:
                 outline_path = outline_path.united(cap_outline)
                 fill_path = fill_path.united(cap_fill)
@@ -1796,10 +1836,25 @@ class MeasurementOverlay(Overlay):
         return QPointF(origin.x() + dx * t, origin.y() + dy * t)
 
     @classmethod
-    def _cap_reach(cls, cap: str, lw: float) -> float:
-        """How far the "arrow" cap's own shape extends back from the true endpoint — the body is shortened by this much so its flat end sits at the arrowhead's base instead of poking past the tip once the two are unioned. Every other style unions its shape directly onto the shaft's own flat, unshortened end: "square" and "curved" are no wider than the shaft (their disc/rect never reaches past the true endpoint), and "arrow_open" has no shape to make room for at all."""
-        if cap == "arrow":
-            return arrow_dims(lw)[0]
+    def _cap_reach(cls, cap: str, lw: float, stroke_scale: float) -> float:
+        """
+        How far the "arrow"/"arrow_open" cap's own shape extends back
+        from the true endpoint — the body is shortened by this much so
+        its flat end sits at the arrowhead's base instead of poking past
+        the tip once the two are unioned/overlaid. Every other style
+        unions its shape directly onto the shaft's own flat, unshortened
+        end: "square" and "curved" are no wider than the shaft (their
+        disc/rect never reaches past the true endpoint).
+
+        "arrow_open" needs this too, unlike a plain round/flat cap: its
+        barbs converge to a point only right at the tip, so without
+        shortening the shaft, the shaft's own full-width flat end would
+        sit right at that point and square it off — the same reasoning
+        "arrow" already needed, just with an open barb shape instead of
+        a solid triangle.
+        """
+        if cap in ("arrow", "arrow_open"):
+            return arrow_dims(lw, stroke_scale)[0]
         return 0.0
 
     @staticmethod
@@ -1833,7 +1888,7 @@ class MeasurementOverlay(Overlay):
 
     @classmethod
     def _cap_shapes(
-        cls, origin: QPointF, tip: QPointF, cap: str, lw: float, ow: float
+        cls, origin: QPointF, tip: QPointF, cap: str, lw: float, ow: float, stroke_scale: float
     ) -> tuple[QPainterPath | None, QPainterPath | None]:
         """
         (outline shape, fill shape) for *cap* at *tip*, pointing away
@@ -1877,18 +1932,20 @@ class MeasurementOverlay(Overlay):
             outline_shape = QPainterPath()
             outline_shape.addRect(QRectF(0, -(half + ow), half + ow, 2 * (half + ow)))
         elif cap == "arrow":
-            fill_shape = arrow_head_path(lw)
+            fill_shape = arrow_head_path(lw, stroke_scale)
             outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.RoundJoin)
         elif cap == "arrow_open":
-            barbs = open_arrow_barbs_path(lw)
+            barbs = open_arrow_barbs_path(lw, stroke_scale)
 
             # Stroking the barbs with a miter join pushes the apex's
             # sharp point past the true endpoint (the barb centerlines
             # meet at the origin, but the miter extends the outer edge
             # beyond it). Shift the barbs back by that overhang so the
             # visible tip lands on the endpoint, matching the solid
-            # arrow's apex rather than poking past it.
-            arrow_len, arrow_half = arrow_dims(lw)
+            # arrow's apex rather than poking past it. The shaft itself
+            # is separately shortened by the same reach (see
+            # _cap_reach) so its flat end doesn't square off the point.
+            arrow_len, arrow_half = arrow_dims(lw, stroke_scale)
             barb_len = math.hypot(arrow_len, arrow_half)
             miter_overhang = (lw / 2) * barb_len / arrow_half
             barbs.translate(-miter_overhang, 0)

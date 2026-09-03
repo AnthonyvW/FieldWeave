@@ -25,14 +25,31 @@ MEASUREMENT_LINE_CAPS = ("curved", "square", "arrow", "arrow_open")
 MEASUREMENT_MIDPOINT_STYLES = ("none", "tick", "x")
 
 
-def arrow_dims(line_width: float) -> tuple[float, float]:
-    """(length, half-width) of an arrowhead sized for *line_width* (already counter-scaled to screen pixels) — shared by the solid and open arrow caps so they read as the same size arrowhead."""
-    return max(line_width * 4, 10.0), max(line_width * 2.2, 5.0)
+def arrow_dims(line_width: float, stroke_scale: float = 1.0) -> tuple[float, float]:
+    """
+    (length, half-width) of an arrowhead sized for *line_width* (already
+    counter-scaled to screen pixels, i.e. divided by *stroke_scale* the
+    same way the shaft's own width is) — shared by the solid and open
+    arrow caps so they read as the same size arrowhead.
+
+    The 10.0/5.0 floors keep a thin line's arrowhead from shrinking below
+    a legible size, and — like every other fixed-on-screen-size value in
+    this module (see OVERLAY_DASH_LENGTH, _DASH_REFERENCE_MIN) — that
+    floor is itself a *screen-pixel* target, not a rect-space one. Left
+    undivided, the floor would dominate at any zoom level where
+    ``line_width * 4``/``* 2.2`` falls under it (true for the default 2px
+    line even unzoomed), and since the whole shape is later scaled back
+    up by *stroke_scale* when painted, an undivided floor grows the
+    arrowhead ever larger as you zoom in instead of holding it constant.
+    Dividing the floor by *stroke_scale* here cancels that the same way
+    ``line_width`` itself already does.
+    """
+    return max(line_width * 4, 10.0 / stroke_scale), max(line_width * 2.2, 5.0 / stroke_scale)
 
 
-def arrow_head_path(line_width: float) -> QPainterPath:
+def arrow_head_path(line_width: float, stroke_scale: float = 1.0) -> QPainterPath:
     """Closed triangle for a solid ("arrow") arrowhead, tip at the origin and pointing in the -x direction — the caller translates/rotates it onto a segment's actual endpoint."""
-    arrow_len, arrow_half_width = arrow_dims(line_width)
+    arrow_len, arrow_half_width = arrow_dims(line_width, stroke_scale)
     path = QPainterPath()
     path.moveTo(0, 0)
     path.lineTo(-arrow_len, -arrow_half_width)
@@ -41,9 +58,9 @@ def arrow_head_path(line_width: float) -> QPainterPath:
     return path
 
 
-def open_arrow_barbs_path(line_width: float) -> QPainterPath:
+def open_arrow_barbs_path(line_width: float, stroke_scale: float = 1.0) -> QPainterPath:
     """A single connected V flaring back from the origin for an ("arrow_open") arrowhead — meant to be stroked with a miter join so its apex at the origin comes to a sharp point like arrow_head_path's tip, rather than the rounded nub two separate round-capped strokes would leave. Tip at the origin, pointing in the -x direction."""
-    arrow_len, arrow_half_width = arrow_dims(line_width)
+    arrow_len, arrow_half_width = arrow_dims(line_width, stroke_scale)
     path = QPainterPath()
     path.moveTo(-arrow_len, -arrow_half_width)
     path.lineTo(0, 0)
