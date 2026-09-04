@@ -119,6 +119,10 @@ class MeasurementMeta(NamedTuple):
     # "text" annotation: draw the text bold. (Its content — meta.title — may
     # contain newlines for a multi-line annotation.)
     font_bold: bool = False
+    # "point" category: the placed marker's shape — "dot" (filled, the
+    # original look), "circle" (hollow ring), "square", "diamond",
+    # "cross", "x", or "triangle" — see MeasurementOverlay._draw_point_marker.
+    point_style: str = "dot"
 
 
 DEFAULT_META = MeasurementMeta()

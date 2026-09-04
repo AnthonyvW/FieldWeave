@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QEvent, QObject, Qt, Signal, QPoint, QPointF, QSize
 from PySide6.QtGui import QColor, QFont, QIcon, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
@@ -41,6 +43,7 @@ def block_wheel(widget: QWidget) -> None:
     widget.installEventFilter(_WHEEL_BLOCKER)
 
 from UI.widgets.measurements.lines import MEASUREMENT_LINE_CAPS, MEASUREMENT_MIDPOINT_STYLES
+from UI.widgets.measurements.points import MEASUREMENT_POINT_STYLES
 from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
 from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.measurement_style import (
@@ -168,6 +171,53 @@ def _midpoint_style_icon(style: str) -> QIcon:
     elif style == "x":
         painter.drawLine(QPointF(cx - half, cy - half), QPointF(cx + half, cy + half))
         painter.drawLine(QPointF(cx + half, cy - half), QPointF(cx - half, cy + half))
+    painter.end()
+    return QIcon(pixmap)
+
+
+_POINT_STYLE_POLYGON_OFFSETS = {
+    "square": ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)),
+    "diamond": ((0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)),
+    "triangle": ((0.0, -1.0), (0.866, 0.5), (-0.866, 0.5)),
+}
+
+
+def _point_style_icon(style: str) -> QIcon:
+    """A filled/stroked preview of *style*'s marker shape, centered in the icon box — mirrors MeasurementOverlay._draw_point_marker closely enough to read as the same choice."""
+    pixmap = QPixmap(_ICON_SIZE)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor("#333333")
+    cx, cy = _ICON_SIZE.width() / 2, _ICON_SIZE.height() / 2
+    r = _ICON_SIZE.height() / 2 - 3.0
+
+    if style == "circle":
+        pen = QPen(color)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(cx, cy), r, r)
+    elif style in ("cross", "x"):
+        pen = QPen(color)
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        axes = ((1.0, 0.0), (0.0, 1.0)) if style == "cross" else ((1.0, 1.0), (1.0, -1.0))
+        for ax, ay in axes:
+            norm = math.hypot(ax, ay) or 1.0
+            ux, uy = ax / norm * r, ay / norm * r
+            painter.drawLine(QPointF(cx - ux, cy - uy), QPointF(cx + ux, cy + uy))
+    elif style in _POINT_STYLE_POLYGON_OFFSETS:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygonF([
+            QPointF(cx + dx * r, cy + dy * r) for dx, dy in _POINT_STYLE_POLYGON_OFFSETS[style]
+        ]))
+    else:  # "dot"
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(cx, cy), r, r)
     painter.end()
     return QIcon(pixmap)
 
@@ -817,6 +867,13 @@ class MeasurementCustomizeMenu(QFrame):
         self._midpoint_picker.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._midpoint_picker)
 
+        # "Point" only — its own marker shape, in place of a line's caps.
+        self._point_style_picker = _StylePicker(
+            "Point Style", [(style, _point_style_icon(style)) for style in MEASUREMENT_POINT_STYLES]
+        )
+        self._point_style_picker.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._point_style_picker)
+
         # Caps are a line-only decoration (MeasurementOverlay never
         # passes start_cap/end_cap when drawing a circle) — open_for
         # hides this pair for any kind whose category isn't "line".
@@ -1007,6 +1064,8 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_text_picker.setVisible(not show_scalebar)
         self._midpoint_picker.set_value(meta.midpoint_style)
         self._midpoint_picker.setVisible(show_caps)
+        self._point_style_picker.set_value(meta.point_style)
+        self._point_style_picker.setVisible(is_point)
         self._start_cap_picker.set_value(meta.line_start_cap)
         self._start_cap_picker.setVisible(show_caps)
         self._end_cap_picker.set_value(meta.line_end_cap)
@@ -1159,6 +1218,7 @@ class MeasurementCustomizeMenu(QFrame):
             # stale checkbox state from another kind never sticks.
             tag_background_transparent=False if self._is_text else self._tag_transparent_check.isChecked(),
             midpoint_style=self._midpoint_picker.value(),
+            point_style=self._point_style_picker.value(),
             show_area=self._area_check.isChecked(),
             area_unit=self._area_unit_combo.currentData(),
             fill_color=self._fill_color_picker.effective_color() if self._fill_enabled_check.isChecked() else "",

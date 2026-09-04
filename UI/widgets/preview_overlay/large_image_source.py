@@ -500,6 +500,11 @@ class LargeImageSource(FrameSource):
     def dims(self) -> tuple[int, int]:
         return self.source_height, self.source_width
 
+    @property
+    def is_pyramid(self) -> bool:
+        """Whether this source decodes on demand from a reduced-resolution backend (a real pyramid TIFF, or a JPEG's cheap draft decode) rather than a plain flat file — reading its full native-resolution region (see region()) can mean decoding a multi-gigapixel image into memory, so callers use this to withhold operations that would do that (e.g. a "full-res" export) for a source like this."""
+        return self._reduced_source is not None
+
     def thumbnail(self) -> np.ndarray:
         return self.preview if self.preview is not None else np.zeros((1, 1, 3), dtype=np.uint8)
 

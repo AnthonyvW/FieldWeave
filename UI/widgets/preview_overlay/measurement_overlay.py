@@ -1173,7 +1173,7 @@ class MeasurementOverlay(Overlay):
                 cap_size=meta.cap_size_scale, fill_color=self._resolve_fill(meta),
                 indicator_enabled=meta.indicator_enabled, indicator_color=indicator_color,
                 indicator_opacity=meta.indicator_opacity, indicator_dash_style=meta.indicator_dash_style,
-                midpoint_style=meta.midpoint_style,
+                midpoint_style=meta.midpoint_style, point_style=meta.point_style,
             )
             entry = DEFAULT_REGISTRY.get(measurement.kind)
             if entry is not None and entry.category == "angle" and meta.indicator_enabled:
@@ -1456,6 +1456,7 @@ class MeasurementOverlay(Overlay):
         indicator_opacity: float = 1.0,
         indicator_dash_style: str = "dash",
         midpoint_style: str = "none",
+        point_style: str = "dot",
     ) -> None:
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None:
@@ -1571,7 +1572,19 @@ class MeasurementOverlay(Overlay):
                 painter, rect, points[0], scale_x, scale_y,
                 line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width,
+                style=point_style,
             )
+
+    # Unit-shape vertex offsets (each axis independently in [-1, 1], so a
+    # per-axis radius multiply keeps the shape undistorted under a
+    # non-uniform zoom exactly the way the "dot"/"circle" styles' rx/ry
+    # already do) for every polygon point style. None for a style drawn
+    # some other way ("dot"/"circle" as ellipses, "cross"/"x" as strokes).
+    _POINT_POLYGON_OFFSETS: dict[str, tuple[tuple[float, float], ...]] = {
+        "square": ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)),
+        "diamond": ((0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)),
+        "triangle": ((0.0, -1.0), (0.866, 0.5), (-0.866, 0.5)),
+    }
 
     def _draw_point_marker(
         self,
@@ -1585,32 +1598,38 @@ class MeasurementOverlay(Overlay):
         line_width: float = OVERLAY_LINE_WIDTH,
         outline_color: QColor = OVERLAY_OUTLINE_COLOR,
         outline_width: float = OVERLAY_OUTLINE_WIDTH,
+        style: str = "dot",
     ) -> None:
         """
-        A filled dot for a placed "Point" measurement — the one kind
-        _draw_measurement handled nowhere before, so a placed point was
-        only ever visible while hovered/dragged (see draw()'s own
-        endpoint markers) rather than on its own. *line_width* sets the
-        dot's radius, scaled off OVERLAY_POINT_RADIUS the same
-        proportion OVERLAY_LINE_WIDTH would scale a line's stroke — a
-        point has no length for "thickness" to describe, but "Line
-        Thickness" still does something sensible: a bigger dot.
+        A marker for a placed "Point" measurement, in one of several
+        styles (meta.point_style) — the one kind _draw_measurement
+        handled nowhere before, so a placed point was only ever visible
+        while hovered/dragged (see draw()'s own endpoint markers) rather
+        than on its own. *line_width* sets the marker's overall size,
+        scaled off OVERLAY_POINT_RADIUS the same proportion
+        OVERLAY_LINE_WIDTH would scale a line's stroke — a point has no
+        length for "thickness" to describe, but "Line Thickness" still
+        does something sensible: a bigger marker.
 
-        Uses *scale_x*/*scale_y* independently for the dot itself,
-        exactly like _draw_endpoint, rather than a single averaged
-        scale — at zoom levels where the crop's aspect ratio hasn't yet
-        caught up to the widget's (see ZoomPreviewOverlay.current_scale_xy),
-        those two differ, and a radius corrected by their average comes
-        out stretched into an ellipse along whichever axis is scaled
-        less than the other. The thin outline ring's *width* still uses
-        the average, same as every other kind's outline pen — only the
-        dot's own two-dimensional shape needs both axes to stay round.
+        Every style's own size is derived from *scale_x*/*scale_y*
+        independently, exactly like _draw_endpoint, rather than a single
+        averaged scale — at zoom levels where the crop's aspect ratio
+        hasn't yet caught up to the widget's (see
+        ZoomPreviewOverlay.current_scale_xy), those two differ, and a
+        shape sized off their average comes out stretched along whichever
+        axis is scaled less than the other. Since the ambient paint
+        transform's non-uniform scale is a plain per-axis multiply, a
+        shape whose own vertex offsets are pre-divided by scale_x/scale_y
+        (exactly what rx/ry already do for "dot") reads undistorted after
+        that transform applies for any polygon, not just an ellipse —
+        see _POINT_POLYGON_OFFSETS.
 
-        Same outline-then-fill layering as every other kind (a wider
-        outline-colored disc under a narrower line-colored one) so
-        outline_enabled/outline_color/outline_thickness behave
-        identically here, including a disabled outline fully covering
-        itself at zero width (see draw()'s own outline_width comment).
+        Every style shares the same outline-then-fill layering as every
+        other kind (a wider outline-colored shape under a narrower
+        line-colored one) so outline_enabled/outline_color/
+        outline_thickness behave identically here, including a disabled
+        outline fully covering itself at zero width (see draw()'s own
+        outline_width comment).
         """
         center = self._to_point(rect, point)
         stroke_scale = (scale_x + scale_y) / 2
@@ -1618,6 +1637,71 @@ class MeasurementOverlay(Overlay):
         outline_extra = outline_width / stroke_scale
         rx, ry = base_radius / scale_x, base_radius / scale_y
 
+        if style == "circle":
+            # A hollow ring rather than a filled disc: two plain strokes
+            # (no brush), the same outline-then-fill widths as elsewhere,
+            # so the interior stays transparent.
+            outline_pen = QPen(outline_color)
+            outline_pen.setWidthF((line_width + outline_width * 2) / stroke_scale)
+            painter.setPen(outline_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, rx, ry)
+            fill_pen = QPen(line_color)
+            fill_pen.setWidthF(line_width / stroke_scale)
+            painter.setPen(fill_pen)
+            painter.drawEllipse(center, rx, ry)
+            return
+
+        if style in ("cross", "x"):
+            # Two perpendicular ("cross") or diagonal ("x") strokes,
+            # centered on the point — the same stroke-pair technique the
+            # line midpoint marker uses (see _midpoint_marker_paths).
+            axes = ((1.0, 0.0), (0.0, 1.0)) if style == "cross" else ((1.0, 1.0), (1.0, -1.0))
+            segments = []
+            for ax, ay in axes:
+                norm = math.hypot(ax, ay) or 1.0
+                ux, uy = ax / norm, ay / norm
+                segments.append((
+                    QPointF(center.x() - ux * rx, center.y() - uy * ry),
+                    QPointF(center.x() + ux * rx, center.y() + uy * ry),
+                ))
+            for width, color in (
+                ((line_width + outline_width * 2) / stroke_scale, outline_color),
+                (line_width / stroke_scale, line_color),
+            ):
+                pen = QPen(color)
+                pen.setWidthF(width)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                for a, b in segments:
+                    painter.drawLine(a, b)
+            return
+
+        offsets = self._POINT_POLYGON_OFFSETS.get(style)
+        if offsets is not None:
+            fill_rx, fill_ry = rx, ry
+            outline_rx, outline_ry = rx + outline_extra, ry + outline_extra
+            fill_path = QPainterPath()
+            outline_path = QPainterPath()
+            for i, (dx, dy) in enumerate(offsets):
+                fp = QPointF(center.x() + dx * fill_rx, center.y() + dy * fill_ry)
+                op = QPointF(center.x() + dx * outline_rx, center.y() + dy * outline_ry)
+                if i == 0:
+                    fill_path.moveTo(fp)
+                    outline_path.moveTo(op)
+                else:
+                    fill_path.lineTo(fp)
+                    outline_path.lineTo(op)
+            fill_path.closeSubpath()
+            outline_path.closeSubpath()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(outline_color))
+            painter.drawPath(outline_path)
+            painter.setBrush(QBrush(line_color))
+            painter.drawPath(fill_path)
+            return
+
+        # "dot" (default) and any unrecognized style — a solid filled disc.
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(outline_color))
         painter.drawEllipse(center, rx + outline_extra, ry + outline_extra)

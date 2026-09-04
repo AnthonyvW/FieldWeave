@@ -41,6 +41,12 @@ _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".tif", ".tiff"})
 # not a real value. See _load_image_routine.
 _MIN_PLAUSIBLE_METADATA_DPI = 1.0
 
+# Export kinds that read a loaded source's full native-resolution region
+# (see CameraPreview._current_full_frame_image) — disabled whenever that
+# source is a pyramid (see LargeImageSource.is_pyramid), since decoding one
+# fully can mean a multi-gigapixel image in memory.
+_PYRAMID_UNSAFE_EXPORT_KINDS = frozenset({"full_res", "full_res_sidecar"})
+
 
 class CaptureMode(Enum):
     LIVE = "live"
@@ -632,6 +638,10 @@ class CaptureControlWidget(QWidget):
         self._loaded_source = source
         self._loaded_image_path = path
         self._loaded_image_label.setText(path.name)
+        # _set_mode below no-ops (and so skips _refresh_capture_availability)
+        # when re-loading a different image while already in Loaded Image
+        # mode, so the pyramid-export check needs its own explicit call here.
+        self._update_pyramid_export_availability()
 
         no_dpi_found = dpi is None
         if no_dpi_found:
@@ -768,6 +778,8 @@ class CaptureControlWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_capture_availability(self) -> None:
+        self._update_pyramid_export_availability()
+
         ctx = get_app_context()
         available = ctx.camera is not None and ctx.camera.underlying_camera.is_open
 
@@ -785,6 +797,27 @@ class CaptureControlWidget(QWidget):
             self._capture_button.setEnabled(available and self._mode == CaptureMode.LIVE)
         else:
             self._capture_button.setEnabled(True)
+
+    def _update_pyramid_export_availability(self) -> None:
+        """
+        Disables the export kinds that would decode a loaded source's
+        full native-resolution region (see _PYRAMID_UNSAFE_EXPORT_KINDS)
+        whenever that source is a pyramid — falling back to the closest
+        safe kind (Preview) if one of them was selected. A no-op, and
+        every kind stays enabled, in Live mode or with a flat (non-
+        pyramid) loaded image.
+        """
+        is_pyramid = (
+            self._mode == CaptureMode.LOADED_IMAGE
+            and self._loaded_source is not None
+            and self._loaded_source.is_pyramid
+        )
+        model = self._export_kind_combo.model()
+        for row in range(self._export_kind_combo.count()):
+            if self._export_kind_combo.itemData(row) in _PYRAMID_UNSAFE_EXPORT_KINDS:
+                model.item(row).setEnabled(not is_pyramid)
+        if is_pyramid and self._export_kind_combo.currentData() in _PYRAMID_UNSAFE_EXPORT_KINDS:
+            self._export_kind_combo.setCurrentIndex(0)
 
     # ------------------------------------------------------------------
     # DPI
