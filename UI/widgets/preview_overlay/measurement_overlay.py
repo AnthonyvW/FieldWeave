@@ -1061,6 +1061,43 @@ class MeasurementOverlay(Overlay):
         # hides only the tag, not the geometry drawn above.
         for index, measurement in enumerate(self.measurements):
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
+            self._draw_extra_measure_labels(painter, rect, measurement, scale_x, scale_y, full_dims)
+
+    def _draw_extra_measure_labels(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        measurement: Measurement,
+        scale_x: float,
+        scale_y: float,
+        full_dims: tuple[int, int] | None,
+    ) -> None:
+        """
+        Secondary, non-interactive distance tags a kind exposes via
+        MeasurementKind.extra_measures — every gap between an arbitrary
+        parallel's lines, or the perpendicular leg of a 3pt perp. Not
+        recorded into _label_boxes (so not hoverable/clickable), unlike
+        the one primary tag.
+        """
+        meta = measurement.meta
+        if meta.hidden or full_dims is None:
+            return
+        entry = DEFAULT_REGISTRY.get(measurement.kind)
+        if entry is None or entry.extra_measures is None:
+            return
+        dims = self._reference_dims(full_dims)
+        unit = meta.unit if meta.unit is not None else self._unit
+        if dims is None or not self._can_measure(unit):
+            return
+        decimals = meta.decimal_places
+        for anchor, distance_px in entry.extra_measures(measurement.points, dims):
+            text = format_length(distance_px, self.dpi or 1.0, unit, decimals)
+            self._draw_label(
+                painter, rect, anchor, text, scale_x, scale_y,
+                bg_color=self._resolve_color(meta.tag_background_color, OVERLAY_LINE_COLOR),
+                text_color=self._resolve_color(meta.tag_text_color, OVERLAY_OUTLINE_COLOR),
+                transparent_bg=meta.tag_background_transparent,
+            )
 
     def _measurement_center(
         self, kind: str, points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]
