@@ -398,8 +398,18 @@ class MeasurementOverlay(Overlay):
         if kind == CALIBRATION_KIND:
             self._calibration_line = resolved
         else:
-            self.measurements.append(Measurement(kind, resolved, self._resolve_meta(kind)))
+            self.measurements.append(Measurement(kind, self._apply_snap(kind, resolved), self._resolve_meta(kind)))
         return True
+
+    def _apply_snap(
+        self, kind: str, points: tuple[tuple[float, float], ...]
+    ) -> tuple[tuple[float, float], ...]:
+        """Snap a kind's derived control points onto its drawn geometry — see MeasurementKind.snap_points. A no-op for kinds without one."""
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None or entry.snap_points is None:
+            return points
+        full_dims = self._zoom_handler.current_frame_dims() if self._zoom_handler is not None else None
+        return entry.snap_points(tuple(points), full_dims)
 
     def update_preview(self, pos: QPoint, widget_rect: QRect) -> bool:
         if self._draft_points is None:
@@ -904,7 +914,7 @@ class MeasurementOverlay(Overlay):
         else:
             points[p_index] = new_point
             new_points = points
-        measurements[m_index] = measurement._replace(points=tuple(new_points))
+        measurements[m_index] = measurement._replace(points=self._apply_snap(measurement.kind, tuple(new_points)))
 
     # ------------------------------------------------------------------
     # Geometry
@@ -1027,12 +1037,15 @@ class MeasurementOverlay(Overlay):
             # (feature 10) by wrapping both passes at once.
             painter.save()
             painter.setOpacity(max(0.0, min(1.0, meta.opacity)))
+            indicator_color = self._resolve_color(meta.indicator_color, line_color)
             self._draw_measurement(
                 painter, rect, measurement.kind, measurement.points, stroke_scale, scale_x, scale_y, full_dims,
                 line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width,
                 dash_style=meta.line_dash_style, start_cap=meta.line_start_cap, end_cap=meta.line_end_cap,
                 cap_size=meta.cap_size_scale, fill_color=self._resolve_fill(meta),
+                indicator_enabled=meta.indicator_enabled, indicator_color=indicator_color,
+                indicator_opacity=meta.indicator_opacity, indicator_dash_style=meta.indicator_dash_style,
             )
             entry = DEFAULT_REGISTRY.get(measurement.kind)
             if entry is not None and entry.category == "line" and meta.midpoint_style != "none":
@@ -1041,10 +1054,10 @@ class MeasurementOverlay(Overlay):
                     line_color=line_color, line_width=line_width,
                     outline_color=outline_color, outline_width=outline_width,
                 )
-            if entry is not None and entry.category == "angle" and meta.show_angle_indicator:
+            if entry is not None and entry.category == "angle" and meta.indicator_enabled:
                 self._draw_angle_indicator(
                     painter, rect, measurement.kind, measurement.points, stroke_scale,
-                    line_color, line_width, meta.angle_indicator_dash_style,
+                    indicator_color, line_width, meta.indicator_dash_style, meta.indicator_opacity,
                 )
             painter.restore()
             if index == self._near_index or index == self._drag_measurement_index:
@@ -1155,6 +1168,10 @@ class MeasurementOverlay(Overlay):
         end_cap: str = "curved",
         cap_size: float = 1.0,
         fill_color: QColor | None = None,
+        indicator_enabled: bool = True,
+        indicator_color: QColor | None = None,
+        indicator_opacity: float = 1.0,
+        indicator_dash_style: str = "dash",
     ) -> None:
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None:
@@ -1215,25 +1232,28 @@ class MeasurementOverlay(Overlay):
                 )
             else:
                 # Genuinely disconnected segments (e.g. "4 Point Angle"'s
-                # two independent lines, or a "Parallel/Perpendicular
-                # Line"'s derived second line) — drawing them as one
-                # polyline would wrongly join them at the middle.
+                # two independent lines, or a parallel/perpendicular pair's
+                # lines) — drawing them as one polyline would wrongly join
+                # them at the middle. line_pair lines stay solid even while
+                # placing (only their indicator connectors dash); angle
+                # segments still dash during the placement preview.
+                seg_dashed = dashed and entry.category == "angle"
                 for pair in entry.segment_pairs(points, full_dims):
                     self._draw_polyline(
-                        painter, rect, pair, stroke_scale, dashed=dashed,
+                        painter, rect, pair, stroke_scale, dashed=seg_dashed,
                         line_color=line_color, line_width=line_width,
                         outline_color=outline_color, outline_width=outline_width,
                         dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
                     )
-            # Dashed guides (parallel connectors, midlines, the derived
-            # perpendicular line) — always dashed regardless of the
-            # measurement's own solid/preview state, and never capped.
-            if entry.connector_segments is not None:
+            # The indicator line: parallel/perpendicular dimension
+            # connectors and midlines. A customizable dashed guide (color,
+            # opacity, dash style, on/off — see meta.indicator_*).
+            if entry.connector_segments is not None and indicator_enabled:
                 for pair in entry.connector_segments(points, full_dims):
-                    self._draw_polyline(
-                        painter, rect, pair, stroke_scale, dashed=True,
-                        line_color=line_color, line_width=line_width,
-                        outline_color=outline_color, outline_width=outline_width,
+                    self._draw_indicator_line(
+                        painter, rect, pair, stroke_scale,
+                        indicator_color if indicator_color is not None else line_color,
+                        indicator_opacity, indicator_dash_style, line_width,
                     )
         elif entry.category == "arc" and full_dims is not None:
             # Drawn as a many-segment polyline sampled along the arc —
@@ -1376,16 +1396,48 @@ class MeasurementOverlay(Overlay):
             for a, b in segments:
                 painter.drawLine(a, b)
 
+    def _draw_indicator_line(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        segment: tuple[tuple[float, float], tuple[float, float]],
+        stroke_scale: float,
+        color: QColor,
+        opacity: float,
+        dash_style: str,
+        line_width: float,
+    ) -> None:
+        """One indicator/dimension guide segment — a single styled line
+        (color, opacity, dash style), fixed on-screen width like the rest
+        of the chrome. See meta.indicator_* and _draw_measurement."""
+        a = self._to_point(rect, segment[0])
+        b = self._to_point(rect, segment[1])
+        width = max(line_width, 1.0)
+        pen = QPen(color)
+        pen.setWidthF(width / stroke_scale)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pattern = resolve_dash_pattern(dash_style, width)
+        if pattern:
+            pen.setStyle(Qt.PenStyle.CustomDashLine)
+            pen.setDashPattern([value / width for value in pattern])
+        else:
+            pen.setStyle(Qt.PenStyle.SolidLine)
+        painter.save()
+        painter.setOpacity(max(0.0, min(1.0, opacity)))
+        painter.setPen(pen)
+        painter.drawLine(a, b)
+        painter.restore()
+
     def _draw_angle_indicator(
         self, painter: QPainter, rect: QRect, kind: str, points: tuple[tuple[float, float], ...],
         stroke_scale: float, color: QColor, line_width: float = OVERLAY_LINE_WIDTH,
-        dash_style: str = "dash",
+        dash_style: str = "dash", opacity: float = 1.0,
     ) -> None:
         """
         A dashed guide from each leg's own nearer end out to the angle's
         anchor (skipped for "3 Point Angle", whose legs already meet
         there), plus a small curved arc at the anchor sweeping between
-        the two legs' directions — see meta.show_angle_indicator.
+        the two legs' directions — see meta.indicator_enabled.
 
         The guide/arc pens track the measurement's own *line_width* so a
         thicker line gets a proportionally heavier indicator; *dash_style*
@@ -1407,6 +1459,11 @@ class MeasurementOverlay(Overlay):
             return
         anchor = self._to_point(rect, entry.angle_anchor(points))
 
+        # Fold the indicator's own opacity into the pen color's alpha
+        # (rather than painter.setOpacity, which the method's early returns
+        # would leave unbalanced against a save()).
+        color = QColor(color)
+        color.setAlphaF(max(0.0, min(1.0, opacity)))
         guide_width = line_width / stroke_scale
         far_points = []
         guide_pen = QPen(color)

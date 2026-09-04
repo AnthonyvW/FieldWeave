@@ -79,6 +79,10 @@ class EightPointParallelMeasurement(MeasurementButton):
             p1 = QPoint(x1, y)
             painter.drawLine(p0, p1)
             ends.append((p0, p1))
+        # The measurement's dimension line between the two pairs' midlines,
+        # dashed, down the middle.
+        cx = (x0 + x1) // 2
+        _dashed(painter, QPoint(cx, top + span // 6), QPoint(cx, top + span * 5 // 6))
         for p0, p1 in ends:
             self._draw_point(painter, p0, ENDPOINT_RADIUS, active)
             self._draw_point(painter, p1, ENDPOINT_RADIUS, active)
@@ -94,12 +98,21 @@ class ArbitraryParallelMeasurement(MeasurementButton):
         top = rect.top() + LINE_MARGIN
         bottom = rect.bottom() - LINE_MARGIN
         span = bottom - top
+        cx = (x0 + x1) // 2
         self._set_pen(painter, LINE_COLOR)
         for i in range(3):
             y = top + span * i // 2
             painter.drawLine(QPoint(x0, y), QPoint(x1, y))
+            # Dashed dimension connector to the line above, where each gap
+            # tag actually sits.
+            if i > 0:
+                _dashed(painter, QPoint(cx, y), QPoint(cx, top + span * (i - 1) // 2))
+                self._set_pen(painter, LINE_COLOR)
+        # First line placed by its two ends; each further line by its center.
         self._draw_point(painter, QPoint(x0, top), ENDPOINT_RADIUS, active)
         self._draw_point(painter, QPoint(x1, top), ENDPOINT_RADIUS, active)
+        for i in (1, 2):
+            self._draw_point(painter, QPoint(cx, top + span * i // 2), ENDPOINT_RADIUS, active)
 
 
 class ThreePointPerpMeasurement(MeasurementButton):
@@ -155,9 +168,15 @@ class ArbitraryPerpMeasurement(MeasurementButton):
 
         self._set_pen(painter, LINE_COLOR)
         painter.drawLine(a0, a1)
-        # Solid perpendiculars coming off the reference line.
+        # Solid perpendiculars coming off the reference line, each with its
+        # own end point where it would be placed.
+        tips = []
         for frac in (1, 2):
             x = rect.left() + LINE_MARGIN + (rect.width() - 2 * LINE_MARGIN) * frac // 3
-            painter.drawLine(QPoint(x, base), QPoint(x, top))
+            tip = QPoint(x, top)
+            painter.drawLine(QPoint(x, base), tip)
+            tips.append(tip)
         self._draw_point(painter, a0, ENDPOINT_RADIUS, active)
         self._draw_point(painter, a1, ENDPOINT_RADIUS, active)
+        for tip in tips:
+            self._draw_point(painter, tip, ENDPOINT_RADIUS, active)

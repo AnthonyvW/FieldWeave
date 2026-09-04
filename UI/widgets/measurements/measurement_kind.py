@@ -86,6 +86,12 @@ class MeasurementKind:
     category: str  # "line" | "circle" | "point" | "ellipse" | "angle" | "arc"
     resolve: Callable[[list[Point2D]], tuple[Point2D, ...] | None]
     move_point: Callable[[list[Point2D], int, Point2D], list[Point2D]] = _default_move_point
+    # Optional cleanup applied to the stored points once resolved and
+    # after every drag — snaps a derived-line control point onto the line
+    # actually drawn (e.g. a 4pt parallel's far point onto its projected,
+    # parallel-locked end) so its anchor handle sits on the geometry
+    # rather than where the raw click landed. Needs full_dims.
+    snap_points: Callable[[tuple[Point2D, ...], tuple[int, int] | None], tuple[Point2D, ...]] | None = None
     circle_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], CircleGeometry | None] | None = None
     ellipse_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], EllipseGeometry | None] | None = None
     arc_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], ArcGeometry | None] | None = None
@@ -934,6 +940,15 @@ def _parallel4_segments(
     return pairs
 
 
+def _parallel4_snap(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None) -> tuple[Point2D, ...]:
+    if len(points) < 4 or full_dims is None:
+        return points
+    second = _parallel4_second(points, full_dims)
+    if second is None:
+        return points
+    return (points[0], points[1], second[0], second[1])
+
+
 def _parallel4_connectors(
     points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
 ) -> list[tuple[Point2D, Point2D]]:
@@ -988,6 +1003,18 @@ def _parallel8_segments(
     points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
 ) -> list[tuple[Point2D, Point2D]]:
     return _parallel8_lines(points, full_dims)
+
+
+def _parallel8_snap(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None) -> tuple[Point2D, ...]:
+    if full_dims is None:
+        return points
+    lines = _parallel8_lines(points, full_dims)
+    snapped = list(points)
+    for i, line in enumerate(lines[1:], start=1):
+        end_index = 2 * i + 1
+        if end_index < len(snapped):
+            snapped[end_index] = line[1]
+    return tuple(snapped)
 
 
 def _parallel8_connectors(
@@ -1189,6 +1216,17 @@ def _arbitrary_perpendicular_connectors(
             connectors.append((ref[0], foot))
         elif t > 1.0:
             connectors.append((ref[1], foot))
+    return connectors
+
+
+def _arbitrary_parallel_connectors(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    """A dashed dimension connector between each consecutive pair of parallel lines, where each gap tag sits."""
+    lines = _arbitrary_parallel_segments(points, full_dims)
+    connectors = []
+    for line_a, line_b in zip(lines, lines[1:]):
+        connectors += _dimension_connectors(line_a, _mid2(line_b[0], line_b[1]), full_dims)
     return connectors
 
 
@@ -1533,6 +1571,7 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     name="4pt Parallel", required_points=4, category="line_pair",
     resolve=_four_point_resolve, segment_pairs=_parallel4_segments,
     connector_segments=_parallel4_connectors, pair_distance=_parallel4_distance,
+    snap_points=_parallel4_snap,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Four parallel lines (8 points); dashed midlines between each pair,
@@ -1540,12 +1579,14 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     name="8pt Parallel", required_points=8, category="line_pair",
     resolve=_eight_point_resolve, segment_pairs=_parallel8_segments,
     connector_segments=_parallel8_connectors, pair_distance=_parallel8_distance,
+    snap_points=_parallel8_snap,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # A first line, then each additional click drops another parallel copy
     # centered on it — right-click to finish.
     name="Arbitrary Parallel", required_points=None, category="line_pair",
     resolve=_arbitrary_parallel_resolve, segment_pairs=_arbitrary_parallel_segments,
+    connector_segments=_arbitrary_parallel_connectors,
     extra_measures=_arbitrary_parallel_measures, min_points=3,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(

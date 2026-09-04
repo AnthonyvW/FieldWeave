@@ -1,11 +1,41 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal, QPoint, QPointF, QSize
+from PySide6.QtCore import QEvent, QObject, Qt, Signal, QPoint, QPointF, QSize
 from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
-    QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
+
+
+class _WheelBlocker(QObject):
+    """
+    Event filter that stops the scroll wheel from cycling a combo box,
+    spin box, or slider's value (an easy way to change a setting by
+    accident while scrolling past it). The wheel is instead forwarded to
+    the nearest ancestor scroll area so the surrounding panel still
+    scrolls normally.
+    """
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() != QEvent.Type.Wheel:
+            return False
+        widget = obj
+        while widget is not None:
+            if isinstance(widget, QAbstractScrollArea):
+                QApplication.sendEvent(widget.viewport(), event)
+                break
+            widget = widget.parentWidget()
+        return True
+
+
+_WHEEL_BLOCKER = _WheelBlocker()
+
+
+def block_wheel(widget: QWidget) -> None:
+    """Stop *widget* (a combo/spin/slider) from changing value on scroll — see _WheelBlocker."""
+    widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    widget.installEventFilter(_WHEEL_BLOCKER)
 
 from UI.widgets.measurements.lines import MEASUREMENT_LINE_CAPS, MEASUREMENT_MIDPOINT_STYLES
 from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
@@ -142,6 +172,7 @@ class _StylePicker(QWidget):
         for value, icon in options:
             self._combo.addItem(icon, "", value)
         self._combo.currentIndexChanged.connect(self._on_index_changed)
+        block_wheel(self._combo)
         row.addWidget(self._combo, 1)
 
     def set_value(self, value: str) -> None:
@@ -247,6 +278,7 @@ class _ThicknessControl(QWidget):
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(round(minimum * self._STEPS_PER_UNIT), round(maximum * self._STEPS_PER_UNIT))
         self._slider.valueChanged.connect(self._on_slider_changed)
+        block_wheel(self._slider)
         row.addWidget(self._slider, 1)
 
         self._spin = QDoubleSpinBox()
@@ -254,6 +286,7 @@ class _ThicknessControl(QWidget):
         self._spin.setSingleStep(1.0 / self._STEPS_PER_UNIT * 5)
         self._spin.setDecimals(1)
         self._spin.valueChanged.connect(self._on_spin_changed)
+        block_wheel(self._spin)
         row.addWidget(self._spin)
 
     def set_value(self, value: float) -> None:
@@ -410,11 +443,13 @@ class MeasurementCustomizeMenu(QFrame):
         self._unit_combo = QComboBox()
         for unit in MeasurementUnit:
             self._unit_combo.addItem(unit.value, unit)
+        block_wheel(self._unit_combo)
         self._unit_combo.currentIndexChanged.connect(self._on_live_field_changed)
         unit_row.addWidget(self._unit_combo, 1)
         unit_row.addWidget(_field_label("Decimals"))
         self._decimals_spin = QSpinBox()
         self._decimals_spin.setRange(0, 6)
+        block_wheel(self._decimals_spin)
         self._decimals_spin.valueChanged.connect(self._on_live_field_changed)
         unit_row.addWidget(self._decimals_spin)
         layout.addLayout(unit_row)
@@ -426,6 +461,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._area_unit_combo = QComboBox()
         for unit in MeasurementUnit:
             self._area_unit_combo.addItem(unit.value, unit)
+        block_wheel(self._area_unit_combo)
         self._area_unit_combo.currentIndexChanged.connect(self._on_live_field_changed)
         area_row.addWidget(self._area_unit_combo, 1)
         layout.addLayout(area_row)
@@ -446,15 +482,25 @@ class MeasurementCustomizeMenu(QFrame):
         self._show_leg_lengths_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._show_leg_lengths_check)
 
-        self._show_angle_indicator_check = QCheckBox("Show angle indicator")
-        self._show_angle_indicator_check.toggled.connect(self._on_live_field_changed)
-        layout.addWidget(self._show_angle_indicator_check)
+        self._indicator_enabled_check = QCheckBox("Show indicator line")
+        self._indicator_enabled_check.toggled.connect(self._on_indicator_toggled)
+        layout.addWidget(self._indicator_enabled_check)
 
-        self._angle_indicator_style_picker = _StylePicker(
-            "Angle Indicator", [(style, _dash_style_icon(style)) for style in MEASUREMENT_DASH_PATTERNS]
+        self._indicator_color_picker = _ColorPicker("Indicator Color", OVERLAY_LINE_COLOR.name())
+        self._indicator_color_picker.color_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._indicator_color_picker)
+
+        self._indicator_style_picker = _StylePicker(
+            "Indicator Style", [(style, _dash_style_icon(style)) for style in MEASUREMENT_DASH_PATTERNS]
         )
-        self._angle_indicator_style_picker.value_changed.connect(self._on_live_field_changed)
-        layout.addWidget(self._angle_indicator_style_picker)
+        self._indicator_style_picker.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._indicator_style_picker)
+
+        self._indicator_opacity_label = _field_label("Indicator Opacity")
+        layout.addWidget(self._indicator_opacity_label)
+        self._indicator_opacity_control = _ThicknessControl(0.0, 1.0)
+        self._indicator_opacity_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._indicator_opacity_control)
 
         layout.addWidget(_field_label("Opacity"))
         self._opacity_control = _ThicknessControl(0.0, 1.0)
@@ -616,14 +662,19 @@ class MeasurementCustomizeMenu(QFrame):
         self._always_show_center_check.setVisible(show_center)
         self._show_leg_lengths_check.setChecked(meta.show_leg_lengths)
         self._show_leg_lengths_check.setVisible(show_angle_extras)
-        self._show_angle_indicator_check.setChecked(meta.show_angle_indicator)
-        self._show_angle_indicator_check.setVisible(show_angle_extras)
-        # The indicator's guide lines only draw for "4 Point Angle" (a
-        # "3 Point Angle"'s legs already meet at the vertex), so only it
-        # exposes their dash style.
-        show_angle_style = kind == "4 Point Angle"
-        self._angle_indicator_style_picker.set_value(meta.angle_indicator_dash_style)
-        self._angle_indicator_style_picker.setVisible(show_angle_style)
+        # The indicator line exists for angles (the dashed guide + curve)
+        # and for any line-pair kind with dimension connectors.
+        show_indicator = entry is not None and (entry.category == "angle" or entry.connector_segments is not None)
+        indicator_on = meta.indicator_enabled
+        self._indicator_enabled_check.setChecked(indicator_on)
+        self._indicator_enabled_check.setVisible(show_indicator)
+        self._indicator_color_picker.set_color(meta.indicator_color)
+        self._indicator_color_picker.setVisible(show_indicator and indicator_on)
+        self._indicator_style_picker.set_value(meta.indicator_dash_style)
+        self._indicator_style_picker.setVisible(show_indicator and indicator_on)
+        self._indicator_opacity_control.set_value(meta.indicator_opacity)
+        self._indicator_opacity_label.setVisible(show_indicator and indicator_on)
+        self._indicator_opacity_control.setVisible(show_indicator and indicator_on)
         self._opacity_control.set_value(meta.opacity)
         self._tag_transparent_check.setChecked(meta.tag_background_transparent)
         self._tag_bg_picker.setVisible(not meta.tag_background_transparent)
@@ -729,6 +780,15 @@ class MeasurementCustomizeMenu(QFrame):
         self.adjustSize()
         self._on_live_field_changed()
 
+    def _on_indicator_toggled(self, enabled: bool) -> None:
+        visible = enabled and self._indicator_enabled_check.isVisible()
+        self._indicator_color_picker.setVisible(visible)
+        self._indicator_style_picker.setVisible(visible)
+        self._indicator_opacity_label.setVisible(visible)
+        self._indicator_opacity_control.setVisible(visible)
+        self.adjustSize()
+        self._on_live_field_changed()
+
     def _on_fill_toggled(self, enabled: bool) -> None:
         self._fill_color_picker.setVisible(enabled and self._fill_enabled_check.isVisible())
         self._fill_opacity_label.setVisible(enabled and self._fill_enabled_check.isVisible())
@@ -761,8 +821,10 @@ class MeasurementCustomizeMenu(QFrame):
             hidden=self._hidden_check.isChecked(),
             always_show_center=self._always_show_center_check.isChecked(),
             show_leg_lengths=self._show_leg_lengths_check.isChecked(),
-            show_angle_indicator=self._show_angle_indicator_check.isChecked(),
-            angle_indicator_dash_style=self._angle_indicator_style_picker.value(),
+            indicator_enabled=self._indicator_enabled_check.isChecked(),
+            indicator_color=self._indicator_color_picker.color(),
+            indicator_opacity=self._indicator_opacity_control.value(),
+            indicator_dash_style=self._indicator_style_picker.value(),
             opacity=self._opacity_control.value(),
             tag_background_transparent=self._tag_transparent_check.isChecked(),
             midpoint_style=self._midpoint_picker.value(),

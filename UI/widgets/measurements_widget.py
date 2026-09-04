@@ -84,7 +84,7 @@ from UI.widgets.measurements.points import PointMeasurement
 from UI.widgets.measurements.units import MeasurementUnit
 from UI.widgets.preview_overlay.measurement_customize_menu import (
     _ColorPicker, _StylePicker, _ThicknessControl, _dash_style_icon, _field_label, _line_cap_icon,
-    _midpoint_style_icon,
+    _midpoint_style_icon, block_wheel,
 )
 from UI.widgets.preview_overlay.measurement_overlay import MEASUREMENT_DASH_PATTERNS
 
@@ -127,6 +127,40 @@ _CATEGORY_GROUPS = (
     )),
     ("Polygon", "Polygon Measurements", (PolygonMeasurement,)),
 )
+
+
+class _CategoryChip(QToolButton):
+    """
+    A category selector button carrying its category's first tile icon.
+    Swaps between the tile's idle (orange-point) and active (blue-point)
+    icon on hover/checked, mirroring MeasurementButton, so a checked
+    chip's points don't vanish into the orange checked background.
+    """
+
+    def __init__(self, label, idle_icon, active_icon, icon_size, size, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("MeasurementTile")
+        self.setCheckable(True)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.setIconSize(icon_size)
+        self.setFixedSize(size)
+        self.setText(label)
+        self._idle_icon = idle_icon
+        self._active_icon = active_icon
+        self.setIcon(idle_icon)
+        self.toggled.connect(self._sync_icon)
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self._sync_icon()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._sync_icon()
+
+    def _sync_icon(self, *_args: object) -> None:
+        active = self.isChecked() or self.underMouse()
+        self.setIcon(self._active_icon if active else self._idle_icon)
 
 
 class MeasurementsWidget(QWidget):
@@ -264,14 +298,9 @@ class MeasurementsWidget(QWidget):
 
         for index, (chip_label, _title, tile_classes) in enumerate(_CATEGORY_GROUPS):
             sample = tile_classes[0]()
-            chip = QToolButton()
-            chip.setObjectName("MeasurementTile")
-            chip.setCheckable(True)
-            chip.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            chip.setIcon(sample.icon())
-            chip.setIconSize(sample.iconSize())
-            chip.setFixedSize(sample.size())
-            chip.setText(chip_label)
+            chip = _CategoryChip(
+                chip_label, sample._idle_icon, sample._active_icon, sample.iconSize(), sample.size(),
+            )
             self._category_group.addButton(chip, index)
             row, column = divmod(index, GRID_COLUMNS)
             chip_grid.addWidget(chip, row, column)
@@ -357,6 +386,7 @@ class MeasurementsWidget(QWidget):
         default_unit_row = QHBoxLayout()
         default_unit_row.addWidget(QLabel("Unit:"))
         self._default_unit_combo = QComboBox()
+        block_wheel(self._default_unit_combo)
         for unit in MeasurementUnit:
             self._default_unit_combo.addItem(unit.value, unit)
         self._default_unit_combo.setCurrentIndex(self._default_unit_combo.findData(MeasurementUnit.MM))
@@ -364,6 +394,7 @@ class MeasurementsWidget(QWidget):
         default_unit_row.addWidget(self._default_unit_combo, 1)
         default_unit_row.addWidget(_field_label("Decimals"))
         self._default_decimals_spin = QSpinBox()
+        block_wheel(self._default_decimals_spin)
         self._default_decimals_spin.setRange(0, 6)
         self._default_decimals_spin.setValue(2)
         self._default_decimals_spin.valueChanged.connect(self._on_default_meta_edited)
@@ -508,6 +539,7 @@ class MeasurementsWidget(QWidget):
         dpi_entry_row = QHBoxLayout()
         dpi_entry_row.addWidget(QLabel("Known DPI:"))
         self._dpi_entry_spin = QDoubleSpinBox()
+        block_wheel(self._dpi_entry_spin)
         self._dpi_entry_spin.setRange(1.0, 100000.0)
         self._dpi_entry_spin.setDecimals(2)
         self._dpi_entry_spin.setValue(1.0)
@@ -535,11 +567,13 @@ class MeasurementsWidget(QWidget):
 
         entry_row = QHBoxLayout()
         self._calibration_value_spin = QDoubleSpinBox()
+        block_wheel(self._calibration_value_spin)
         self._calibration_value_spin.setRange(0.001, 100000.0)
         self._calibration_value_spin.setDecimals(3)
         self._calibration_value_spin.setValue(1.0)
 
         self._calibration_unit_combo = QComboBox()
+        block_wheel(self._calibration_unit_combo)
         for unit in MeasurementUnit:
             self._calibration_unit_combo.addItem(unit.value, unit)
         self._calibration_unit_combo.setCurrentIndex(self._calibration_unit_combo.findData(MeasurementUnit.MM))

@@ -80,6 +80,9 @@ class MeasurementButton(QToolButton):
         pen.setColor(color)
         pen.setWidth(width)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        # Reset to a solid line so a dashed pen set earlier in the same
+        # icon (e.g. a dimension guide) doesn't bleed into a solid stroke.
+        pen.setStyle(Qt.PenStyle.SolidLine)
         painter.setPen(pen)
 
     def _draw_point(self, painter: QPainter, point: QPoint, radius: int, active: bool) -> None:

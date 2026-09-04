@@ -65,15 +65,18 @@ class MeasurementMeta(NamedTuple):
     # shape's own center at all times, not just while hovered/dragged
     # like its other anchor points.
     always_show_center: bool = False
-    # "3 Point Angle"/"4 Point Angle" only, both default off: each leg's
-    # own length alongside the angle value, and a dashed guide + curve at
-    # the vertex/intersection (see MeasurementOverlay._draw_angle_indicator).
+    # "3 Point Angle"/"4 Point Angle" only, default off: each leg's own
+    # length alongside the angle value.
     show_leg_lengths: bool = False
-    show_angle_indicator: bool = False
-    # "4 Point Angle" only: dash pattern of the angle indicator's guide
-    # lines (see MeasurementOverlay._draw_angle_indicator). Named among
-    # the dash styles in MEASUREMENT_DASH_STYLES.
-    angle_indicator_dash_style: str = "dash"
+    # The secondary "indicator" line shared by every measurement that has
+    # one — the parallel/perpendicular dimension connectors and the angle
+    # indicator's dashed guide + curve. On by default (so an angle shows
+    # its indicator and a parallel shows its connectors without extra
+    # clicks); fully customizable — color, opacity, dash style, on/off.
+    indicator_enabled: bool = True
+    indicator_color: str = ""
+    indicator_opacity: float = 1.0
+    indicator_dash_style: str = "dash"
     # Enclosed shapes (circle/ellipse/rectangle/polygon/annulus): a
     # translucent interior fill. Empty means no fill; fill_opacity scales
     # the fill's alpha independently of the whole-measurement opacity.
