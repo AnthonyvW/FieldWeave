@@ -38,9 +38,6 @@ class ScaleBarMeasurement(MeasurementButton):
         y = rect.center().y()
         self._set_pen(painter, LINE_COLOR)
         painter.drawLine(QPoint(left, y), QPoint(right, y))
-        # End ticks.
-        painter.drawLine(QPoint(left, y - 5), QPoint(left, y + 5))
-        painter.drawLine(QPoint(right, y - 5), QPoint(right, y + 5))
 
         font = QFont(painter.font())
         font.setPixelSize(9)

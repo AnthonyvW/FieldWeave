@@ -175,7 +175,25 @@ class MeasurementInteraction:
         self._popup_tracking_index = index
 
     def _on_meta_changed(self, index: int, meta: MeasurementMeta) -> None:
-        """Shared by MeasurementCustomizeMenu.applied (final) and .preview_changed (live, including its own revert-on-cancel) — both just mean "this is this measurement's meta now"."""
+        """
+        Shared by MeasurementCustomizeMenu.applied (final) and
+        .preview_changed (live, including its own revert-on-cancel) —
+        both just mean "this is this measurement's meta now".
+
+        Positional/interaction state the menu never edits — a tag's
+        dragged offset, dismissed or dragged secondary tags — is carried
+        over from the measurement's live meta rather than the menu's
+        open-time snapshot, so dragging a tag (e.g. a text annotation)
+        while the menu is open isn't reverted when it applies or cancels.
+        """
+        current = self._overlay.measurement_meta(index)
+        if current is not None:
+            meta = meta._replace(
+                tag_offset_x=current.tag_offset_x,
+                tag_offset_y=current.tag_offset_y,
+                extra_offsets=current.extra_offsets,
+                hidden_extra=current.hidden_extra,
+            )
         self._overlay.set_measurement_meta(index, meta)
         self._video_label.update()
 

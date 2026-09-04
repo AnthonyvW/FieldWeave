@@ -1165,7 +1165,11 @@ class MeasurementOverlay(Overlay):
                     indicator_color, line_width, meta.indicator_dash_style, meta.indicator_opacity,
                 )
             painter.restore()
-            if index == self._near_index or index == self._drag_measurement_index:
+            # A text annotation's single "point" is just where its box is
+            # anchored — showing an endpoint marker there leaves a stray
+            # dot under the text while it's hovered/dragged, so skip it.
+            is_text = entry is not None and entry.category == "text"
+            if not is_text and (index == self._near_index or index == self._drag_measurement_index):
                 for point in measurement.points:
                     self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
             if meta.always_show_center and full_dims is not None:
@@ -1285,7 +1289,13 @@ class MeasurementOverlay(Overlay):
                 continue
             if length_px_image <= 0:
                 continue
-            bar_len = length_px_image * scale_x * (rect.width() / full_w)
+            # length_px_image is in full-image pixels; rect spans the full
+            # image at base (fit-to-window) zoom, so frac_len * rect.width()
+            # is the bar's unzoomed on-screen length. A preview-anchored bar
+            # is part of the image, so it scales with the current zoom; an
+            # image-anchored one is a fixed screen overlay that doesn't.
+            base_len = (length_px_image / full_w) * rect.width()
+            bar_len = base_len * scale_x if meta.scalebar_anchor_preview else base_len
             thickness = max(1.0, meta.scalebar_thickness)
             margin = max(0.0, meta.text_margin)
             base_size = meta.font_size if meta.font_size > 0 else OVERLAY_LABEL_FONT_SIZE
@@ -1316,9 +1326,6 @@ class MeasurementOverlay(Overlay):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(bar_color))
             painter.drawRect(QRectF(bar_x, bar_y, bar_len, thickness))
-            tick_h = thickness * 2.2
-            painter.drawRect(QRectF(bar_x, bar_y, thickness, tick_h))
-            painter.drawRect(QRectF(bar_x + bar_len - thickness, bar_y, thickness, tick_h))
             painter.setFont(font)
             painter.setPen(QPen(bar_color))
             painter.drawText(
@@ -1334,16 +1341,27 @@ class MeasurementOverlay(Overlay):
     ) -> QPointF:
         meta = measurement.meta
         pos = meta.scalebar_position
-        inset = max(6.0, meta.text_margin)
+        inset = max(0.0, meta.text_margin)
         if pos == "custom" and measurement.points:
-            p = saved.map(self._to_point(rect, measurement.points[0]))
+            # Custom position is the placement point plus the tag's dragged
+            # offset, both image-relative (fraction space) — so it's dragged
+            # around like any tag, tracks the image under pan/zoom, and marks
+            # where it renders.
+            anchor = (
+                measurement.points[0][0] + meta.tag_offset_x,
+                measurement.points[0][1] + meta.tag_offset_y,
+            )
+            p = saved.map(self._to_point(rect, anchor))
             return QPointF(p.x() - panel_w / 2, p.y() - panel_h / 2)
+        # Preview-anchored bars sit against the image's own corners (so they
+        # track the image and show where they'll render); image-anchored
+        # bars sit against the fixed on-screen viewport corners.
         if meta.scalebar_anchor_preview:
-            left, top, right, bottom = viewport.left(), viewport.top(), viewport.right(), viewport.bottom()
-        else:
             tl = saved.map(self._to_point(rect, (0.0, 0.0)))
             br = saved.map(self._to_point(rect, (1.0, 1.0)))
             left, top, right, bottom = tl.x(), tl.y(), br.x(), br.y()
+        else:
+            left, top, right, bottom = viewport.left(), viewport.top(), viewport.right(), viewport.bottom()
         x = left + inset if pos in ("lower_left", "upper_left") else right - inset - panel_w
         y = top + inset if pos in ("upper_left", "upper_right") else bottom - inset - panel_h
         return QPointF(x, y)
@@ -2186,11 +2204,12 @@ class MeasurementOverlay(Overlay):
         painter.translate(point)
         if scale_x > 0 and scale_y > 0:
             painter.scale(1.0 / scale_x, 1.0 / scale_y)
+        # Opacity fades the whole annotation — box and text together —
+        # invisible at 0, fully shown at 1.
+        painter.setOpacity(max(0.0, min(1.0, meta.opacity)))
         painter.setFont(font)
-        bg_alpha = max(0.0, min(1.0, 1.0 - meta.text_transparency))
-        if bg_alpha > 0:
+        if not meta.tag_background_transparent:
             bg = QColor(self._resolve_color(meta.tag_background_color, OVERLAY_OUTLINE_COLOR))
-            bg.setAlphaF(bg_alpha)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(bg))
             painter.drawRect(local_box)

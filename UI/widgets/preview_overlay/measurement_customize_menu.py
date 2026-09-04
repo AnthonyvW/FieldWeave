@@ -454,13 +454,16 @@ class MeasurementCustomizeMenu(QFrame):
         self._scroll_content = content
         self._outer_layout = outer_layout
 
-        layout.addWidget(_field_label("Title"))
+        self._title_label = _field_label("Title")
+        layout.addWidget(self._title_label)
         self._title_edit = QLineEdit()
         self._title_edit.setObjectName("MeasurementCustomizeTitle")
         self._title_edit.setPlaceholderText("Label this measurement...")
+        self._title_edit.textChanged.connect(self._on_live_field_changed)
         layout.addWidget(self._title_edit)
 
-        layout.addWidget(_field_label("Description"))
+        self._description_label = _field_label("Description")
+        layout.addWidget(self._description_label)
         self._description_edit = _ResizableDescriptionEdit()
         self._description_edit.setObjectName("MeasurementCustomizeDescription")
         self._description_edit.setFixedHeight(60)
@@ -468,6 +471,7 @@ class MeasurementCustomizeMenu(QFrame):
         layout.addWidget(self._description_edit)
 
         unit_row = QHBoxLayout()
+        unit_row.setContentsMargins(0, 0, 0, 0)
         unit_row.addWidget(_field_label("Unit"))
         self._unit_combo = QComboBox()
         for unit in MeasurementUnit:
@@ -481,7 +485,9 @@ class MeasurementCustomizeMenu(QFrame):
         block_wheel(self._decimals_spin)
         self._decimals_spin.valueChanged.connect(self._on_live_field_changed)
         unit_row.addWidget(self._decimals_spin)
-        layout.addLayout(unit_row)
+        self._unit_container = QWidget()
+        self._unit_container.setLayout(unit_row)
+        layout.addWidget(self._unit_container)
 
         self._build_font_width_controls(layout)
 
@@ -533,7 +539,8 @@ class MeasurementCustomizeMenu(QFrame):
         self._indicator_opacity_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._indicator_opacity_control)
 
-        layout.addWidget(_field_label("Opacity"))
+        self._opacity_label = _field_label("Opacity")
+        layout.addWidget(self._opacity_label)
         self._opacity_control = _ThicknessControl(0.0, 1.0)
         self._opacity_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._opacity_control)
@@ -611,7 +618,8 @@ class MeasurementCustomizeMenu(QFrame):
         size_row.addWidget(self._font_size_spin, 1)
         layout.addLayout(size_row)
 
-        layout.addWidget(_field_label("Tag Width (0 = auto)"))
+        self._tag_width_label = _field_label("Tag Width (0 = auto)")
+        layout.addWidget(self._tag_width_label)
         self._tag_width_control = _ThicknessControl(0.0, 400.0)
         self._tag_width_control.value_changed.connect(self._on_tag_width_changed)
         layout.addWidget(self._tag_width_control)
@@ -629,13 +637,9 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_text_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._tag_text_picker)
 
-        # Text-annotation only: background transparency and padding.
-        self._text_transparency_label = _field_label("Text BG Transparency")
-        layout.addWidget(self._text_transparency_label)
-        self._text_transparency_control = _ThicknessControl(0.0, 1.0)
-        self._text_transparency_control.value_changed.connect(self._on_live_field_changed)
-        layout.addWidget(self._text_transparency_control)
-
+        # Text-annotation only: padding around the text. (Its overall
+        # opacity is the shared "Opacity" control, which text now honors —
+        # see MeasurementOverlay._draw_text_annotation.)
         self._text_margin_label = _field_label("Text Margin")
         layout.addWidget(self._text_margin_label)
         self._text_margin_control = _ThicknessControl(0.0, 40.0)
@@ -724,7 +728,8 @@ class MeasurementCustomizeMenu(QFrame):
         self._line_color_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._line_color_picker)
 
-        layout.addWidget(_field_label("Line Thickness"))
+        self._line_thickness_label = _field_label("Line Thickness")
+        layout.addWidget(self._line_thickness_label)
         self._line_thickness_control = _ThicknessControl(0.5, 12.0)
         self._line_thickness_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._line_thickness_control)
@@ -866,19 +871,54 @@ class MeasurementCustomizeMenu(QFrame):
             widget.setVisible(show_scalebar)
 
         show_text = entry is not None and entry.category == "text"
-        self._text_transparency_control.set_value(meta.text_transparency)
-        self._text_transparency_label.setVisible(show_text)
-        self._text_transparency_control.setVisible(show_text)
+        is_annotation = show_text or show_scalebar
+        # A text annotation's title IS its drawn content; a scale bar has
+        # neither a title nor a free-form description tag.
+        self._title_label.setText("Text Contents" if show_text else "Title")
+        self._title_label.setVisible(not show_scalebar)
+        self._title_edit.setVisible(not show_scalebar)
+        self._description_label.setVisible(not is_annotation)
+        self._description_edit.setVisible(not is_annotation)
+        # Neither annotation carries a length tag, so its show/hide-tag and
+        # always-show-description toggles don't apply.
+        self._always_show_description_check.setVisible(not is_annotation)
+        self._hidden_check.setVisible(not is_annotation)
+        # A scale bar's label needs a unit; a text annotation has no
+        # measured value, so neither unit nor decimals apply to it.
+        self._unit_container.setVisible(not show_text)
+        # An auto-sizing tag width is meaningless for a free-drawn text box
+        # or a scale bar (each sizes to its own content).
+        self._tag_width_label.setVisible(not is_annotation)
+        self._tag_width_control.setVisible(not is_annotation)
+        # A margin control serves both the text box's padding and the
+        # scale bar's inset; hidden for every ordinary measurement tag.
         self._text_margin_control.set_value(meta.text_margin)
-        self._text_margin_label.setVisible(show_text)
-        self._text_margin_control.setVisible(show_text)
+        self._text_margin_label.setText("Text Margin" if show_text else "Bar Margin")
+        self._text_margin_label.setVisible(is_annotation)
+        self._text_margin_control.setVisible(is_annotation)
+        # Opacity fades an ordinary measurement or a text annotation; a
+        # scale bar is always fully opaque.
+        self._opacity_label.setVisible(not show_scalebar)
+        self._opacity_control.setVisible(not show_scalebar)
         self._line_color_picker.set_color(meta.line_color)
         self._line_thickness_control.set_value(meta.line_thickness or OVERLAY_LINE_WIDTH)
         self._line_style_picker.set_value(meta.line_dash_style)
+        # Line color doubles as the scale bar's bar color, so it stays for
+        # a scale bar; a text annotation draws no line at all.
+        self._line_color_picker.setVisible(not show_text)
         # A point has no line to dash, so its dash-style picker is hidden;
-        # circles and lines both keep it.
+        # circles and lines both keep it. Neither annotation strokes a line
+        # the ordinary way, so both hide line thickness/style too.
         is_point = entry is not None and entry.category == "point"
-        self._line_style_picker.setVisible(not is_point)
+        self._line_thickness_label.setVisible(not is_annotation)
+        self._line_thickness_control.setVisible(not is_annotation)
+        self._line_style_picker.setVisible(not is_point and not is_annotation)
+        # A text annotation keeps its background/transparency and text
+        # color (its box and glyphs); a scale bar's panel uses the tag
+        # background as its own and colors its label from the bar color.
+        self._tag_transparent_check.setVisible(not show_scalebar)
+        self._tag_bg_picker.setVisible(not meta.tag_background_transparent or show_scalebar)
+        self._tag_text_picker.setVisible(not show_scalebar)
         self._midpoint_picker.set_value(meta.midpoint_style)
         self._midpoint_picker.setVisible(show_caps)
         self._start_cap_picker.set_value(meta.line_start_cap)
@@ -896,8 +936,11 @@ class MeasurementCustomizeMenu(QFrame):
         self._fill_opacity_control.set_value(meta.fill_opacity)
         self._fill_opacity_label.setVisible(show_fill and fill_on)
         self._fill_opacity_control.setVisible(show_fill and fill_on)
+        # Neither annotation strokes an outline pass, so its whole outline
+        # group is hidden.
         self._outline_enabled_check.setChecked(meta.outline_enabled)
-        self._set_outline_controls_visible(meta.outline_enabled)
+        self._outline_enabled_check.setVisible(not is_annotation)
+        self._set_outline_controls_visible(meta.outline_enabled and not is_annotation)
         self._outline_color_picker.set_color(meta.outline_color)
         self._outline_thickness_control.set_value(meta.outline_thickness or OVERLAY_OUTLINE_WIDTH)
         self._loading = False
@@ -911,12 +954,19 @@ class MeasurementCustomizeMenu(QFrame):
         self._title_edit.setFocus()
 
     def reposition(self, anchor: QPoint) -> None:
-        """Position the window near its tag on open. *anchor* is in the parent's coordinate space; a top-level window is moved in global coordinates, so it's mapped through the parent. A no-op once positioned/dragged (the panel is its own window and stays put)."""
+        """Position the window near its tag on open, clamped so the whole panel stays on the screen it opens on (feature 9). *anchor* is in the parent's coordinate space; a top-level window is moved in global coordinates, so it's mapped through the parent. A no-op once positioned/dragged (the panel is its own window and stays put)."""
         if self._manually_moved:
             return
         parent = self.parentWidget()
         global_anchor = parent.mapToGlobal(anchor) if parent is not None else anchor
-        self.move(global_anchor.x() - self.width() // 2, global_anchor.y() + self._ANCHOR_GAP_PX)
+        x = global_anchor.x() - self.width() // 2
+        y = global_anchor.y() + self._ANCHOR_GAP_PX
+        screen = QApplication.screenAt(global_anchor) or QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            x = max(avail.left(), min(x, avail.right() - self.width() + 1))
+            y = max(avail.top(), min(y, avail.bottom() - self.height() + 1))
+        self.move(x, y)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Press on the panel's own background (not a child control) begins dragging it out of the way — feature 2."""
@@ -1023,7 +1073,6 @@ class MeasurementCustomizeMenu(QFrame):
             font_family=self._font_combo.currentFont().family(),
             font_size=float(self._font_size_spin.value()),
             tag_width=self._tag_width_control.value(),
-            text_transparency=self._text_transparency_control.value(),
             text_margin=self._text_margin_control.value(),
             scalebar_length=self._scalebar_length_spin.value(),
             scalebar_thickness=self._scalebar_thickness_control.value(),

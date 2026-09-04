@@ -118,19 +118,18 @@ def bracket_path(line_width: float, stroke_scale: float = 1.0, size_scale: float
 
 
 class ArbitraryLineMeasurement(MeasurementButton):
-    # An unbounded polyline — the icon shows a couple of joined segments
-    # with the points that place them, rather than a single straight line.
+    # An unbounded polyline — the icon is a single diagonal line with its
+    # two placing points, distinguishing it from "Multipoint"'s zig-zag.
     name = "Arbitrary Line"
     display_name = "Arb. Line"
 
     def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
-        p0 = QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN)
-        p1 = QPoint(rect.center().x(), rect.top() + LINE_MARGIN)
-        p2 = QPoint(rect.right() - LINE_MARGIN, rect.center().y())
+        start = QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN)
+        end = QPoint(rect.right() - LINE_MARGIN, rect.top() + LINE_MARGIN)
 
         self._set_pen(painter, LINE_COLOR)
-        painter.drawPolyline([p0, p1, p2])
-        for point in (p0, p1, p2):
+        painter.drawLine(start, end)
+        for point in (start, end):
             self._draw_point(painter, point, ENDPOINT_RADIUS, active)
 
 

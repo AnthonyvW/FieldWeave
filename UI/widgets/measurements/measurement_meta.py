@@ -94,9 +94,13 @@ class MeasurementMeta(NamedTuple):
     font_family: str = ""
     font_size: float = 0.0
     tag_width: float = 0.0
-    # "text" annotation: the box's background transparency (0 = opaque,
-    # 1 = fully transparent) and the padding around the text.
+    # Deprecated: a text annotation's box transparency was folded into the
+    # shared "opacity" field (which now fades the whole annotation) and its
+    # transparent-background toggle. Kept only so older saved projects still
+    # deserialize positionally — see the field-ordering note above.
     text_transparency: float = 0.0
+    # "text"/"scalebar" annotation: the padding around the text / the scale
+    # bar's inset from its anchoring corner.
     text_margin: float = 4.0
     # "scalebar" annotation: its real-world length (in meta.unit), bar
     # thickness (px), whether it's pinned to the preview (True) or the
