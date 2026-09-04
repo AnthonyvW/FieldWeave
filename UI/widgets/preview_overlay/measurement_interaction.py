@@ -41,6 +41,7 @@ class MeasurementInteraction:
         self._menu.preview_changed.connect(self._on_meta_changed)
         self._menu.cancelled.connect(self._on_menu_closed)
         self._menu.delete_requested.connect(self._on_delete_requested)
+        self._menu.reset_requested.connect(self._on_reset_requested)
 
     def set_active(self, active: bool) -> None:
         """
@@ -186,6 +187,25 @@ class MeasurementInteraction:
         self._overlay.remove_measurement(index)
         self._close_for_removed_measurement()
         self._video_label.update()
+
+    def _on_reset_requested(self, index: int) -> None:
+        """
+        Reset a measurement's style to the current default (keeping its
+        own title/description and geometry) and bring back any tags it
+        had hidden — the default meta carries empty hidden_extra/offset
+        fields, so those clear for free. The still-open menu is reloaded
+        to reflect the reset.
+        """
+        current = self._overlay.measurement_meta(index)
+        kind = self._overlay.measurement_kind(index)
+        if current is None or kind is None:
+            return
+        reset = self._overlay.default_meta._replace(title=current.title, description=current.description)
+        self._overlay.set_measurement_meta(index, reset)
+        self._video_label.update()
+        anchor = self._tag_anchor_point(index)
+        if anchor is not None:
+            self._menu.open_for(index, kind, reset, self._video_label.mapTo(self._popup_parent, anchor))
 
     def _close_for_removed_measurement(self) -> None:
         """

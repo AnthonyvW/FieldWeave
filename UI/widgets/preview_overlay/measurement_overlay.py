@@ -212,6 +212,12 @@ class MeasurementOverlay(Overlay):
         self._tag_drag_start_fraction: tuple[float, float] | None = None
         self._tag_drag_start_offset: tuple[float, float] = (0.0, 0.0)
 
+        # Same, for a dragged secondary (extra_measures) tag — keyed by
+        # (measurement index, extra index).
+        self._extra_drag_key: tuple[int, int] | None = None
+        self._extra_drag_start_fraction: tuple[float, float] | None = None
+        self._extra_drag_start_offset: tuple[float, float] = (0.0, 0.0)
+
         # Template applied to a measurement's meta as it's finalized —
         # set from MeasurementsWidget's "Customize Measurements" section
         # (see set_default_meta) so newly placed measurements pick up
@@ -473,6 +479,11 @@ class MeasurementOverlay(Overlay):
 
     def set_default_meta(self, meta: MeasurementMeta) -> None:
         self._default_meta = meta
+
+    @property
+    def default_meta(self) -> MeasurementMeta:
+        """The template new placements pick up — also the target a measurement's "Reset Style" resets to."""
+        return self._default_meta
 
     def _resolve_meta(self, kind: str) -> MeasurementMeta:
         """
@@ -931,6 +942,55 @@ class MeasurementOverlay(Overlay):
         self._tag_drag_index = None
         self._tag_drag_start_fraction = None
 
+    # ------------------------------------------------------------------
+    # Secondary-tag dragging — the extra_measures tags, each moved by its
+    # own offset in meta.extra_offsets (keyed by extra index).
+    # ------------------------------------------------------------------
+
+    @property
+    def dragging_extra_tag(self) -> bool:
+        return self._extra_drag_key is not None
+
+    def begin_extra_tag_drag(self, pos: QPoint, widget_rect: QRect, key: tuple[int, int]) -> bool:
+        fraction = self._to_fraction(pos, widget_rect)
+        meta = self.measurement_meta(key[0])
+        if fraction is None or meta is None:
+            return False
+        self._extra_drag_key = key
+        self._extra_drag_start_fraction = fraction
+        self._extra_drag_start_offset = self._extra_offset(meta, key[1])
+        return True
+
+    def update_extra_tag_drag(self, pos: QPoint, widget_rect: QRect) -> bool:
+        if self._extra_drag_key is None or self._extra_drag_start_fraction is None:
+            return False
+        fraction = self._to_fraction(pos, widget_rect)
+        meta = self.measurement_meta(self._extra_drag_key[0])
+        if fraction is None or meta is None:
+            return False
+        offset_x = self._extra_drag_start_offset[0] + (fraction[0] - self._extra_drag_start_fraction[0])
+        offset_y = self._extra_drag_start_offset[1] + (fraction[1] - self._extra_drag_start_fraction[1])
+        self.set_measurement_meta(
+            self._extra_drag_key[0], self._set_extra_offset(meta, self._extra_drag_key[1], offset_x, offset_y)
+        )
+        return True
+
+    def end_extra_tag_drag(self) -> None:
+        self._extra_drag_key = None
+        self._extra_drag_start_fraction = None
+
+    @staticmethod
+    def _extra_offset(meta: MeasurementMeta, extra_index: int) -> tuple[float, float]:
+        for i, dx, dy in meta.extra_offsets:
+            if i == extra_index:
+                return (dx, dy)
+        return (0.0, 0.0)
+
+    @staticmethod
+    def _set_extra_offset(meta: MeasurementMeta, extra_index: int, dx: float, dy: float) -> MeasurementMeta:
+        others = [t for t in meta.extra_offsets if t[0] != extra_index]
+        return meta._replace(extra_offsets=tuple(others + [(extra_index, dx, dy)]))
+
     def _move_point(self, m_index: int, p_index: int, new_point: tuple[float, float]) -> None:
         """
         Apply a dragged point's new position to the measurement at
@@ -1147,9 +1207,12 @@ class MeasurementOverlay(Overlay):
         if dims is None or not self._can_measure(unit):
             return
         decimals = meta.decimal_places
+        offsets = {i: (dx, dy) for i, dx, dy in meta.extra_offsets}
         for extra_index, (anchor, distance_px) in enumerate(entry.extra_measures(measurement.points, dims)):
             if extra_index in meta.hidden_extra:
                 continue
+            off = offsets.get(extra_index, (0.0, 0.0))
+            anchor = (anchor[0] + off[0], anchor[1] + off[1])
             text = format_length(distance_px, self.dpi or 1.0, unit, decimals)
             box, _ = self._draw_label(
                 painter, rect, anchor, text, scale_x, scale_y,

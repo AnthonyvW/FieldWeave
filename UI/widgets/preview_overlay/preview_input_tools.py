@@ -40,23 +40,41 @@ class MeasurementTagInteractionTool(InputTool):
         self._placement_pending = placement_pending
         self._drag = DragGestureRecognizer()
         self._index: int | None = None
+        # The hovered secondary tag (measurement index, extra index) a
+        # press grabbed, if any — dragged/clicked just like a primary tag.
+        self._extra: tuple[int, int] | None = None
 
     def handle_press(self, event: QMouseEvent, ctx: InputContext) -> bool:
         if not self._active() or self._measurement.in_progress or event.button() != Qt.MouseButton.LeftButton:
             return False
         index = self._measurement.hovered_index
         if index is None:
-            return False
+            extra = self._measurement.hovered_extra
+            if extra is None:
+                return False
+            self._extra = extra
+            self._index = None
+            self._drag.begin(event.position().toPoint())
+            return True
         if self._measurement.hover_delete:
             return self._interaction.handle_delete_press(event)
         self._index = index
+        self._extra = None
         self._drag.begin(event.position().toPoint())
         return True
 
     def handle_move(self, event: QMouseEvent, ctx: InputContext) -> bool:
         if self._drag.pending:
             pos = event.position().toPoint()
-            if self._drag.crossed_threshold(pos) and self._index is not None:
+            crossed = self._drag.crossed_threshold(pos)
+            if self._extra is not None:
+                if crossed:
+                    self._measurement.begin_extra_tag_drag(self._drag.press_pos, ctx.widget_rect, self._extra)
+                if self._drag.dragging:
+                    self._measurement.update_extra_tag_drag(pos, ctx.widget_rect)
+                    self._video_label.update()
+                return True
+            if crossed and self._index is not None:
                 self._measurement.begin_tag_drag(self._drag.press_pos, ctx.widget_rect, self._index)
             if self._drag.dragging:
                 self._measurement.update_tag_drag(pos, ctx.widget_rect)
@@ -75,8 +93,18 @@ class MeasurementTagInteractionTool(InputTool):
         pos = event.position().toPoint()
         was_dragging = self._drag.dragging
         index = self._index
+        extra = self._extra
         self._drag.end()
         self._index = None
+        self._extra = None
+        if extra is not None:
+            if was_dragging:
+                self._measurement.end_extra_tag_drag()
+                self._video_label.update()
+            else:
+                # A plain click on a secondary tag opens the measurement's menu.
+                self._interaction.open_menu_for(extra[0], pos)
+            return True
         if was_dragging:
             self._measurement.end_tag_drag()
             self._video_label.update()

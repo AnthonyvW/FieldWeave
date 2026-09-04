@@ -86,6 +86,9 @@ class MeasurementMeta(NamedTuple):
     # user has dismissed by hovering one and pressing Delete — see
     # MeasurementOverlay._draw_extra_measure_labels.
     hidden_extra: tuple[int, ...] = ()
+    # Per-secondary-tag drag offsets, as (extra index, dx, dy) triples in
+    # fraction space — the multi-tag analogue of tag_offset_x/y.
+    extra_offsets: tuple[tuple[int, float, float], ...] = ()
 
 
 DEFAULT_META = MeasurementMeta()

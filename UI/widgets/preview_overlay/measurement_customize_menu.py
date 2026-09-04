@@ -411,11 +411,17 @@ class MeasurementCustomizeMenu(QFrame):
     preview_changed = Signal(int, object)  # measurement index, MeasurementMeta — live, while still open
     cancelled = Signal()
     delete_requested = Signal(int)  # measurement index — after the user confirms deletion
+    reset_requested = Signal(int)  # measurement index — reset this measurement's style to the default
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("MeasurementCustomizeMenu")
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        # A real top-level window, so it can be dragged outside the
+        # preview frame; closing it (its X button) acts like Cancel — see
+        # closeEvent.
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setWindowTitle("Customize Measurement")
         # QFrame subclasses don't pick up a stylesheet background on
         # their own unless told to paint one — without this the panel
         # stayed transparent regardless of #MeasurementCustomizeMenu's
@@ -554,6 +560,10 @@ class MeasurementCustomizeMenu(QFrame):
         button_row.addWidget(apply_button)
         button_row.addWidget(cancel_button)
         footer.addLayout(button_row)
+        reset_button = QPushButton("Reset Style")
+        reset_button.setToolTip("Reset this measurement's style to the current default and restore hidden tags")
+        reset_button.clicked.connect(self._on_reset_clicked)
+        footer.addWidget(reset_button)
         outer_layout.addLayout(footer)
 
         self.setMaximumHeight(560)
@@ -749,16 +759,20 @@ class MeasurementCustomizeMenu(QFrame):
         self._loading = False
         self.adjustSize()
         self.reposition(anchor)
+        # As its own window the panel stays where opened (and wherever the
+        # user drags it) rather than chasing its tag through pans/zooms.
+        self._manually_moved = True
         self.show()
         self.raise_()
         self._title_edit.setFocus()
 
     def reposition(self, anchor: QPoint) -> None:
-        """Move without touching any field's value — used both by open_for and by CameraPreview to keep the panel following its tag while the user pans/zooms with it still open. A no-op once the user has dragged the panel themselves (feature 2)."""
+        """Position the window near its tag on open. *anchor* is in the parent's coordinate space; a top-level window is moved in global coordinates, so it's mapped through the parent. A no-op once positioned/dragged (the panel is its own window and stays put)."""
         if self._manually_moved:
             return
-        target = QPoint(anchor.x() - self.width() // 2, anchor.y() + self._ANCHOR_GAP_PX)
-        self.move(self._clamped(target))
+        parent = self.parentWidget()
+        global_anchor = parent.mapToGlobal(anchor) if parent is not None else anchor
+        self.move(global_anchor.x() - self.width() // 2, global_anchor.y() + self._ANCHOR_GAP_PX)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Press on the panel's own background (not a child control) begins dragging it out of the way — feature 2."""
@@ -770,8 +784,9 @@ class MeasurementCustomizeMenu(QFrame):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._drag_origin is not None:
-            self._manually_moved = True
-            self.move(self._clamped(event.globalPosition().toPoint() - self._drag_origin))
+            # A top-level window: move freely in global coordinates so it
+            # can be dragged outside the preview frame.
+            self.move(event.globalPosition().toPoint() - self._drag_origin)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -788,15 +803,6 @@ class MeasurementCustomizeMenu(QFrame):
         self._index = None
         self._original_meta = None
         self.hide()
-
-    def _clamped(self, pos: QPoint) -> QPoint:
-        """Keep the panel fully within its parent regardless of where the tag that opened it sits, since a tag near an edge would otherwise push it partly off screen."""
-        parent = self.parentWidget()
-        if parent is None:
-            return pos
-        max_x = max(0, parent.width() - self.width())
-        max_y = max(0, parent.height() - self.height())
-        return QPoint(min(max(pos.x(), 0), max_x), min(max(pos.y(), 0), max_y))
 
     def _set_outline_controls_visible(self, visible: bool) -> None:
         self._outline_color_picker.setVisible(visible)
@@ -884,6 +890,22 @@ class MeasurementCustomizeMenu(QFrame):
         self._original_meta = None
         self.hide()
         self.applied.emit(index, self._current_meta())
+
+    def _on_reset_clicked(self) -> None:
+        if self._index is not None:
+            self.reset_requested.emit(self._index)
+
+    def closeEvent(self, event) -> None:
+        # The window's own close button behaves like Cancel: revert any
+        # live preview and drop the tracked measurement.
+        if self._index is not None and self._original_meta is not None:
+            self.preview_changed.emit(self._index, self._original_meta)
+        had_index = self._index is not None
+        self._index = None
+        self._original_meta = None
+        if had_index:
+            self.cancelled.emit()
+        super().closeEvent(event)
 
     def _on_delete_clicked(self) -> None:
         if self._index is None:

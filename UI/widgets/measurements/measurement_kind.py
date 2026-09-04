@@ -892,10 +892,13 @@ def _parallel3_connectors(
 def _parallel3_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
     if len(points) < 3:
         return None
-    gap = _line_gap_px((points[0], points[1]), points[2], full_dims)
-    if gap is None:
+    connectors = _parallel3_connectors(points, full_dims)
+    line2 = _parallel_second_centered(points[0], points[1], points[2])
+    gap = _line_gap_px((points[0], points[1]), _mid2(line2[0], line2[1]), full_dims)
+    if gap is None or not connectors:
         return None
-    return _mid2(_mid2(points[0], points[1]), points[2]), gap
+    # Anchor on the perpendicular connector so the tag sits by the indicator line.
+    return _mid2(connectors[0][0], connectors[0][1]), gap
 
 
 # --- 4pt Parallel: reference line, then both ends of a parallel-locked line ---
@@ -963,10 +966,14 @@ def _parallel4_connectors(
 def _parallel4_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
     if len(points) < 4:
         return None
-    gap = _line_gap_px((points[0], points[1]), points[2], full_dims)
+    connectors = _parallel4_connectors(points, full_dims)
+    second = _parallel4_second(points, full_dims)
+    if not connectors or second is None:
+        return None
+    gap = _line_gap_px((points[0], points[1]), _mid2(second[0], second[1]), full_dims)
     if gap is None:
         return None
-    return _mid2(_mid2(points[0], points[1]), _mid2(points[2], points[3])), gap
+    return _mid2(connectors[0][0], connectors[0][1]), gap
 
 
 # --- 8pt Parallel: two pairs of parallel lines, gap between their midlines ---
