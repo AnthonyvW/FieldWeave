@@ -98,6 +98,16 @@ class MeasurementMeta(NamedTuple):
     # 1 = fully transparent) and the padding around the text.
     text_transparency: float = 0.0
     text_margin: float = 4.0
+    # "scalebar" annotation: its real-world length (in meta.unit), bar
+    # thickness (px), whether it's pinned to the preview (True) or the
+    # image (False), a corner preset ("lower_left"/"lower_right"/
+    # "upper_left"/"upper_right"/"custom"), and whether it draws a
+    # background panel behind the bar and label.
+    scalebar_length: float = 0.0
+    scalebar_thickness: float = 4.0
+    scalebar_anchor_preview: bool = True
+    scalebar_position: str = "lower_left"
+    scalebar_show_bg: bool = True
 
 
 DEFAULT_META = MeasurementMeta()

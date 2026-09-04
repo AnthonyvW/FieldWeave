@@ -51,7 +51,7 @@ from UI.widgets.measurements.measurement_style import (
     OVERLAY_POINT_RADIUS,
     OVERLAY_TAG_HOVER_COLOR,
 )
-from UI.widgets.measurements.units import MeasurementUnit, format_area, format_length
+from UI.widgets.measurements.units import MeasurementUnit, format_area, format_length, pixels_to_unit, unit_to_px
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
 from UI.widgets.preview_overlay.coordinate_space import CoordinateSpace
@@ -384,7 +384,10 @@ class MeasurementOverlay(Overlay):
                 resolved = entry.resolve([point])
                 if resolved is None:
                     return False
-                self.measurements.append(Measurement(self._active_type, resolved, self._resolve_meta(self._active_type)))
+                meta = self._resolve_meta(self._active_type)
+                if entry.category == "scalebar":
+                    meta = self._init_scalebar_length(meta)
+                self.measurements.append(Measurement(self._active_type, resolved, meta))
                 return True
             self._draft_type = self._active_type
             self._draft_points = [point]
@@ -1178,6 +1181,8 @@ class MeasurementOverlay(Overlay):
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
             self._draw_extra_measure_labels(painter, rect, index, measurement, scale_x, scale_y, full_dims)
 
+        self._draw_scale_bars(painter, rect, full_dims, scale_x, scale_y)
+
     def _draw_extra_measure_labels(
         self,
         painter: QPainter,
@@ -1222,6 +1227,126 @@ class MeasurementOverlay(Overlay):
                 font_family=meta.font_family, font_size=meta.font_size, tag_width=meta.tag_width,
             )
             self._extra_label_boxes[(index, extra_index)] = box
+
+    def _init_scalebar_length(self, meta: MeasurementMeta) -> MeasurementMeta:
+        """
+        Choose a scale bar's initial length on placement: no more than 25%
+        of the preview width, rounded down to the largest power of ten
+        (…, 1, 10, 100, …) that fits — a clean round number in the chosen
+        unit. Needs a reference size and (for real units) a DPI; falls
+        back to a length of 1 otherwise.
+        """
+        if meta.scalebar_length > 0:
+            return meta
+        full_dims = self._zoom_handler.current_frame_dims() if self._zoom_handler is not None else None
+        dims = self._reference_dims(full_dims)
+        unit = meta.unit if meta.unit is not None else self._unit
+        if dims is None:
+            return meta._replace(scalebar_length=1.0)
+        target_px = 0.25 * dims[0]
+        if unit is MeasurementUnit.PX:
+            target = target_px
+        elif self.dpi:
+            target = pixels_to_unit(target_px, self.dpi, unit)
+        else:
+            target = target_px
+        length = 10.0 ** math.floor(math.log10(target)) if target > 0 else 1.0
+        return meta._replace(scalebar_length=length)
+
+    def _draw_scale_bars(
+        self, painter: QPainter, rect: QRect, full_dims: tuple[int, int] | None, scale_x: float, scale_y: float
+    ) -> None:
+        """
+        Scale bars — drawn in device (screen) space so they can be pinned
+        to the preview regardless of pan/zoom, or to the image (which
+        moves with it). Their on-screen length still tracks the current
+        zoom, since a fixed real length spans more screen pixels zoomed in.
+        Recorded into _label_boxes so a click opens the customize menu.
+        """
+        if full_dims is None or full_dims[0] <= 0:
+            return
+        full_w = full_dims[0]
+        saved = painter.transform()
+        inv, ok = saved.inverted()
+        viewport = painter.viewport()
+        for index, measurement in enumerate(self.measurements):
+            entry = DEFAULT_REGISTRY.get(measurement.kind)
+            if entry is None or entry.category != "scalebar":
+                continue
+            meta = measurement.meta
+            unit = meta.unit if meta.unit is not None else self._unit
+            if meta.scalebar_length <= 0:
+                continue
+            if unit is MeasurementUnit.PX:
+                length_px_image = meta.scalebar_length
+            elif self.dpi:
+                length_px_image = unit_to_px(meta.scalebar_length, unit, self.dpi)
+            else:
+                continue
+            if length_px_image <= 0:
+                continue
+            bar_len = length_px_image * scale_x * (rect.width() / full_w)
+            thickness = max(1.0, meta.scalebar_thickness)
+            margin = max(0.0, meta.text_margin)
+            base_size = meta.font_size if meta.font_size > 0 else OVERLAY_LABEL_FONT_SIZE
+            font = QFont(painter.font())
+            if meta.font_family:
+                font.setFamily(meta.font_family)
+            font.setPixelSize(max(1, round(base_size)))
+            metrics = QFontMetricsF(font)
+            label = f"{meta.scalebar_length:g} {unit.value}"
+            text_w = metrics.horizontalAdvance(label)
+            text_h = metrics.height()
+            gap = 3.0
+            content_w = max(bar_len, text_w)
+            panel_w = content_w + margin * 2
+            panel_h = thickness + gap + text_h + margin * 2
+
+            painter.setTransform(QTransform())
+            corner = self._scalebar_corner(measurement, rect, saved, viewport, panel_w, panel_h)
+            panel = QRectF(corner.x(), corner.y(), panel_w, panel_h)
+            bar_color = self._resolve_color(meta.line_color, OVERLAY_LINE_COLOR)
+            if meta.scalebar_show_bg:
+                bg = self._resolve_color(meta.tag_background_color, OVERLAY_OUTLINE_COLOR)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(bg))
+                painter.drawRect(panel)
+            bar_x = panel.left() + (panel_w - bar_len) / 2
+            bar_y = panel.top() + margin
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(bar_color))
+            painter.drawRect(QRectF(bar_x, bar_y, bar_len, thickness))
+            tick_h = thickness * 2.2
+            painter.drawRect(QRectF(bar_x, bar_y, thickness, tick_h))
+            painter.drawRect(QRectF(bar_x + bar_len - thickness, bar_y, thickness, tick_h))
+            painter.setFont(font)
+            painter.setPen(QPen(bar_color))
+            painter.drawText(
+                QRectF(panel.left() + margin, bar_y + thickness + gap, content_w, text_h),
+                Qt.AlignmentFlag.AlignHCenter, label,
+            )
+            if ok:
+                self._label_boxes[index] = inv.mapRect(panel)
+        painter.setTransform(saved)
+
+    def _scalebar_corner(
+        self, measurement: Measurement, rect: QRect, saved: QTransform, viewport: QRect, panel_w: float, panel_h: float
+    ) -> QPointF:
+        meta = measurement.meta
+        pos = meta.scalebar_position
+        inset = max(6.0, meta.text_margin)
+        if pos == "custom" and measurement.points:
+            p = saved.map(self._to_point(rect, measurement.points[0]))
+            return QPointF(p.x() - panel_w / 2, p.y() - panel_h / 2)
+        if meta.scalebar_anchor_preview:
+            left, top, right, bottom = viewport.left(), viewport.top(), viewport.right(), viewport.bottom()
+        else:
+            tl = saved.map(self._to_point(rect, (0.0, 0.0)))
+            br = saved.map(self._to_point(rect, (1.0, 1.0)))
+            left, top, right, bottom = tl.x(), tl.y(), br.x(), br.y()
+        x = left + inset if pos in ("lower_left", "upper_left") else right - inset - panel_w
+        y = top + inset if pos in ("upper_left", "upper_right") else bottom - inset - panel_h
+        return QPointF(x, y)
 
     def _measurement_center(
         self, kind: str, points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]

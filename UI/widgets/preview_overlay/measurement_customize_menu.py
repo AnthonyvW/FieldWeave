@@ -537,6 +537,7 @@ class MeasurementCustomizeMenu(QFrame):
         layout.addWidget(self._opacity_control)
 
         self._build_tag_style_controls(layout)
+        self._build_scalebar_controls(layout)
         self._build_line_style_controls(layout)
 
         scroll = QScrollArea()
@@ -634,6 +635,67 @@ class MeasurementCustomizeMenu(QFrame):
         self._fill_opacity_control = _ThicknessControl(0.0, 1.0)
         self._fill_opacity_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._fill_opacity_control)
+
+    def _build_scalebar_controls(self, layout: QVBoxLayout) -> None:
+        self._scalebar_widgets: list[QWidget] = []
+
+        length_row = QHBoxLayout()
+        self._scalebar_length_label = _field_label("Bar Length")
+        length_row.addWidget(self._scalebar_length_label)
+        self._scalebar_length_spin = QDoubleSpinBox()
+        self._scalebar_length_spin.setRange(0.001, 1_000_000.0)
+        self._scalebar_length_spin.setDecimals(3)
+        block_wheel(self._scalebar_length_spin)
+        self._scalebar_length_spin.valueChanged.connect(self._on_live_field_changed)
+        length_row.addWidget(self._scalebar_length_spin, 1)
+        length_container = QWidget()
+        length_container.setLayout(length_row)
+        length_row.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(length_container)
+        self._scalebar_widgets.append(length_container)
+
+        self._scalebar_thickness_label = _field_label("Bar Thickness")
+        layout.addWidget(self._scalebar_thickness_label)
+        self._scalebar_thickness_control = _ThicknessControl(1.0, 40.0)
+        self._scalebar_thickness_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._scalebar_thickness_control)
+        self._scalebar_widgets += [self._scalebar_thickness_label, self._scalebar_thickness_control]
+
+        anchor_row = QHBoxLayout()
+        anchor_row.addWidget(_field_label("Anchor"))
+        self._scalebar_anchor_combo = QComboBox()
+        self._scalebar_anchor_combo.addItem("Preview", True)
+        self._scalebar_anchor_combo.addItem("Image", False)
+        block_wheel(self._scalebar_anchor_combo)
+        self._scalebar_anchor_combo.currentIndexChanged.connect(self._on_live_field_changed)
+        anchor_row.addWidget(self._scalebar_anchor_combo, 1)
+        anchor_container = QWidget()
+        anchor_container.setLayout(anchor_row)
+        anchor_row.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(anchor_container)
+        self._scalebar_widgets.append(anchor_container)
+
+        position_row = QHBoxLayout()
+        position_row.addWidget(_field_label("Position"))
+        self._scalebar_position_combo = QComboBox()
+        for label, value in (
+            ("Lower Left", "lower_left"), ("Lower Right", "lower_right"),
+            ("Upper Left", "upper_left"), ("Upper Right", "upper_right"), ("Custom", "custom"),
+        ):
+            self._scalebar_position_combo.addItem(label, value)
+        block_wheel(self._scalebar_position_combo)
+        self._scalebar_position_combo.currentIndexChanged.connect(self._on_live_field_changed)
+        position_row.addWidget(self._scalebar_position_combo, 1)
+        position_container = QWidget()
+        position_container.setLayout(position_row)
+        position_row.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(position_container)
+        self._scalebar_widgets.append(position_container)
+
+        self._scalebar_bg_check = QCheckBox("Scale bar background")
+        self._scalebar_bg_check.toggled.connect(self._on_live_field_changed)
+        layout.addWidget(self._scalebar_bg_check)
+        self._scalebar_widgets.append(self._scalebar_bg_check)
 
     def _build_line_style_controls(self, layout: QVBoxLayout) -> None:
         self._build_fill_controls(layout)
@@ -770,6 +832,17 @@ class MeasurementCustomizeMenu(QFrame):
             self._font_combo.setCurrentFont(QFont(meta.font_family))
         self._font_size_spin.setValue(round(meta.font_size) if meta.font_size > 0 else round(OVERLAY_LABEL_FONT_SIZE))
         self._tag_width_control.set_value(meta.tag_width)
+        show_scalebar = entry is not None and entry.category == "scalebar"
+        self._scalebar_length_spin.setValue(meta.scalebar_length if meta.scalebar_length > 0 else 1.0)
+        self._scalebar_thickness_control.set_value(meta.scalebar_thickness)
+        self._scalebar_anchor_combo.setCurrentIndex(0 if meta.scalebar_anchor_preview else 1)
+        position_index = self._scalebar_position_combo.findData(meta.scalebar_position)
+        if position_index >= 0:
+            self._scalebar_position_combo.setCurrentIndex(position_index)
+        self._scalebar_bg_check.setChecked(meta.scalebar_show_bg)
+        for widget in self._scalebar_widgets:
+            widget.setVisible(show_scalebar)
+
         show_text = entry is not None and entry.category == "text"
         self._text_transparency_control.set_value(meta.text_transparency)
         self._text_transparency_label.setVisible(show_text)
@@ -930,6 +1003,11 @@ class MeasurementCustomizeMenu(QFrame):
             tag_width=self._tag_width_control.value(),
             text_transparency=self._text_transparency_control.value(),
             text_margin=self._text_margin_control.value(),
+            scalebar_length=self._scalebar_length_spin.value(),
+            scalebar_thickness=self._scalebar_thickness_control.value(),
+            scalebar_anchor_preview=bool(self._scalebar_anchor_combo.currentData()),
+            scalebar_position=self._scalebar_position_combo.currentData(),
+            scalebar_show_bg=self._scalebar_bg_check.isChecked(),
         )
 
     def _on_live_field_changed(self, *_args: object) -> None:

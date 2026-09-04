@@ -52,6 +52,7 @@ from UI.widgets.measurements.line_pairs import (
 )
 from UI.widgets.measurements.annotations import (
     AnnotationArrowMeasurement,
+    ScaleBarMeasurement,
     TextMeasurement,
 )
 from UI.widgets.measurements.annulus import (
@@ -149,7 +150,7 @@ _CATEGORY_GROUPS = (
     )),
     ("Polygon", "Polygon Measurements", ((PolygonMeasurement, "Polygon"),)),
     ("Annotate", "Annotations", (
-        (TextMeasurement, "Text"), (AnnotationArrowMeasurement, "Arrow"),
+        (TextMeasurement, "Text"), (AnnotationArrowMeasurement, "Arrow"), (ScaleBarMeasurement, "Scale Bar"),
     )),
 )
 

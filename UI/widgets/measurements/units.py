@@ -64,6 +64,13 @@ def unit_to_mm(value: float, unit: MeasurementUnit) -> float:
     return value
 
 
+def unit_to_px(value: float, unit: MeasurementUnit, dpi: float) -> float:
+    """Convert a real-world length in *unit* to pixels at *dpi* — the inverse of pixels_to_unit. Pixels pass straight through."""
+    if unit is MeasurementUnit.PX:
+        return value
+    return unit_to_mm(value, unit) * dpi / _MM_PER_INCH
+
+
 def dpi_from_measurement(pixel_length: float, value: float, unit: MeasurementUnit) -> float | None:
     """Derive a DPI from a measured pixel length and the real-world length the user says it represents. None if either isn't a usable positive number."""
     if pixel_length <= 0:

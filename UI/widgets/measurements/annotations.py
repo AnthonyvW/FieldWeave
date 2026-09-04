@@ -25,6 +25,27 @@ class TextMeasurement(MeasurementButton):
         painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "T")
 
 
+class ScaleBarMeasurement(MeasurementButton):
+    name = "Scale Bar"
+    display_name = "Scale Bar"
+
+    def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        left = rect.left() + LINE_MARGIN
+        right = rect.right() - LINE_MARGIN
+        y = rect.center().y()
+        self._set_pen(painter, LINE_COLOR)
+        painter.drawLine(QPoint(left, y), QPoint(right, y))
+        # End ticks.
+        painter.drawLine(QPoint(left, y - 5), QPoint(left, y + 5))
+        painter.drawLine(QPoint(right, y - 5), QPoint(right, y + 5))
+
+        font = QFont(painter.font())
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.setPen(LINE_COLOR)
+        painter.drawText(QRectF(left, y + 4, right - left, 12), Qt.AlignmentFlag.AlignHCenter, "10")
+
+
 class AnnotationArrowMeasurement(MeasurementButton):
     # Same 2-point arrow as "Annotation Arrow" (its length tag hidden by
     # default — see the MeasurementKind's meta_preset).

@@ -1712,6 +1712,12 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     meta_preset={"line_start_cap": "curved", "line_end_cap": "arrow", "hidden": True},
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
+    # A scale bar — placed with a single click (its point only matters for
+    # the "custom" position preset); white bar on a black panel by default.
+    name="Scale Bar", required_points=1, category="scalebar", resolve=_point_resolve, has_label=False,
+    meta_preset={"line_color": "#ffffff", "tag_background_color": "#000000"},
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real
     # Measurement (see MeasurementOverlay._calibration_line) and never
     # gets the generic title/length tag — see start_calibration_placement.
