@@ -1219,6 +1219,7 @@ class MeasurementOverlay(Overlay):
                 bg_color=self._resolve_color(meta.tag_background_color, OVERLAY_LINE_COLOR),
                 text_color=self._resolve_color(meta.tag_text_color, OVERLAY_OUTLINE_COLOR),
                 transparent_bg=meta.tag_background_transparent,
+                font_family=meta.font_family, font_size=meta.font_size, tag_width=meta.tag_width,
             )
             self._extra_label_boxes[(index, extra_index)] = box
 
@@ -1663,6 +1664,7 @@ class MeasurementOverlay(Overlay):
             text_color=self._resolve_color(meta.tag_text_color, OVERLAY_OUTLINE_COLOR),
             description=description,
             transparent_bg=meta.tag_background_transparent,
+            font_family=meta.font_family, font_size=meta.font_size, tag_width=meta.tag_width,
         )
         self._label_boxes[index] = box
         if delete_box is not None:
@@ -2029,6 +2031,9 @@ class MeasurementOverlay(Overlay):
         text_color: QColor = OVERLAY_OUTLINE_COLOR,
         description: str | None = None,
         transparent_bg: bool = False,
+        font_family: str = "",
+        font_size: float = 0.0,
+        tag_width: float = 0.0,
     ) -> tuple[QRectF, QRectF | None]:
         """
         Rounded-rect background (bg_color, defaulting to white) with a
@@ -2074,8 +2079,11 @@ class MeasurementOverlay(Overlay):
         """
         point = self._to_point(rect, anchor)
 
+        base_size = font_size if font_size > 0 else OVERLAY_LABEL_FONT_SIZE
         font = QFont(painter.font())
-        font.setPixelSize(max(1, round(OVERLAY_LABEL_FONT_SIZE)))
+        if font_family:
+            font.setFamily(font_family)
+        font.setPixelSize(max(1, round(base_size)))
         metrics = QFontMetricsF(font)
         pad_x = OVERLAY_LABEL_PADDING_X
         pad_y = OVERLAY_LABEL_PADDING_Y
@@ -2103,7 +2111,7 @@ class MeasurementOverlay(Overlay):
         desc_wrap_rect = QRectF()
         if description:
             desc_font = QFont(font)
-            desc_font.setPixelSize(max(1, round(OVERLAY_LABEL_FONT_SIZE - 2)))
+            desc_font.setPixelSize(max(1, round(base_size - 2)))
             desc_metrics = QFontMetricsF(desc_font)
             wrap_width = max(text_w, _DESC_MIN_WRAP_WIDTH)
             desc_wrap_rect = desc_metrics.boundingRect(
@@ -2116,7 +2124,8 @@ class MeasurementOverlay(Overlay):
 
         desc_w = desc_wrap_rect.width() + (delete_width if not has_title else 0.0)
         content_width = max(header_w, desc_w)
-        box_w = content_width + pad_x * 2
+        # A set tag_width forces a minimum box width (text stays centered).
+        box_w = max(content_width + pad_x * 2, tag_width)
         box_h = text_line_height + desc_block_height
 
         local_box = QRectF(-box_w / 2, -OVERLAY_LABEL_OFFSET - box_h, box_w, box_h)

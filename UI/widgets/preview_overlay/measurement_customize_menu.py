@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal, QPoint, QPointF, QSize
-from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QFont, QIcon, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFontComboBox, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QVBoxLayout, QWidget,
 )
+
+from UI.widgets.measurements.measurement_style import OVERLAY_LABEL_FONT_SIZE
 
 
 class _WheelBlocker(QObject):
@@ -582,6 +585,28 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_text_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._tag_text_picker)
 
+        font_row = QHBoxLayout()
+        font_row.addWidget(_field_label("Font"))
+        self._font_combo = QFontComboBox()
+        block_wheel(self._font_combo)
+        self._font_combo.currentFontChanged.connect(self._on_live_field_changed)
+        font_row.addWidget(self._font_combo, 1)
+        layout.addLayout(font_row)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(_field_label("Font Size"))
+        self._font_size_spin = QSpinBox()
+        self._font_size_spin.setRange(6, 96)
+        block_wheel(self._font_size_spin)
+        self._font_size_spin.valueChanged.connect(self._on_live_field_changed)
+        size_row.addWidget(self._font_size_spin, 1)
+        layout.addLayout(size_row)
+
+        layout.addWidget(_field_label("Tag Width (0 = auto)"))
+        self._tag_width_control = _ThicknessControl(0.0, 400.0)
+        self._tag_width_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._tag_width_control)
+
     def _build_fill_controls(self, layout: QVBoxLayout) -> None:
         self._fill_enabled_check = QCheckBox("Fill interior")
         self._fill_enabled_check.toggled.connect(self._on_fill_toggled)
@@ -728,6 +753,10 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_bg_picker.setVisible(not meta.tag_background_transparent)
         self._tag_bg_picker.set_color(meta.tag_background_color)
         self._tag_text_picker.set_color(meta.tag_text_color)
+        if meta.font_family:
+            self._font_combo.setCurrentFont(QFont(meta.font_family))
+        self._font_size_spin.setValue(round(meta.font_size) if meta.font_size > 0 else round(OVERLAY_LABEL_FONT_SIZE))
+        self._tag_width_control.set_value(meta.tag_width)
         self._line_color_picker.set_color(meta.line_color)
         self._line_thickness_control.set_value(meta.line_thickness or OVERLAY_LINE_WIDTH)
         self._line_style_picker.set_value(meta.line_dash_style)
@@ -876,6 +905,9 @@ class MeasurementCustomizeMenu(QFrame):
             area_unit=self._area_unit_combo.currentData(),
             fill_color=self._fill_color_picker.effective_color() if self._fill_enabled_check.isChecked() else "",
             fill_opacity=self._fill_opacity_control.value(),
+            font_family=self._font_combo.currentFont().family(),
+            font_size=float(self._font_size_spin.value()),
+            tag_width=self._tag_width_control.value(),
         )
 
     def _on_live_field_changed(self, *_args: object) -> None:

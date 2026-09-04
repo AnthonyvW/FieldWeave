@@ -89,6 +89,11 @@ class MeasurementMeta(NamedTuple):
     # Per-secondary-tag drag offsets, as (extra index, dx, dy) triples in
     # fraction space — the multi-tag analogue of tag_offset_x/y.
     extra_offsets: tuple[tuple[int, float, float], ...] = ()
+    # Tag typography and box width. Empty family / zero size mean "use the
+    # overlay default"; zero tag_width means the box auto-sizes to its text.
+    font_family: str = ""
+    font_size: float = 0.0
+    tag_width: float = 0.0
 
 
 DEFAULT_META = MeasurementMeta()

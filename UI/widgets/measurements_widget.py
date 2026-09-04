@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QFontComboBox,
     QLineEdit,
     QPushButton,
     QSpinBox,
@@ -446,6 +447,34 @@ class MeasurementsWidget(QWidget):
         self._default_tag_text_picker.color_changed.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_tag_text_picker)
 
+        font_row = QHBoxLayout()
+        font_row.addWidget(_field_label("Font"))
+        self._default_font_combo = QFontComboBox()
+        block_wheel(self._default_font_combo)
+        self._default_font_combo.currentFontChanged.connect(self._on_default_meta_edited)
+        font_row.addWidget(self._default_font_combo, 1)
+        layout.addLayout(font_row)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(_field_label("Font Size"))
+        self._default_font_size_spin = QSpinBox()
+        self._default_font_size_spin.setRange(6, 96)
+        self._default_font_size_spin.setValue(13)
+        block_wheel(self._default_font_size_spin)
+        self._default_font_size_spin.valueChanged.connect(self._on_default_meta_edited)
+        size_row.addWidget(self._default_font_size_spin, 1)
+        layout.addLayout(size_row)
+
+        layout.addWidget(_field_label("Tag Width (0 = auto)"))
+        self._default_tag_width_control = _ThicknessControl(0.0, 400.0)
+        self._default_tag_width_control.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_tag_width_control)
+
+        self._default_indicator_check = QCheckBox("Show indicator line")
+        self._default_indicator_check.setChecked(True)
+        self._default_indicator_check.toggled.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_indicator_check)
+
         self._default_line_color_picker = _ColorPicker("Line Color", OVERLAY_LINE_COLOR.name())
         self._default_line_color_picker.color_changed.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_line_color_picker)
@@ -540,6 +569,10 @@ class MeasurementsWidget(QWidget):
             tag_background_transparent=self._default_tag_transparent_check.isChecked(),
             midpoint_style=self._default_midpoint_picker.value(),
             show_area=self._default_show_area_check.isChecked(),
+            font_family=self._default_font_combo.currentFont().family(),
+            font_size=float(self._default_font_size_spin.value()),
+            tag_width=self._default_tag_width_control.value(),
+            indicator_enabled=self._default_indicator_check.isChecked(),
         )
 
     def current_default_meta(self) -> MeasurementMeta:
