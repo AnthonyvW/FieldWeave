@@ -977,9 +977,31 @@ class MeasurementOverlay(Overlay):
             if index == self._near_index or index == self._drag_measurement_index:
                 for point in measurement.points:
                     self._draw_endpoint(painter, self._to_point(rect, point), scale_x, scale_y)
+            if meta.always_show_center and full_dims is not None:
+                center = self._measurement_center(measurement.kind, measurement.points, full_dims)
+                if center is not None:
+                    self._draw_endpoint(painter, self._to_point(rect, center), scale_x, scale_y)
             # meta.hidden hides only the tag (feature 11 clarified), not
             # the measurement's geometry drawn just above.
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
+
+    def _measurement_center(
+        self, kind: str, points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]
+    ) -> tuple[float, float] | None:
+        """Center point (fraction space) of a circle/ellipse/"Radius Arc" measurement, or None for any other kind — see meta.always_show_center."""
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None:
+            return None
+        if entry.category == "circle":
+            geometry = self._circle_geometry(kind, points, full_dims)
+            return geometry[0] if geometry is not None else None
+        if entry.category == "ellipse":
+            geometry = self._ellipse_geometry(kind, points, full_dims)
+            return geometry[0] if geometry is not None else None
+        if kind == "Radius Arc":
+            geometry = self._arc_geometry(kind, points, full_dims)
+            return geometry[0] if geometry is not None else None
+        return None
 
     def draw_placed_measurements_with_coordinate_space(
         self, painter: QPainter, rect: QRect, coords: CoordinateSpace

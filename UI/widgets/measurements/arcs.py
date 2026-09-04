@@ -48,6 +48,5 @@ class RadiusArcMeasurement(MeasurementButton):
         for angle_deg in (20, 120):
             angle = math.radians(angle_deg)
             edge = QPointF(center.x() + rx * math.cos(angle), center.y() - ry * math.sin(angle))
-            painter.drawLine(center, edge)
             self._draw_point(painter, edge, ENDPOINT_RADIUS, active)
         self._draw_point(painter, center, ENDPOINT_RADIUS, active)

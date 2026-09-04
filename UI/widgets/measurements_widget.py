@@ -311,7 +311,7 @@ class MeasurementsWidget(QWidget):
         layout.addWidget(self._default_end_cap_picker)
 
         layout.addWidget(_field_label("Arrow/Bracket Size"))
-        self._default_cap_size_control = _ThicknessControl(0.25, 3.0)
+        self._default_cap_size_control = _ThicknessControl(0.25, 20.0)
         self._default_cap_size_control.set_value(1.0)
         self._default_cap_size_control.value_changed.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_cap_size_control)

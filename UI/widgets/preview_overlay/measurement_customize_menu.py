@@ -434,6 +434,18 @@ class MeasurementCustomizeMenu(QFrame):
         self._hidden_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._hidden_check)
 
+        self._always_show_center_check = QCheckBox("Always show center point")
+        self._always_show_center_check.toggled.connect(self._on_live_field_changed)
+        layout.addWidget(self._always_show_center_check)
+
+        self._show_leg_lengths_check = QCheckBox("Show leg lengths")
+        self._show_leg_lengths_check.toggled.connect(self._on_live_field_changed)
+        layout.addWidget(self._show_leg_lengths_check)
+
+        self._show_angle_indicator_check = QCheckBox("Show angle indicator")
+        self._show_angle_indicator_check.toggled.connect(self._on_live_field_changed)
+        layout.addWidget(self._show_angle_indicator_check)
+
         layout.addWidget(_field_label("Opacity"))
         self._opacity_control = _ThicknessControl(0.0, 1.0)
         self._opacity_control.value_changed.connect(self._on_live_field_changed)
@@ -509,7 +521,10 @@ class MeasurementCustomizeMenu(QFrame):
         # scales whichever cap is actually chosen.
         self._cap_size_label = _field_label("Arrow/Bracket Size")
         layout.addWidget(self._cap_size_label)
-        self._cap_size_control = _ThicknessControl(0.25, 3.0)
+        # A high ceiling is impractical for arrowheads but genuinely
+        # useful for brackets, which read fine even quite large (e.g. a
+        # dimension-line-style bracket spanning most of a short line).
+        self._cap_size_control = _ThicknessControl(0.25, 20.0)
         self._cap_size_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._cap_size_control)
 
@@ -556,6 +571,8 @@ class MeasurementCustomizeMenu(QFrame):
         entry = DEFAULT_REGISTRY.get(kind)
         show_caps = entry is not None and entry.category in ("line", "angle", "arc")
         show_area = entry is not None and entry.category in ("circle", "ellipse")
+        show_center = (entry is not None and entry.category in ("circle", "ellipse")) or kind == "Radius Arc"
+        show_angle_extras = entry is not None and entry.category == "angle"
         self._title_edit.setText(meta.title)
         self._description_edit.setPlainText(meta.description)
         unit = meta.unit if meta.unit is not None else MeasurementUnit.MM
@@ -568,6 +585,12 @@ class MeasurementCustomizeMenu(QFrame):
         self._area_unit_combo.setVisible(show_area and meta.show_area)
         self._always_show_description_check.setChecked(meta.always_show_description)
         self._hidden_check.setChecked(meta.hidden)
+        self._always_show_center_check.setChecked(meta.always_show_center)
+        self._always_show_center_check.setVisible(show_center)
+        self._show_leg_lengths_check.setChecked(meta.show_leg_lengths)
+        self._show_leg_lengths_check.setVisible(show_angle_extras)
+        self._show_angle_indicator_check.setChecked(meta.show_angle_indicator)
+        self._show_angle_indicator_check.setVisible(show_angle_extras)
         self._opacity_control.set_value(meta.opacity)
         self._tag_transparent_check.setChecked(meta.tag_background_transparent)
         self._tag_bg_picker.setVisible(not meta.tag_background_transparent)
@@ -688,6 +711,9 @@ class MeasurementCustomizeMenu(QFrame):
             cap_size_scale=self._cap_size_control.value(),
             decimal_places=self._decimals_spin.value(),
             hidden=self._hidden_check.isChecked(),
+            always_show_center=self._always_show_center_check.isChecked(),
+            show_leg_lengths=self._show_leg_lengths_check.isChecked(),
+            show_angle_indicator=self._show_angle_indicator_check.isChecked(),
             opacity=self._opacity_control.value(),
             tag_background_transparent=self._tag_transparent_check.isChecked(),
             midpoint_style=self._midpoint_picker.value(),

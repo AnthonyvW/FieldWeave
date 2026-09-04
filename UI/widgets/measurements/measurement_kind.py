@@ -334,6 +334,22 @@ def _ellipse_params_from_conic(
     conic-to-ellipse reduction: recenter to kill the linear terms, then
     diagonalize the remaining quadratic form.
     """
+    # (a,b,c,d,e,f) come from _conic_fit's SVD null vector, unit-norm as
+    # a whole 6-vector — but that doesn't bound (a,b,c) alone away from
+    # tiny values: for points given in real pixel coordinates (thousands,
+    # not the single digits/tens a quick sanity check tends to use),
+    # (a,b,c) shrink roughly as 1/L^2 of the points' own coordinate
+    # magnitude L while f stays near 1. Renormalizing so the quadratic
+    # part (a,b,c) alone is unit-magnitude makes every check below
+    # (calibrated assuming a/b/c ~ O(1)) behave the same regardless of
+    # the input's coordinate scale — without it, real (large-coordinate)
+    # clicks were spuriously rejected as "degenerate" by the absolute
+    # epsilon checks that used to follow.
+    quad_scale = math.sqrt(a * a + b * b + c * c)
+    if quad_scale < _DEGENERATE_EPSILON:
+        return None
+    a, b, c, d, e, f = a / quad_scale, b / quad_scale, c / quad_scale, d / quad_scale, e / quad_scale, f / quad_scale
+
     discriminant = b * b - 4 * a * c
     if discriminant >= 0:
         return None  # parabola or hyperbola, not an ellipse
@@ -345,11 +361,13 @@ def _ellipse_params_from_conic(
     x0 = (b * e - 2 * c * d) / det
     y0 = (b * d - 2 * a * e) / det
 
-    # Value of the conic at its own center — the "radius" scale factor;
-    # zero means a degenerate single point instead of a real ellipse.
+    # Value of the conic at its own center — the "radius" scale factor.
+    # Unlike (a,b,c), this is NOT checked against a fixed epsilon here:
+    # its natural magnitude scales with x0/y0 (real pixel coordinates,
+    # so easily in the thousands), for which a fixed absolute threshold
+    # would be meaningless. A degenerate (near-zero) value is instead
+    # caught below, where it forces axis1_sq/axis2_sq non-positive.
     f0 = a * x0 * x0 + b * x0 * y0 + c * y0 * y0 + d * x0 + e * y0 + f
-    if abs(f0) < _DEGENERATE_EPSILON:
-        return None
 
     # Eigen-decomposition of the symmetric [[A, B/2], [B/2, C]] quadratic
     # form — closed form for a 2×2 symmetric matrix, so this needs
@@ -364,7 +382,7 @@ def _ellipse_params_from_conic(
 
     axis1_sq = -f0 / lambda1
     axis2_sq = -f0 / lambda2
-    if axis1_sq <= 0 or axis2_sq <= 0:
+    if axis1_sq <= _DEGENERATE_EPSILON or axis2_sq <= _DEGENERATE_EPSILON:
         return None
     axis1, axis2 = math.sqrt(axis1_sq), math.sqrt(axis2_sq)
 

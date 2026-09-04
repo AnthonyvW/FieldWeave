@@ -61,6 +61,15 @@ class MeasurementMeta(NamedTuple):
     # UI.widgets.measurements.lines.arrow_dims) — one shared "size" knob
     # for both, rather than a separate control per cap style.
     cap_size_scale: float = 1.0
+    # Circle/ellipse/"Radius Arc" kinds: draw a small marker at the
+    # shape's own center at all times, not just while hovered/dragged
+    # like its other anchor points.
+    always_show_center: bool = False
+    # "3 Point Angle"/"4 Point Angle" only, both default off: each leg's
+    # own length alongside the angle value, and a dashed guide + curve at
+    # the vertex/intersection (see MeasurementOverlay._draw_angle_indicator).
+    show_leg_lengths: bool = False
+    show_angle_indicator: bool = False
 
 
 DEFAULT_META = MeasurementMeta()
