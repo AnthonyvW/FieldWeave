@@ -446,6 +446,12 @@ class MeasurementCustomizeMenu(QFrame):
         self._show_angle_indicator_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._show_angle_indicator_check)
 
+        self._angle_indicator_style_picker = _StylePicker(
+            "Angle Indicator", [(style, _dash_style_icon(style)) for style in MEASUREMENT_DASH_PATTERNS]
+        )
+        self._angle_indicator_style_picker.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._angle_indicator_style_picker)
+
         layout.addWidget(_field_label("Opacity"))
         self._opacity_control = _ThicknessControl(0.0, 1.0)
         self._opacity_control.value_changed.connect(self._on_live_field_changed)
@@ -591,6 +597,12 @@ class MeasurementCustomizeMenu(QFrame):
         self._show_leg_lengths_check.setVisible(show_angle_extras)
         self._show_angle_indicator_check.setChecked(meta.show_angle_indicator)
         self._show_angle_indicator_check.setVisible(show_angle_extras)
+        # The indicator's guide lines only draw for "4 Point Angle" (a
+        # "3 Point Angle"'s legs already meet at the vertex), so only it
+        # exposes their dash style.
+        show_angle_style = kind == "4 Point Angle"
+        self._angle_indicator_style_picker.set_value(meta.angle_indicator_dash_style)
+        self._angle_indicator_style_picker.setVisible(show_angle_style)
         self._opacity_control.set_value(meta.opacity)
         self._tag_transparent_check.setChecked(meta.tag_background_transparent)
         self._tag_bg_picker.setVisible(not meta.tag_background_transparent)
@@ -714,6 +726,7 @@ class MeasurementCustomizeMenu(QFrame):
             always_show_center=self._always_show_center_check.isChecked(),
             show_leg_lengths=self._show_leg_lengths_check.isChecked(),
             show_angle_indicator=self._show_angle_indicator_check.isChecked(),
+            angle_indicator_dash_style=self._angle_indicator_style_picker.value(),
             opacity=self._opacity_control.value(),
             tag_background_transparent=self._tag_transparent_check.isChecked(),
             midpoint_style=self._midpoint_picker.value(),

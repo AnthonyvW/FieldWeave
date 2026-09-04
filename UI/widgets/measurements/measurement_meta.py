@@ -70,6 +70,10 @@ class MeasurementMeta(NamedTuple):
     # the vertex/intersection (see MeasurementOverlay._draw_angle_indicator).
     show_leg_lengths: bool = False
     show_angle_indicator: bool = False
+    # "4 Point Angle" only: dash pattern of the angle indicator's guide
+    # lines (see MeasurementOverlay._draw_angle_indicator). Named among
+    # the dash styles in MEASUREMENT_DASH_STYLES.
+    angle_indicator_dash_style: str = "dash"
 
 
 DEFAULT_META = MeasurementMeta()

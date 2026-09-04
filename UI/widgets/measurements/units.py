@@ -8,6 +8,7 @@ _MM_PER_FT = 304.8
 
 
 class MeasurementUnit(Enum):
+    PX = "px"
     UM = "\u00b5m"
     MM = "mm"
     CM = "cm"
@@ -17,7 +18,9 @@ class MeasurementUnit(Enum):
 
 
 def pixels_to_unit(pixels: float, dpi: float, unit: MeasurementUnit) -> float:
-    """Convert a pixel length to *unit*, given the source's DPI (pixels per inch)."""
+    """Convert a pixel length to *unit*, given the source's DPI (pixels per inch). Pixels are DPI-independent, so PX returns the raw pixel count unchanged."""
+    if unit is MeasurementUnit.PX:
+        return pixels
     mm = (pixels / dpi) * _MM_PER_INCH
     if unit is MeasurementUnit.UM:
         return mm * 1000

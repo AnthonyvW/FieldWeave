@@ -683,12 +683,23 @@ def _curve_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
 
 
 def _curve_points(points: tuple[Point2D, ...]) -> list[Point2D] | None:
-    """Sampled points along the curve for however many of its 3 points have been placed so far — a straight segment (2 points) while the bulge point isn't placed yet, matching how circle/ellipse/arc kinds show a straight guide during placement."""
+    """
+    Sampled points along the curve for however many of its 3 points have
+    been placed so far — a straight segment (2 points) while the third
+    point isn't placed yet, matching how circle/ellipse/arc kinds show a
+    straight guide during placement.
+
+    The third point lies *on* the curve at its midpoint (t=0.5), not as a
+    Bezier control point the curve merely bends toward — so the derived
+    control point is solved back from it: with B(0.5) = 0.25 P0 + 0.5 C +
+    0.25 P1 forced to equal the placed midpoint M, C = 2M - (P0 + P1)/2.
+    """
     if len(points) < 2:
         return None
     if len(points) < 3:
         return [points[0], points[1]]
-    p0, p1, control = points[0], points[1], points[2]
+    p0, p1, mid = points[0], points[1], points[2]
+    control = (2 * mid[0] - (p0[0] + p1[0]) / 2, 2 * mid[1] - (p0[1] + p1[1]) / 2)
     result = []
     for i in range(_CURVE_SAMPLES + 1):
         t = i / _CURVE_SAMPLES

@@ -987,7 +987,10 @@ class MeasurementOverlay(Overlay):
                     outline_color=outline_color, outline_width=outline_width,
                 )
             if entry is not None and entry.category == "angle" and meta.show_angle_indicator:
-                self._draw_angle_indicator(painter, rect, measurement.kind, measurement.points, stroke_scale, line_color)
+                self._draw_angle_indicator(
+                    painter, rect, measurement.kind, measurement.points, stroke_scale,
+                    line_color, line_width, meta.angle_indicator_dash_style,
+                )
             painter.restore()
             if index == self._near_index or index == self._drag_measurement_index:
                 for point in measurement.points:
@@ -1245,13 +1248,19 @@ class MeasurementOverlay(Overlay):
 
     def _draw_angle_indicator(
         self, painter: QPainter, rect: QRect, kind: str, points: tuple[tuple[float, float], ...],
-        stroke_scale: float, color: QColor,
+        stroke_scale: float, color: QColor, line_width: float = OVERLAY_LINE_WIDTH,
+        dash_style: str = "dash",
     ) -> None:
         """
         A dashed guide from each leg's own nearer end out to the angle's
         anchor (skipped for "3 Point Angle", whose legs already meet
         there), plus a small curved arc at the anchor sweeping between
         the two legs' directions — see meta.show_angle_indicator.
+
+        The guide/arc pens track the measurement's own *line_width* so a
+        thicker line gets a proportionally heavier indicator; *dash_style*
+        picks the guide's dash pattern (see resolve_dash_pattern),
+        defaulting to the classic evenly-spaced dashes.
 
         Fixed on-screen size UI chrome, not image content, so — like
         ``_draw_midpoint_marker`` — everything here is computed directly
@@ -1268,11 +1277,13 @@ class MeasurementOverlay(Overlay):
             return
         anchor = self._to_point(rect, entry.angle_anchor(points))
 
+        guide_width = line_width / stroke_scale
         far_points = []
         guide_pen = QPen(color)
-        guide_pen.setWidthF(1.0 / stroke_scale)
+        guide_pen.setWidthF(guide_width)
         guide_pen.setStyle(Qt.PenStyle.CustomDashLine)
-        guide_pen.setDashPattern([OVERLAY_DASH_LENGTH, OVERLAY_DASH_GAP])
+        pattern = resolve_dash_pattern(dash_style, line_width) or [OVERLAY_DASH_LENGTH, OVERLAY_DASH_GAP]
+        guide_pen.setDashPattern([value / guide_width for value in pattern] if guide_width > 0 else pattern)
         for leg_a, leg_b in legs:
             a_pt, b_pt = self._to_point(rect, leg_a), self._to_point(rect, leg_b)
             near, far = (a_pt, b_pt) if self._distance(anchor, a_pt) <= self._distance(anchor, b_pt) else (b_pt, a_pt)
@@ -1292,7 +1303,7 @@ class MeasurementOverlay(Overlay):
         radius = (OVERLAY_POINT_RADIUS * 2.2) / stroke_scale
         samples = max(6, round(abs(sweep) / 8))
         arc_pen = QPen(color)
-        arc_pen.setWidthF(1.2 / stroke_scale)
+        arc_pen.setWidthF(line_width * 0.9 / stroke_scale)
         arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(arc_pen)
         prev = None
@@ -1451,15 +1462,15 @@ class MeasurementOverlay(Overlay):
                 return None
             anchor, _radius_px = geometry
             suffix = None
-            if self.dpi is not None and dims is not None:
+            if self._can_measure(unit) and dims is not None:
                 suffix_geometry = self._circle_geometry(kind, points, dims)
                 if suffix_geometry is not None:
                     _, suffix_radius_px = suffix_geometry
-                    suffix = f"\u00d8 {format_length(suffix_radius_px * 2, self.dpi, unit, decimals)}"
+                    suffix = f"\u00d8 {format_length(suffix_radius_px * 2, self.dpi or 1.0, unit, decimals)}"
                     if meta.show_area:
                         area_unit = meta.area_unit if meta.area_unit is not None else unit
                         area_px = math.pi * suffix_radius_px * suffix_radius_px
-                        suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi, area_unit, decimals)}"
+                        suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi or 1.0, area_unit, decimals)}"
         elif entry.category == "ellipse":
             if full_dims is None:
                 return None
@@ -1468,17 +1479,17 @@ class MeasurementOverlay(Overlay):
                 return None
             anchor, _rx_px, _ry_px, _rotation = geometry
             suffix = None
-            if self.dpi is not None and dims is not None:
+            if self._can_measure(unit) and dims is not None:
                 suffix_geometry = self._ellipse_geometry(kind, points, dims)
                 if suffix_geometry is not None:
                     _, suffix_rx_px, suffix_ry_px, _ = suffix_geometry
-                    major = format_length(suffix_rx_px * 2, self.dpi, unit, decimals)
-                    minor = format_length(suffix_ry_px * 2, self.dpi, unit, decimals)
+                    major = format_length(suffix_rx_px * 2, self.dpi or 1.0, unit, decimals)
+                    minor = format_length(suffix_ry_px * 2, self.dpi or 1.0, unit, decimals)
                     suffix = f"{major} \u00d7 {minor}"
                     if meta.show_area:
                         area_unit = meta.area_unit if meta.area_unit is not None else unit
                         area_px = math.pi * suffix_rx_px * suffix_ry_px
-                        suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi, area_unit, decimals)}"
+                        suffix = f"{suffix} \u00b7 {format_area(area_px, self.dpi or 1.0, area_unit, decimals)}"
         elif entry.category == "angle":
             if entry.angle_anchor is None or not points:
                 return None
@@ -1534,11 +1545,11 @@ class MeasurementOverlay(Overlay):
                 center[1] + (radius_px * math.sin(mid_angle)) / full_h,
             )
             suffix = None
-            if self.dpi is not None and dims is not None:
+            if self._can_measure(unit) and dims is not None:
                 suffix_geometry = self._arc_geometry(kind, points, dims)
                 if suffix_geometry is not None:
                     _, suffix_radius_px, _start, suffix_sweep = suffix_geometry
-                    radius_text = format_length(suffix_radius_px, self.dpi, unit, decimals)
+                    radius_text = format_length(suffix_radius_px, self.dpi or 1.0, unit, decimals)
                     suffix = f"R {radius_text} \u00b7 {abs(suffix_sweep):.{decimals}f}\u00b0"
         else:
             if not points:
@@ -1556,6 +1567,10 @@ class MeasurementOverlay(Overlay):
             return f"{title} \u00b7 {suffix}"
         return title or suffix or ""
 
+    def _can_measure(self, unit: MeasurementUnit) -> bool:
+        """Whether a real-world length can be shown: always for the DPI-independent pixel unit, otherwise only once a DPI is known."""
+        return unit is MeasurementUnit.PX or self.dpi is not None
+
     def _length_suffix(
         self,
         points: tuple[tuple[float, float], ...],
@@ -1563,12 +1578,12 @@ class MeasurementOverlay(Overlay):
         unit: MeasurementUnit,
         decimals: int = 2,
     ) -> str | None:
-        if full_dims is None or self.dpi is None:
+        if full_dims is None or not self._can_measure(unit):
             return None
         length_px = self._polyline_length_px(points, full_dims)
         if length_px <= 0:
             return None
-        return format_length(length_px, self.dpi, unit, decimals)
+        return format_length(length_px, self.dpi or 1.0, unit, decimals)
 
     @staticmethod
     def _polyline_length_px(points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]) -> float:

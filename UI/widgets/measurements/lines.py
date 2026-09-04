@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QPainter, QPainterPath, QPolygonF
+from PySide6.QtGui import QBrush, QPainter, QPainterPath, QPolygonF
 
 from UI.widgets.measurements.base_measurement import MeasurementButton
-from UI.widgets.measurements.measurement_style import ENDPOINT_RADIUS, LINE_COLOR, LINE_MARGIN
+from UI.widgets.measurements.measurement_style import (
+    ENDPOINT_RADIUS, LINE_COLOR, LINE_MARGIN, POINT_ACTIVE_COLOR, POINT_RADIUS,
+)
 
 # A calibration line is placed the same way as a 2-point line but has no
 # tile of its own (see MeasurementOverlay.start_calibration_placement)
@@ -136,6 +138,13 @@ class ArrowMeasurement(MeasurementButton):
                 QPointF(base_x + px * head_half, base_y + py * head_half),
                 QPointF(base_x - px * head_half, base_y - py * head_half),
             ]))
+
+        # The directional (2nd) point sits at the tip as a fixed blue
+        # marker regardless of hover/checked state, so the arrow always
+        # reads which end it points to.
+        self._set_pen(painter, POINT_ACTIVE_COLOR)
+        painter.setBrush(QBrush(POINT_ACTIVE_COLOR))
+        painter.drawEllipse(end, POINT_RADIUS // 2, POINT_RADIUS // 2)
 
 
 class BracketMeasurement(MeasurementButton):
