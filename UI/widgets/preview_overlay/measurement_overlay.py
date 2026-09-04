@@ -1151,14 +1151,9 @@ class MeasurementOverlay(Overlay):
                 cap_size=meta.cap_size_scale, fill_color=self._resolve_fill(meta),
                 indicator_enabled=meta.indicator_enabled, indicator_color=indicator_color,
                 indicator_opacity=meta.indicator_opacity, indicator_dash_style=meta.indicator_dash_style,
+                midpoint_style=meta.midpoint_style,
             )
             entry = DEFAULT_REGISTRY.get(measurement.kind)
-            if entry is not None and entry.category == "line" and meta.midpoint_style != "none":
-                self._draw_midpoint_marker(
-                    painter, rect, measurement.points, meta.midpoint_style, stroke_scale,
-                    line_color=line_color, line_width=line_width,
-                    outline_color=outline_color, outline_width=outline_width,
-                )
             if entry is not None and entry.category == "angle" and meta.indicator_enabled:
                 self._draw_angle_indicator(
                     painter, rect, measurement.kind, measurement.points, stroke_scale,
@@ -1438,6 +1433,7 @@ class MeasurementOverlay(Overlay):
         indicator_color: QColor | None = None,
         indicator_opacity: float = 1.0,
         indicator_dash_style: str = "dash",
+        midpoint_style: str = "none",
     ) -> None:
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None:
@@ -1447,6 +1443,7 @@ class MeasurementOverlay(Overlay):
                 painter, rect, points, stroke_scale, dashed=dashed,
                 line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
                 dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
+                midpoint_style=midpoint_style,
             )
         elif entry.category == "circle" and full_dims is not None:
             self._draw_circle(
@@ -1605,62 +1602,58 @@ class MeasurementOverlay(Overlay):
         painter.setBrush(QBrush(line_color))
         painter.drawEllipse(center, rx, ry)
 
-    def _draw_midpoint_marker(
+    def _midpoint_marker_paths(
         self,
-        painter: QPainter,
-        rect: QRect,
-        points: tuple[tuple[float, float], ...],
+        dev_points: list[QPointF],
         style: str,
-        stroke_scale: float,
         *,
-        line_color: QColor,
         line_width: float,
-        outline_color: QColor,
         outline_width: float,
-    ) -> None:
+    ) -> tuple[QPainterPath | None, QPainterPath | None]:
         """
-        A small tick (a single stroke perpendicular to the line) or x (a
-        pair of crossed strokes) centered on the line's midpoint, oriented
-        from the overall first-to-last direction so a tick reads as square
-        across the line at any angle. Sized in fixed on-screen pixels
-        (counter-scaled by *stroke_scale*) and drawn line-color over a
-        slightly wider outline-color pass, the same legible-on-any-
-        background treatment as the stroke itself (feature 8).
+        (outline path, fill path) for a small tick (one stroke
+        perpendicular to the line) or x (a pair of crossed strokes) at the
+        line's midpoint, oriented from the first-to-last direction so a
+        tick reads square across the line at any angle. Built as filled
+        bands in device (screen) space — *dev_points* are already mapped
+        through the pan/zoom transform, widths are true screen pixels — so
+        ``_draw_polyline`` can union it into the line's own outline/fill
+        paths (one continuous outline, no separate stroke laid on top) and
+        it stays undistorted under a non-uniform zoom.
         """
-        if len(points) < 2:
-            return
-        mid = self._to_point(rect, self._midpoint(points))
-        start = self._to_point(rect, points[0])
-        end = self._to_point(rect, points[-1])
+        start, end = dev_points[0], dev_points[-1]
+        mid = QPointF((start.x() + end.x()) / 2, (start.y() + end.y()) / 2)
         dx, dy = end.x() - start.x(), end.y() - start.y()
         length = math.hypot(dx, dy)
         if length <= 0:
-            return
+            return None, None
         ux, uy = dx / length, dy / length
         px, py = -uy, ux  # unit perpendicular
-        half = (OVERLAY_POINT_RADIUS * (line_width / OVERLAY_LINE_WIDTH) + 2.0) / stroke_scale
+        half = OVERLAY_POINT_RADIUS * (line_width / OVERLAY_LINE_WIDTH) + 2.0
 
         if style == "x":
             axes = ((ux + px, uy + py), (ux - px, uy - py))
         else:  # "tick"
             axes = ((px, py),)
 
-        segments = []
+        fill_stroker = QPainterPathStroker()
+        fill_stroker.setWidth(line_width)
+        fill_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        outline_stroker = QPainterPathStroker()
+        outline_stroker.setWidth(line_width + outline_width * 2)
+        outline_stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+
+        fill_path = QPainterPath()
+        outline_path = QPainterPath()
         for ax, ay in axes:
             norm = math.hypot(ax, ay) or 1.0
             hx, hy = ax / norm * half, ay / norm * half
-            segments.append((QPointF(mid.x() - hx, mid.y() - hy), QPointF(mid.x() + hx, mid.y() + hy)))
-
-        for width, color in (
-            ((line_width + outline_width * 2) / stroke_scale, outline_color),
-            (line_width / stroke_scale, line_color),
-        ):
-            pen = QPen(color)
-            pen.setWidthF(width)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            for a, b in segments:
-                painter.drawLine(a, b)
+            seg = QPainterPath()
+            seg.moveTo(mid.x() - hx, mid.y() - hy)
+            seg.lineTo(mid.x() + hx, mid.y() + hy)
+            fill_path = fill_path.united(fill_stroker.createStroke(seg))
+            outline_path = outline_path.united(outline_stroker.createStroke(seg))
+        return outline_path, fill_path
 
     def _draw_indicator_line(
         self,
@@ -1710,12 +1703,12 @@ class MeasurementOverlay(Overlay):
         picks the guide's dash pattern (see resolve_dash_pattern),
         defaulting to the classic evenly-spaced dashes.
 
-        Fixed on-screen size UI chrome, not image content, so — like
-        ``_draw_midpoint_marker`` — everything here is computed directly
-        from screen ("rect") positions, with only the radius counter-
-        scaled by *stroke_scale* to hold it constant across zoom; no
-        separate true-pixel-space angle math is needed, since ``rect``
-        space shares the source frame's own aspect ratio.
+        Fixed on-screen size UI chrome, not image content, so everything
+        here is computed directly from screen ("rect") positions, with
+        only the radius counter-scaled by *stroke_scale* to hold it
+        constant across zoom; no separate true-pixel-space angle math is
+        needed, since ``rect`` space shares the source frame's own aspect
+        ratio.
         """
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None or entry.angle_anchor is None or entry.segment_pairs is None:
@@ -2577,6 +2570,7 @@ class MeasurementOverlay(Overlay):
         start_cap: str = "curved",
         end_cap: str = "curved",
         cap_size: float = 1.0,
+        midpoint_style: str = "none",
     ) -> None:
         last = len(points) - 2
         if dashed:
@@ -2596,12 +2590,24 @@ class MeasurementOverlay(Overlay):
         # — painting per-segment instead would composite two independent
         # antialiased passes on top of each other at every interior
         # joint (each segment unions an identical "curved" cap disc
-        # there), reading as a doubled border ring.
+        # there), reading as a doubled border ring. The midpoint marker
+        # is unioned into that same pair so it reads as part of the line
+        # (feature: one continuous outline) rather than a separate stroke
+        # laid over it.
+        #
+        # Built and painted in device (screen) space — the segment points
+        # mapped through the live pan/zoom transform, widths in true screen
+        # pixels (stroke_scale 1), the transform reset while painting — so
+        # caps and the midpoint marker stay undistorted even when the zoom's
+        # current x/y scale isn't uniform (which otherwise squished the
+        # round/triangular cap shapes into ellipses).
+        saved = painter.transform()
+        dev_points = [saved.map(self._to_point(rect, p)) for p in points]
         outline_path = QPainterPath()
         fill_path = QPainterPath()
-        for i in range(len(points) - 1):
+        for i in range(len(dev_points) - 1):
             seg_outline, seg_fill = self._stroke_paths(
-                rect, points[i], points[i + 1], stroke_scale,
+                dev_points[i], dev_points[i + 1], 1.0,
                 line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
                 dash_style=dash_style,
                 start_cap=start_cap if i == 0 else "curved",
@@ -2611,11 +2617,22 @@ class MeasurementOverlay(Overlay):
             outline_path = outline_path.united(seg_outline)
             fill_path = fill_path.united(seg_fill)
 
+        if midpoint_style != "none" and len(dev_points) >= 2:
+            mid_outline, mid_fill = self._midpoint_marker_paths(
+                dev_points, midpoint_style, line_width=line_width, outline_width=outline_width,
+            )
+            if mid_outline is not None:
+                outline_path = outline_path.united(mid_outline)
+                fill_path = fill_path.united(mid_fill)
+
+        painter.save()
+        painter.setTransform(QTransform())
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(outline_color))
         painter.drawPath(outline_path)
         painter.setBrush(QBrush(line_color))
         painter.drawPath(fill_path)
+        painter.restore()
 
     def _draw_circle(
         self,
@@ -2952,7 +2969,7 @@ class MeasurementOverlay(Overlay):
             return
 
         outline_path, fill_path = self._stroke_paths(
-            rect, start, end, stroke_scale,
+            self._to_point(rect, start), self._to_point(rect, end), stroke_scale,
             line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
             dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
         )
@@ -2964,9 +2981,8 @@ class MeasurementOverlay(Overlay):
 
     def _stroke_paths(
         self,
-        rect: QRect,
-        start: tuple[float, float],
-        end: tuple[float, float],
+        p1: QPointF,
+        p2: QPointF,
         stroke_scale: float,
         *,
         line_color: QColor = OVERLAY_LINE_COLOR,
@@ -2980,13 +2996,19 @@ class MeasurementOverlay(Overlay):
     ) -> tuple[QPainterPath, QPainterPath]:
         """
         (outline path, fill path) for one finalized (non-preview) segment
-        — everything ``_draw_stroke``'s non-dashed branch used to paint
-        immediately, now just returned so ``_draw_polyline`` can union
-        several segments' paths into one before painting (see its own
-        docstring for why that matters at interior joints).
+        between the two already-mapped points *p1*/*p2* — everything
+        ``_draw_stroke``'s non-dashed branch used to paint immediately, now
+        just returned so ``_draw_polyline`` can union several segments'
+        paths into one before painting (see its own docstring for why that
+        matters at interior joints).
+
+        The points carry their own coordinate space and *stroke_scale*
+        matches it: rect-space points with the real zoom scale (painted
+        through the pan/zoom transform), or device-space points with
+        *stroke_scale* 1 (painted with the transform reset — see
+        ``_draw_polyline``, which does this so caps stay undistorted under
+        a non-uniform zoom).
         """
-        p1 = self._to_point(rect, start)
-        p2 = self._to_point(rect, end)
         lw = line_width / stroke_scale
         ow = outline_width / stroke_scale
         total_outline_width = line_width + outline_width * 2

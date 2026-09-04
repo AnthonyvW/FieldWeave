@@ -496,15 +496,15 @@ def apply_style(app: QApplication) -> None:
         }}
 
         /* Measurement tab — customize-menu popup opened from a tag on
-           the preview itself. Now a genuine top-level window rather than
-           a floating child of the preview, so it's styled like the rest
-           of the app's panels (the same window background and QGroupBox
-           border the Measurements tab itself uses) instead of the
-           preview-overlay look it had as a child widget — square
-           corners throughout, since a rectangular OS window has none of
-           its own to match. */
+           the preview itself. A genuine top-level window styled to match
+           the app's sidebar panels: the same near-white panel fill the
+           collapsible sections use over the window background, the same
+           1px group-box border, and square corners (a rectangular OS
+           window has none of its own to match). Its fields (line edits,
+           combos, spin boxes, sliders, buttons) inherit the app-wide
+           control styling, so only the panel shell needs stating here. */
         QFrame#MeasurementCustomizeMenu {{
-            background: rgb(215, 218, 222);
+            background: rgb(245, 246, 248);
             border: 1px solid rgb(180, 180, 180);
             border-radius: 0px;
         }}
