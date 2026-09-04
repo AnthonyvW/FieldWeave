@@ -50,6 +50,10 @@ from UI.widgets.measurements.line_pairs import (
     ThreePointParallelMeasurement,
     ThreePointPerpMeasurement,
 )
+from UI.widgets.measurements.annotations import (
+    AnnotationArrowMeasurement,
+    TextMeasurement,
+)
 from UI.widgets.measurements.annulus import (
     DiameterAnnulusMeasurement,
     RadiusAnnulusMeasurement,
@@ -144,6 +148,9 @@ _CATEGORY_GROUPS = (
         (DiameterTwoCircleMeasurement, "Diameter"),
     )),
     ("Polygon", "Polygon Measurements", ((PolygonMeasurement, "Polygon"),)),
+    ("Annotate", "Annotations", (
+        (TextMeasurement, "Text"), (AnnotationArrowMeasurement, "Arrow"),
+    )),
 )
 
 

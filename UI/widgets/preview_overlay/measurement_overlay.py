@@ -1634,6 +1634,12 @@ class MeasurementOverlay(Overlay):
         mouse event can hit-test against it — see _hit_test_tag.
         """
         meta = measurement.meta
+        entry = DEFAULT_REGISTRY.get(measurement.kind)
+        if entry is not None and entry.category == "text":
+            # A text annotation is its own content, not a length tag —
+            # drawn directly, hoverable/clickable/draggable like a tag.
+            self._draw_text_annotation(painter, rect, index, measurement, scale_x, scale_y)
+            return
         # "Hide measurement" hides the tag only (feature 11 clarified);
         # the geometry is drawn regardless, by the caller.
         if meta.hidden:
@@ -2016,6 +2022,58 @@ class MeasurementOverlay(Overlay):
         path.lineTo(rect.left(), rect.bottom())
         path.closeSubpath()
         return path
+
+    def _draw_text_annotation(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        index: int,
+        measurement: Measurement,
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        """
+        A "Text" annotation: its own text drawn straight on the image
+        (no length tag), in the same undistorted local frame _draw_label
+        uses so glyphs stay unsquished under a non-uniform zoom. The drawn
+        box is recorded into _label_boxes so it can be clicked (to edit),
+        hovered, and dragged like any tag.
+        """
+        if not measurement.points:
+            return
+        meta = measurement.meta
+        content = meta.title if meta.title else "Text"
+        anchor = (measurement.points[0][0] + meta.tag_offset_x, measurement.points[0][1] + meta.tag_offset_y)
+        point = self._to_point(rect, anchor)
+
+        base_size = meta.font_size if meta.font_size > 0 else OVERLAY_LABEL_FONT_SIZE
+        font = QFont(painter.font())
+        if meta.font_family:
+            font.setFamily(meta.font_family)
+        font.setPixelSize(max(1, round(base_size)))
+        metrics = QFontMetricsF(font)
+        margin = max(0.0, meta.text_margin)
+        box_w = metrics.horizontalAdvance(content) + margin * 2
+        box_h = metrics.height() + margin * 2
+        local_box = QRectF(-box_w / 2, -box_h / 2, box_w, box_h)
+
+        painter.save()
+        painter.translate(point)
+        if scale_x > 0 and scale_y > 0:
+            painter.scale(1.0 / scale_x, 1.0 / scale_y)
+        painter.setFont(font)
+        bg_alpha = max(0.0, min(1.0, 1.0 - meta.text_transparency))
+        if bg_alpha > 0:
+            bg = QColor(self._resolve_color(meta.tag_background_color, OVERLAY_OUTLINE_COLOR))
+            bg.setAlphaF(bg_alpha)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(bg))
+            painter.drawRect(local_box)
+        painter.setPen(QPen(self._resolve_color(meta.tag_text_color, OVERLAY_LINE_COLOR)))
+        painter.drawText(local_box, Qt.AlignmentFlag.AlignCenter, content)
+        painter.restore()
+
+        self._label_boxes[index] = self._local_rect_to_rect_space(local_box, point, scale_x, scale_y)
 
     def _draw_label(
         self,

@@ -607,6 +607,19 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_width_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._tag_width_control)
 
+        # Text-annotation only: background transparency and padding.
+        self._text_transparency_label = _field_label("Text BG Transparency")
+        layout.addWidget(self._text_transparency_label)
+        self._text_transparency_control = _ThicknessControl(0.0, 1.0)
+        self._text_transparency_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._text_transparency_control)
+
+        self._text_margin_label = _field_label("Text Margin")
+        layout.addWidget(self._text_margin_label)
+        self._text_margin_control = _ThicknessControl(0.0, 40.0)
+        self._text_margin_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._text_margin_control)
+
     def _build_fill_controls(self, layout: QVBoxLayout) -> None:
         self._fill_enabled_check = QCheckBox("Fill interior")
         self._fill_enabled_check.toggled.connect(self._on_fill_toggled)
@@ -757,6 +770,13 @@ class MeasurementCustomizeMenu(QFrame):
             self._font_combo.setCurrentFont(QFont(meta.font_family))
         self._font_size_spin.setValue(round(meta.font_size) if meta.font_size > 0 else round(OVERLAY_LABEL_FONT_SIZE))
         self._tag_width_control.set_value(meta.tag_width)
+        show_text = entry is not None and entry.category == "text"
+        self._text_transparency_control.set_value(meta.text_transparency)
+        self._text_transparency_label.setVisible(show_text)
+        self._text_transparency_control.setVisible(show_text)
+        self._text_margin_control.set_value(meta.text_margin)
+        self._text_margin_label.setVisible(show_text)
+        self._text_margin_control.setVisible(show_text)
         self._line_color_picker.set_color(meta.line_color)
         self._line_thickness_control.set_value(meta.line_thickness or OVERLAY_LINE_WIDTH)
         self._line_style_picker.set_value(meta.line_dash_style)
@@ -908,6 +928,8 @@ class MeasurementCustomizeMenu(QFrame):
             font_family=self._font_combo.currentFont().family(),
             font_size=float(self._font_size_spin.value()),
             tag_width=self._tag_width_control.value(),
+            text_transparency=self._text_transparency_control.value(),
+            text_margin=self._text_margin_control.value(),
         )
 
     def _on_live_field_changed(self, *_args: object) -> None:

@@ -94,6 +94,10 @@ class MeasurementMeta(NamedTuple):
     font_family: str = ""
     font_size: float = 0.0
     tag_width: float = 0.0
+    # "text" annotation: the box's background transparency (0 = opaque,
+    # 1 = fully transparent) and the padding around the text.
+    text_transparency: float = 0.0
+    text_margin: float = 4.0
 
 
 DEFAULT_META = MeasurementMeta()

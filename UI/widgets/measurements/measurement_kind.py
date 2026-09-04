@@ -1701,6 +1701,17 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     two_circle_partial=_diameter_two_circle_partial,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
+    # A single-point text annotation — the "title" holds its text; drawn
+    # directly on the image (no length tag). Preset to white-on-black.
+    name="Text", required_points=1, category="text", resolve=_point_resolve,
+    meta_preset={"tag_text_color": "#ffffff", "tag_background_color": "#000000"},
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # A 2-point arrow annotation whose length tag is hidden by default.
+    name="Annotation Arrow", required_points=2, category="line", resolve=_two_point_resolve,
+    meta_preset={"line_start_cap": "curved", "line_end_cap": "arrow", "hidden": True},
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real
     # Measurement (see MeasurementOverlay._calibration_line) and never
     # gets the generic title/length tag — see start_calibration_placement.
