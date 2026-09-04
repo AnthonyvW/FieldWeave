@@ -37,6 +37,7 @@ class MeasurementTab(CameraWithSidebarPage):
         self._measurements.calibration_cancelled.connect(self._capture_control.cancel_calibration)
         self._measurements.export_measurements_requested.connect(self._on_export_measurements_clicked)
         self._measurements.import_measurements_requested.connect(self._on_import_measurements_clicked)
+        self._measurements.delete_all_requested.connect(self._on_delete_all_measurements)
 
         self._capture_control.dpi_changed.connect(self._measurements.set_dpi_display)
         self._capture_control.calibration_line_ready.connect(self._measurements.set_calibration_line_ready)
@@ -127,6 +128,11 @@ class MeasurementTab(CameraWithSidebarPage):
             preview.overlays.measurement.type = kind
         if kind is not None:
             self._capture_control.cancel_calibration()
+
+    def _on_delete_all_measurements(self) -> None:
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement.clear_measurements()
 
     def _on_default_meta_changed(self, meta: MeasurementMeta) -> None:
         preview = get_app_context().camera_preview

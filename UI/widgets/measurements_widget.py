@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPointF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QFontComboBox,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QStackedWidget,
@@ -155,6 +157,23 @@ _CATEGORY_GROUPS = (
 )
 
 
+def _delete_all_icon(size: int = 14) -> QIcon:
+    """A plain black X, for the Delete All button in the measurement types header."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#000000"))
+    pen.setWidth(2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    inset = 3.0
+    painter.drawLine(QPointF(inset, inset), QPointF(size - inset, size - inset))
+    painter.drawLine(QPointF(size - inset, inset), QPointF(inset, size - inset))
+    painter.end()
+    return QIcon(pixmap)
+
+
 class _CategoryChip(QToolButton):
     """
     A category selector button carrying its category's first tile icon.
@@ -254,6 +273,7 @@ class MeasurementsWidget(QWidget):
     default_meta_changed = Signal(object)  # MeasurementMeta, applied to newly placed measurements
     export_measurements_requested = Signal()
     import_measurements_requested = Signal()
+    delete_all_requested = Signal()  # user confirmed clearing every placed measurement
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -358,6 +378,21 @@ class MeasurementsWidget(QWidget):
         content_layout = QVBoxLayout(self._content_box)
         content_layout.setContentsMargins(4, 12, 4, 4)
         content_layout.setSpacing(0)
+        # A right-aligned Delete All (black X) above the tiles clears every
+        # placed measurement after a confirmation — see _on_delete_all.
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.addStretch(1)
+        self._delete_all_button = QToolButton()
+        self._delete_all_button.setIcon(_delete_all_icon())
+        self._delete_all_button.setIconSize(QSize(14, 14))
+        self._delete_all_button.setAutoRaise(True)
+        self._delete_all_button.setToolTip("Delete All")
+        self._delete_all_button.setText("Delete All")
+        self._delete_all_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._delete_all_button.clicked.connect(self._on_delete_all)
+        header_row.addWidget(self._delete_all_button)
+        content_layout.addLayout(header_row)
         content_layout.addWidget(self._content_stack)
         layout.addWidget(self._content_box)
 
@@ -366,6 +401,16 @@ class MeasurementsWidget(QWidget):
         if first_chip is not None:
             first_chip.setChecked(True)
         return group
+
+    def _on_delete_all(self) -> None:
+        confirm = QMessageBox.question(
+            self, "Delete all measurements",
+            "Delete all current measurements?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.delete_all_requested.emit()
 
     def _on_category_selected(self, index: int) -> None:
         self._content_stack.setCurrentIndex(index)
@@ -429,6 +474,9 @@ class MeasurementsWidget(QWidget):
         default_unit_row.addWidget(self._default_decimals_spin)
         layout.addLayout(default_unit_row)
 
+        # Font and size share one row the same way Unit and Decimals do
+        # above, so the size field lines up with the rest rather than
+        # sitting alone as a full-width box.
         font_row = QHBoxLayout()
         font_row.addWidget(_field_label("Font"))
         self._default_font_combo = QFontComboBox()
@@ -436,20 +484,18 @@ class MeasurementsWidget(QWidget):
         # warning to the console whenever they're scrolled past on Windows —
         # excluding them from the list avoids hitting one at all.
         self._default_font_combo.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
+        self._default_font_combo.setEditable(False)
         block_wheel(self._default_font_combo)
         self._default_font_combo.currentFontChanged.connect(self._on_default_meta_edited)
         font_row.addWidget(self._default_font_combo, 1)
-        layout.addLayout(font_row)
-
-        size_row = QHBoxLayout()
-        size_row.addWidget(_field_label("Font Size"))
+        font_row.addWidget(_field_label("Size"))
         self._default_font_size_spin = QSpinBox()
         self._default_font_size_spin.setRange(6, 96)
         self._default_font_size_spin.setValue(13)
         block_wheel(self._default_font_size_spin)
         self._default_font_size_spin.valueChanged.connect(self._on_default_meta_edited)
-        size_row.addWidget(self._default_font_size_spin, 1)
-        layout.addLayout(size_row)
+        font_row.addWidget(self._default_font_size_spin)
+        layout.addLayout(font_row)
 
         layout.addWidget(_field_label("Tag Width (0 = auto)"))
         self._default_tag_width_control = _ThicknessControl(0.0, 400.0)

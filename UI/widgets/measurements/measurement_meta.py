@@ -112,6 +112,13 @@ class MeasurementMeta(NamedTuple):
     scalebar_anchor_preview: bool = True
     scalebar_position: str = "lower_left"
     scalebar_show_bg: bool = True
+    # Padding inside the scale bar's background panel (between the bar/label
+    # and the panel edge), separate from text_margin, which is the panel's
+    # inset from its anchoring corner.
+    scalebar_padding: float = 4.0
+    # "text" annotation: draw the text bold. (Its content — meta.title — may
+    # contain newlines for a multi-line annotation.)
+    font_bold: bool = False
 
 
 DEFAULT_META = MeasurementMeta()

@@ -1261,11 +1261,15 @@ class MeasurementOverlay(Overlay):
         self, painter: QPainter, rect: QRect, full_dims: tuple[int, int] | None, scale_x: float, scale_y: float
     ) -> None:
         """
-        Scale bars — drawn in device (screen) space so they can be pinned
-        to the preview regardless of pan/zoom, or to the image (which
-        moves with it). Their on-screen length still tracks the current
-        zoom, since a fixed real length spans more screen pixels zoomed in.
-        Recorded into _label_boxes so a click opens the customize menu.
+        Scale bars — drawn in device (screen) space. The bar's on-screen
+        length is measured by mapping a fixed image-pixel span through the
+        current pan/zoom transform, so it always reflects the real zoom
+        (a fixed real length spans more screen pixels zoomed in). "Preview"
+        anchoring pins the bar to the visible image's own corner (clamped
+        into the viewport, i.e. where a "Take Photo" of the current view
+        would place it); "Image" anchoring pins it to the true image
+        corner, which can scroll off-screen. Recorded into _label_boxes so
+        a click opens the customize menu.
         """
         if full_dims is None or full_dims[0] <= 0:
             return
@@ -1289,15 +1293,16 @@ class MeasurementOverlay(Overlay):
                 continue
             if length_px_image <= 0:
                 continue
-            # length_px_image is in full-image pixels; rect spans the full
-            # image at base (fit-to-window) zoom, so frac_len * rect.width()
-            # is the bar's unzoomed on-screen length. A preview-anchored bar
-            # is part of the image, so it scales with the current zoom; an
-            # image-anchored one is a fixed screen overlay that doesn't.
-            base_len = (length_px_image / full_w) * rect.width()
-            bar_len = base_len * scale_x if meta.scalebar_anchor_preview else base_len
+            # Measure the bar's device length by mapping a horizontal span
+            # of length_px_image image-pixels through the live transform —
+            # this is exactly the current zoom's screen scale, so the bar
+            # grows and shrinks with the zoom in every anchoring mode.
+            frac_len = length_px_image / full_w
+            span_a = saved.map(self._to_point(rect, (0.0, 0.0)))
+            span_b = saved.map(self._to_point(rect, (frac_len, 0.0)))
+            bar_len = math.hypot(span_b.x() - span_a.x(), span_b.y() - span_a.y())
             thickness = max(1.0, meta.scalebar_thickness)
-            margin = max(0.0, meta.text_margin)
+            pad = max(0.0, meta.scalebar_padding)
             base_size = meta.font_size if meta.font_size > 0 else OVERLAY_LABEL_FONT_SIZE
             font = QFont(painter.font())
             if meta.font_family:
@@ -1309,8 +1314,8 @@ class MeasurementOverlay(Overlay):
             text_h = metrics.height()
             gap = 3.0
             content_w = max(bar_len, text_w)
-            panel_w = content_w + margin * 2
-            panel_h = thickness + gap + text_h + margin * 2
+            panel_w = content_w + pad * 2
+            panel_h = thickness + gap + text_h + pad * 2
 
             painter.setTransform(QTransform())
             corner = self._scalebar_corner(measurement, rect, saved, viewport, panel_w, panel_h)
@@ -1322,14 +1327,14 @@ class MeasurementOverlay(Overlay):
                 painter.setBrush(QBrush(bg))
                 painter.drawRect(panel)
             bar_x = panel.left() + (panel_w - bar_len) / 2
-            bar_y = panel.top() + margin
+            bar_y = panel.top() + pad
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(bar_color))
             painter.drawRect(QRectF(bar_x, bar_y, bar_len, thickness))
             painter.setFont(font)
             painter.setPen(QPen(bar_color))
             painter.drawText(
-                QRectF(panel.left() + margin, bar_y + thickness + gap, content_w, text_h),
+                QRectF(panel.left() + pad, bar_y + thickness + gap, content_w, text_h),
                 Qt.AlignmentFlag.AlignHCenter, label,
             )
             if ok:
@@ -1353,15 +1358,22 @@ class MeasurementOverlay(Overlay):
             )
             p = saved.map(self._to_point(rect, anchor))
             return QPointF(p.x() - panel_w / 2, p.y() - panel_h / 2)
-        # Preview-anchored bars sit against the image's own corners (so they
-        # track the image and show where they'll render); image-anchored
-        # bars sit against the fixed on-screen viewport corners.
+        tl = saved.map(self._to_point(rect, (0.0, 0.0)))
+        br = saved.map(self._to_point(rect, (1.0, 1.0)))
         if meta.scalebar_anchor_preview:
-            tl = saved.map(self._to_point(rect, (0.0, 0.0)))
-            br = saved.map(self._to_point(rect, (1.0, 1.0)))
-            left, top, right, bottom = tl.x(), tl.y(), br.x(), br.y()
+            # "Preview": the visible image's own corner — the image bounds
+            # clamped into the viewport. When the image is smaller than the
+            # viewport the bar rides the image edge; once zoomed in enough
+            # that the image fills the viewport, it rides the viewport edge —
+            # exactly where a "Take Photo" of the current view would put it.
+            left = max(tl.x(), float(viewport.left()))
+            top = max(tl.y(), float(viewport.top()))
+            right = min(br.x(), float(viewport.right()))
+            bottom = min(br.y(), float(viewport.bottom()))
         else:
-            left, top, right, bottom = viewport.left(), viewport.top(), viewport.right(), viewport.bottom()
+            # "Image": the true image corner, which scrolls off-screen with
+            # the image under pan/zoom.
+            left, top, right, bottom = tl.x(), tl.y(), br.x(), br.y()
         x = left + inset if pos in ("lower_left", "upper_left") else right - inset - panel_w
         y = top + inset if pos in ("upper_left", "upper_right") else bottom - inset - panel_h
         return QPointF(x, y)
@@ -2194,22 +2206,29 @@ class MeasurementOverlay(Overlay):
         if meta.font_family:
             font.setFamily(meta.font_family)
         font.setPixelSize(max(1, round(base_size)))
+        font.setBold(meta.font_bold)
         metrics = QFontMetricsF(font)
         margin = max(0.0, meta.text_margin)
-        box_w = metrics.horizontalAdvance(content) + margin * 2
-        box_h = metrics.height() + margin * 2
+        # Content may span multiple lines; size the box to the widest line
+        # and the total wrapped height so a multi-line annotation isn't
+        # clipped.
+        lines = content.split("\n")
+        text_w = max((metrics.horizontalAdvance(line) for line in lines), default=0.0)
+        text_h = metrics.height() * len(lines)
+        box_w = text_w + margin * 2
+        box_h = text_h + margin * 2
         local_box = QRectF(-box_w / 2, -box_h / 2, box_w, box_h)
 
         painter.save()
         painter.translate(point)
         if scale_x > 0 and scale_y > 0:
             painter.scale(1.0 / scale_x, 1.0 / scale_y)
-        # Opacity fades the whole annotation — box and text together —
-        # invisible at 0, fully shown at 1.
-        painter.setOpacity(max(0.0, min(1.0, meta.opacity)))
         painter.setFont(font)
+        # Opacity fades only the background panel; the text itself always
+        # stays fully opaque.
         if not meta.tag_background_transparent:
             bg = QColor(self._resolve_color(meta.tag_background_color, OVERLAY_OUTLINE_COLOR))
+            bg.setAlphaF(max(0.0, min(1.0, meta.opacity)))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(bg))
             painter.drawRect(local_box)
@@ -3339,6 +3358,11 @@ class MeasurementOverlayController:
 
     def clear_calibration_line(self) -> None:
         self._overlay.clear_calibration_line()
+        self._repaint()
+
+    def clear_measurements(self) -> None:
+        """Remove every placed measurement for the currently active source (see MeasurementOverlay.clear)."""
+        self._overlay.clear()
         self._repaint()
 
     @property

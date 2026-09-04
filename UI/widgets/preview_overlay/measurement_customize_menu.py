@@ -75,11 +75,16 @@ def _dash_style_icon(dash_style: str) -> QIcon:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     pen = QPen(QColor("#333333"))
     pen.setWidth(2)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pattern = MEASUREMENT_DASH_PATTERNS.get(dash_style)
     if pattern:
+        # Round dash caps read as the intended dots/rounded dashes.
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setStyle(Qt.PenStyle.CustomDashLine)
         pen.setDashPattern(pattern)
+    else:
+        # A solid line shows squared-off ends rather than the rounded
+        # ones a round cap would add.
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
     painter.setPen(pen)
     y = _ICON_SIZE.height() / 2
     painter.drawLine(QPointF(4, y), QPointF(_ICON_SIZE.width() - 4, y))
@@ -435,6 +440,9 @@ class MeasurementCustomizeMenu(QFrame):
         # Suppresses live preview_changed emissions while open_for is
         # populating the fields.
         self._loading: bool = False
+        # Whether the measurement currently open is a text annotation, whose
+        # content comes from the multi-line editor rather than the title.
+        self._is_text: bool = False
         # Once the user drags the panel out of the way (feature 2), it
         # stops auto-following its tag until reopened.
         self._manually_moved: bool = False
@@ -461,6 +469,19 @@ class MeasurementCustomizeMenu(QFrame):
         self._title_edit.setPlaceholderText("Label this measurement...")
         self._title_edit.textChanged.connect(self._on_live_field_changed)
         layout.addWidget(self._title_edit)
+
+        # A text annotation's content is multi-line and can be bold — shown
+        # in place of the single-line title/description for the text kind.
+        self._text_contents_edit = _ResizableDescriptionEdit()
+        self._text_contents_edit.setObjectName("MeasurementCustomizeDescription")
+        self._text_contents_edit.setFixedHeight(60)
+        self._text_contents_edit.setPlaceholderText("Text")
+        self._text_contents_edit.textChanged.connect(self._on_live_field_changed)
+        self._text_contents_edit.resized.connect(self.adjustSize)
+        layout.addWidget(self._text_contents_edit)
+        self._text_bold_check = QCheckBox("Bold")
+        self._text_bold_check.toggled.connect(self._on_live_field_changed)
+        layout.addWidget(self._text_bold_check)
 
         self._description_label = _field_label("Description")
         layout.addWidget(self._description_label)
@@ -590,10 +611,6 @@ class MeasurementCustomizeMenu(QFrame):
         outer_layout.addLayout(footer)
 
         self.setMaximumHeight(560)
-        # Baseline width the panel is built for — grown (never shrunk) when
-        # Tag Width exceeds it, so the description box and the rest of the
-        # panel widen to fill the extra space (feature 7).
-        self._base_width = self.sizeHint().width()
         self.hide()
 
     def _build_font_width_controls(self, layout: QVBoxLayout) -> None:
@@ -604,6 +621,9 @@ class MeasurementCustomizeMenu(QFrame):
         # warning to the console whenever they're scrolled past on Windows —
         # excluding them from the list avoids hitting one at all.
         self._font_combo.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
+        # Pick-only: a QFontComboBox is editable by default, which invites
+        # typing a family name into it; the list is the whole interface.
+        self._font_combo.setEditable(False)
         block_wheel(self._font_combo)
         self._font_combo.currentFontChanged.connect(self._on_live_field_changed)
         font_row.addWidget(self._font_combo, 1)
@@ -621,7 +641,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_width_label = _field_label("Tag Width (0 = auto)")
         layout.addWidget(self._tag_width_label)
         self._tag_width_control = _ThicknessControl(0.0, 400.0)
-        self._tag_width_control.value_changed.connect(self._on_tag_width_changed)
+        self._tag_width_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._tag_width_control)
 
     def _build_tag_style_controls(self, layout: QVBoxLayout) -> None:
@@ -685,6 +705,16 @@ class MeasurementCustomizeMenu(QFrame):
         self._scalebar_thickness_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._scalebar_thickness_control)
         self._scalebar_widgets += [self._scalebar_thickness_label, self._scalebar_thickness_control]
+
+        # Padding is the gap between the bar/label and the background
+        # panel's edge, separate from the corner margin (Bar Margin, shared
+        # with text via _text_margin_control).
+        self._scalebar_padding_label = _field_label("Bar Padding")
+        layout.addWidget(self._scalebar_padding_label)
+        self._scalebar_padding_control = _ThicknessControl(0.0, 40.0)
+        self._scalebar_padding_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._scalebar_padding_control)
+        self._scalebar_widgets += [self._scalebar_padding_label, self._scalebar_padding_control]
 
         anchor_row = QHBoxLayout()
         anchor_row.addWidget(_field_label("Anchor"))
@@ -820,7 +850,10 @@ class MeasurementCustomizeMenu(QFrame):
         show_center = (entry is not None and entry.category in ("circle", "ellipse")) or kind == "Radius Arc"
         show_angle_extras = entry is not None and entry.category == "angle"
         show_fill = entry is not None and entry.category in ("circle", "ellipse", "polygon", "annulus")
+        self._is_text = entry is not None and entry.category == "text"
         self._title_edit.setText(meta.title)
+        self._text_contents_edit.setPlainText(meta.title)
+        self._text_bold_check.setChecked(meta.font_bold)
         self._description_edit.setPlainText(meta.description)
         unit = meta.unit if meta.unit is not None else MeasurementUnit.MM
         self._unit_combo.setCurrentIndex(self._unit_combo.findData(unit))
@@ -858,7 +891,6 @@ class MeasurementCustomizeMenu(QFrame):
             self._font_combo.setCurrentFont(QFont(meta.font_family))
         self._font_size_spin.setValue(round(meta.font_size) if meta.font_size > 0 else round(OVERLAY_LABEL_FONT_SIZE))
         self._tag_width_control.set_value(meta.tag_width)
-        self._sync_width_to_tag_width(meta.tag_width)
         show_scalebar = entry is not None and entry.category == "scalebar"
         self._scalebar_length_spin.setValue(meta.scalebar_length if meta.scalebar_length > 0 else 1.0)
         self._scalebar_thickness_control.set_value(meta.scalebar_thickness)
@@ -867,16 +899,20 @@ class MeasurementCustomizeMenu(QFrame):
         if position_index >= 0:
             self._scalebar_position_combo.setCurrentIndex(position_index)
         self._scalebar_bg_check.setChecked(meta.scalebar_show_bg)
+        self._scalebar_padding_control.set_value(meta.scalebar_padding)
         for widget in self._scalebar_widgets:
             widget.setVisible(show_scalebar)
 
         show_text = entry is not None and entry.category == "text"
         is_annotation = show_text or show_scalebar
-        # A text annotation's title IS its drawn content; a scale bar has
-        # neither a title nor a free-form description tag.
+        # A text annotation's title IS its drawn content — a multi-line,
+        # optionally-bold editor replaces the single-line title/description;
+        # a scale bar has neither a title nor a free-form description tag.
         self._title_label.setText("Text Contents" if show_text else "Title")
         self._title_label.setVisible(not show_scalebar)
-        self._title_edit.setVisible(not show_scalebar)
+        self._title_edit.setVisible(not is_annotation)
+        self._text_contents_edit.setVisible(show_text)
+        self._text_bold_check.setVisible(show_text)
         self._description_label.setVisible(not is_annotation)
         self._description_edit.setVisible(not is_annotation)
         # Neither annotation carries a length tag, so its show/hide-tag and
@@ -1039,9 +1075,13 @@ class MeasurementCustomizeMenu(QFrame):
         # doesn't edit — style_id and the tag's dragged offset — carries
         # through an edit rather than resetting to the default.
         base = self._original_meta if self._original_meta is not None else DEFAULT_META
+        # A text annotation's content comes from its own multi-line editor
+        # (newlines preserved); every other kind uses the single-line title.
+        title = self._text_contents_edit.toPlainText() if self._is_text else self._title_edit.text().strip()
         return base._replace(
-            title=self._title_edit.text().strip(),
+            title=title,
             description=self._description_edit.toPlainText().strip(),
+            font_bold=self._text_bold_check.isChecked(),
             unit=self._unit_combo.currentData(),
             tag_background_color=self._tag_bg_picker.color(),
             tag_text_color=self._tag_text_picker.color(),
@@ -1079,17 +1119,8 @@ class MeasurementCustomizeMenu(QFrame):
             scalebar_anchor_preview=bool(self._scalebar_anchor_combo.currentData()),
             scalebar_position=self._scalebar_position_combo.currentData(),
             scalebar_show_bg=self._scalebar_bg_check.isChecked(),
+            scalebar_padding=self._scalebar_padding_control.value(),
         )
-
-    def _on_tag_width_changed(self, value: float) -> None:
-        self._sync_width_to_tag_width(value)
-        self._on_live_field_changed()
-
-    def _sync_width_to_tag_width(self, value: float) -> None:
-        """Widen the panel (never narrow it) so it's always at least as wide as the tag it's sizing — the description box, spanning the full content width, grows along with it (feature 7)."""
-        margin = 40  # scroll content's own left+right margins plus breathing room
-        self.setMinimumWidth(max(self._base_width, int(value) + margin))
-        self.adjustSize()
 
     def _on_live_field_changed(self, *_args: object) -> None:
         if self._index is not None and not self._loading:
@@ -1123,13 +1154,16 @@ class MeasurementCustomizeMenu(QFrame):
     def _on_delete_clicked(self) -> None:
         if self._index is None:
             return
-        confirm = QMessageBox.question(
-            self, "Delete measurement", "Delete this measurement?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
+        # Holding Shift while clicking skips the confirmation entirely.
+        skip_confirm = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if not skip_confirm:
+            confirm = QMessageBox.question(
+                self, "Delete measurement", "Delete this measurement?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
         index = self._index
         self._index = None
         self._original_meta = None
