@@ -1054,8 +1054,12 @@ class MeasurementOverlay(Overlay):
                 center = self._measurement_center(measurement.kind, measurement.points, full_dims)
                 if center is not None:
                     self._draw_endpoint(painter, self._to_point(rect, center), scale_x, scale_y)
-            # meta.hidden hides only the tag (feature 11 clarified), not
-            # the measurement's geometry drawn just above.
+
+        # Tags are drawn in a second pass, after every measurement's
+        # geometry — otherwise a later measurement's interior fill (or any
+        # opaque geometry) would paint over an earlier one's tag. meta.hidden
+        # hides only the tag, not the geometry drawn above.
+        for index, measurement in enumerate(self.measurements):
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
 
     def _measurement_center(
@@ -2422,9 +2426,9 @@ class MeasurementOverlay(Overlay):
                 dashed=dashed, line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width, dash_style=dash_style, fill_color=fill_color,
             )
-        # A dashed guide between the two centers — the distance the tag reports.
+        # A solid line between the two centers — the distance the tag reports.
         self._draw_polyline(
-            painter, rect, (c1, c2), stroke_scale, dashed=True,
+            painter, rect, (c1, c2), stroke_scale, dashed=dashed,
             line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
         )
 

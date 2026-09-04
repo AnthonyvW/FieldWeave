@@ -57,19 +57,3 @@ class TwoPointSquareMeasurement(MeasurementButton):
         self._draw_point(painter, br, ENDPOINT_RADIUS, active)
 
 
-class ThreePointSquareMeasurement(MeasurementButton):
-    name = "3pt Square"
-    display_name = "3pt Square"
-
-    def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
-        side = min(rect.width(), rect.height()) - 2 * (CIRCLE_MARGIN + 2)
-        left = rect.center().x() - side // 2
-        top = rect.center().y() - side // 2
-        tl = QPoint(left, top)
-        tr = QPoint(left + side, top)
-        br = QPoint(left + side, top + side)
-        bl = QPoint(left, top + side)
-        self._set_pen(painter, LINE_COLOR)
-        painter.drawPolyline([tl, tr, br, bl, tl])
-        for point in (bl, br, tr):
-            self._draw_point(painter, point, ENDPOINT_RADIUS, active)

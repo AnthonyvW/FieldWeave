@@ -68,7 +68,6 @@ from UI.widgets.measurements.lines import (
 from UI.widgets.measurements.polygons import PolygonMeasurement
 from UI.widgets.measurements.rectangles import (
     ThreePointRectangleMeasurement,
-    ThreePointSquareMeasurement,
     TwoPointRectangleMeasurement,
     TwoPointSquareMeasurement,
 )
@@ -118,8 +117,7 @@ _CATEGORY_GROUPS = (
         ThreePointPerpMeasurement, FourPointPerpMeasurement, ArbitraryPerpMeasurement,
     )),
     ("Rectangle", "Rectangle Measurements", (
-        TwoPointRectangleMeasurement, ThreePointRectangleMeasurement,
-        TwoPointSquareMeasurement, ThreePointSquareMeasurement,
+        TwoPointRectangleMeasurement, ThreePointRectangleMeasurement, TwoPointSquareMeasurement,
     )),
     ("Annulus", "Annulus Measurements", (
         RadiusAnnulusMeasurement, ThreePointAnnulusMeasurement, DiameterAnnulusMeasurement,
@@ -257,6 +255,12 @@ class MeasurementsWidget(QWidget):
         chip_grid = QGridLayout()
         chip_grid.setSpacing(0)
         self._content_stack = QStackedWidget()
+        # Per-category tile buttons and the last tile selected within each,
+        # so switching to a category re-selects where the user left off
+        # (or its first tile) — see _on_category_selected.
+        self._category_tiles: list[list[QAbstractButton]] = []
+        self._category_last: dict[int, QAbstractButton] = {}
+        self._button_category: dict[QAbstractButton, int] = {}
 
         for index, (chip_label, _title, tile_classes) in enumerate(_CATEGORY_GROUPS):
             sample = tile_classes[0]()
@@ -276,12 +280,20 @@ class MeasurementsWidget(QWidget):
             page_grid = QGridLayout(page)
             page_grid.setContentsMargins(0, 0, 0, 0)
             page_grid.setSpacing(0)
+            tiles: list[QAbstractButton] = []
             for tile_index, tile_cls in enumerate(tile_classes):
                 button = tile_cls(page)
                 self._button_group.addButton(button)
+                self._button_category[button] = index
+                tiles.append(button)
                 tile_row, tile_col = divmod(tile_index, GRID_COLUMNS)
-                page_grid.addWidget(button, tile_row, tile_col)
+                page_grid.addWidget(button, tile_row, tile_col, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            # A trailing stretchy row/column packs the tiles to the top-left
+            # rather than spreading them across the page.
+            page_grid.setColumnStretch(GRID_COLUMNS, 1)
+            page_grid.setRowStretch(page_grid.rowCount(), 1)
             self._content_stack.addWidget(page)
+            self._category_tiles.append(tiles)
 
         layout.addLayout(chip_grid)
 
@@ -301,6 +313,16 @@ class MeasurementsWidget(QWidget):
     def _on_category_selected(self, index: int) -> None:
         self._content_stack.setCurrentIndex(index)
         self._content_box.setTitle(_CATEGORY_GROUPS[index][1])
+        # Selecting a category activates that category's first tile, or
+        # whichever tile in it the user last had selected.
+        tiles = self._category_tiles[index] if index < len(self._category_tiles) else []
+        if not tiles:
+            return
+        target = self._category_last.get(index, tiles[0])
+        if target is not self._selected_button:
+            target.setChecked(True)
+            self._selected_button = target
+            self.selection_changed.emit(target.name)
 
     def _build_customize_panel(self) -> QGroupBox:
         """
@@ -622,4 +644,7 @@ class MeasurementsWidget(QWidget):
             return
 
         self._selected_button = button
+        category = self._button_category.get(button)
+        if category is not None:
+            self._category_last[category] = button
         self.selection_changed.emit(button.name)

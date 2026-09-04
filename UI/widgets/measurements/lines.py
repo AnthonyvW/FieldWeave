@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QBrush, QPainter, QPainterPath, QPolygonF
+from PySide6.QtGui import QPainter, QPainterPath, QPolygonF
 
 from UI.widgets.measurements.base_measurement import MeasurementButton
-from UI.widgets.measurements.measurement_style import (
-    ENDPOINT_RADIUS, LINE_COLOR, LINE_MARGIN, POINT_ACTIVE_COLOR, POINT_RADIUS,
-)
+from UI.widgets.measurements.measurement_style import ENDPOINT_RADIUS, LINE_COLOR, LINE_MARGIN
 
 # A calibration line is placed the same way as a 2-point line but has no
 # tile of its own (see MeasurementOverlay.start_calibration_placement)
@@ -96,17 +94,20 @@ def bracket_path(line_width: float, stroke_scale: float = 1.0, size_scale: float
 
 
 class ArbitraryLineMeasurement(MeasurementButton):
+    # An unbounded polyline — the icon shows a couple of joined segments
+    # with the points that place them, rather than a single straight line.
     name = "Arbitrary Line"
     display_name = "Arb. Line"
 
     def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
-        start = QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN)
-        end = QPoint(rect.right() - LINE_MARGIN, rect.top() + LINE_MARGIN)
+        p0 = QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN)
+        p1 = QPoint(rect.center().x(), rect.top() + LINE_MARGIN)
+        p2 = QPoint(rect.right() - LINE_MARGIN, rect.center().y())
 
         self._set_pen(painter, LINE_COLOR)
-        painter.drawLine(start, end)
-        self._draw_point(painter, start, ENDPOINT_RADIUS, active)
-        self._draw_point(painter, end, ENDPOINT_RADIUS, active)
+        painter.drawPolyline([p0, p1, p2])
+        for point in (p0, p1, p2):
+            self._draw_point(painter, point, ENDPOINT_RADIUS, active)
 
 
 class MultipointLineMeasurement(MeasurementButton):
@@ -158,12 +159,9 @@ class ArrowMeasurement(MeasurementButton):
                 QPointF(base_x - px * head_half, base_y - py * head_half),
             ]))
 
-        # The directional (2nd) point sits at the tip as a fixed blue
-        # marker regardless of hover/checked state, so the arrow always
-        # reads which end it points to.
-        self._set_pen(painter, POINT_ACTIVE_COLOR)
-        painter.setBrush(QBrush(POINT_ACTIVE_COLOR))
-        painter.drawEllipse(end, POINT_RADIUS // 2, POINT_RADIUS // 2)
+        # The tip point sits over the arrowhead, using the same
+        # orange/blue idle/selected treatment as every other anchor.
+        self._draw_point(painter, end, ENDPOINT_RADIUS, active)
 
 
 class DoubleArrowMeasurement(MeasurementButton):
@@ -194,6 +192,9 @@ class DoubleArrowMeasurement(MeasurementButton):
                     QPointF(base_x + px * head_half, base_y + py * head_half),
                     QPointF(base_x - px * head_half, base_y - py * head_half),
                 ]))
+
+        self._draw_point(painter, start, ENDPOINT_RADIUS, active)
+        self._draw_point(painter, end, ENDPOINT_RADIUS, active)
 
 
 class BracketMeasurement(MeasurementButton):

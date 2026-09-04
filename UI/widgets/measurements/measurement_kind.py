@@ -1146,20 +1146,6 @@ def _square_2pt_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] |
     return _square_from_edge(points, full_dims, 1.0)
 
 
-def _square_3pt_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None) -> list[Point2D] | None:
-    if len(points) < 3 or full_dims is None:
-        return None
-    basis = _perp_unit_px(points[0], points[1], full_dims)
-    if basis is None:
-        return None
-    full_w, full_h = full_dims
-    _ax, _ay, nx, ny, _length = basis
-    bx, by = points[1][0] * full_w, points[1][1] * full_h
-    cx, cy = points[2][0] * full_w, points[2][1] * full_h
-    sign = 1.0 if (cx - bx) * nx + (cy - by) * ny >= 0 else -1.0
-    return _square_from_edge(points, full_dims, sign)
-
-
 def _polygon_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None) -> list[Point2D] | None:
     return list(points) if len(points) >= 2 else None
 
@@ -1456,10 +1442,6 @@ DEFAULT_REGISTRY.register(MeasurementKind(
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="2pt Square", required_points=2, category="polygon",
     resolve=_rectangle_2pt_resolve, polygon_points=_square_2pt_points,
-))
-DEFAULT_REGISTRY.register(MeasurementKind(
-    name="3pt Square", required_points=3, category="polygon",
-    resolve=_three_point_angle_resolve, polygon_points=_square_3pt_points,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Unbounded closed polygon — right-click to finish.

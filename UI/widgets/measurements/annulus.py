@@ -60,7 +60,12 @@ class DiameterAnnulusMeasurement(MeasurementButton):
     def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
         center, outer_r, inner_r = _rings(rect)
         _draw_rings(painter, self, center, outer_r, inner_r)
-        painter.drawLine(QPointF(center.x() - outer_r, center.y()), QPointF(center.x() + outer_r, center.y()))
-        self._draw_point(painter, QPointF(center.x() - outer_r, center.y()), ENDPOINT_RADIUS, active)
+        # Diagonal diameter across the inner circle only, its two ends the
+        # points that place it; the outer ring gets a single point.
+        diag = inner_r / math.sqrt(2)
+        inner_a = QPointF(center.x() - diag, center.y() + diag)
+        inner_b = QPointF(center.x() + diag, center.y() - diag)
+        painter.drawLine(inner_a, inner_b)
+        self._draw_point(painter, inner_a, ENDPOINT_RADIUS, active)
+        self._draw_point(painter, inner_b, ENDPOINT_RADIUS, active)
         self._draw_point(painter, QPointF(center.x() + outer_r, center.y()), ENDPOINT_RADIUS, active)
-        self._draw_point(painter, QPointF(center.x() + inner_r, center.y()), ENDPOINT_RADIUS, active)
