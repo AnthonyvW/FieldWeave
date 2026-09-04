@@ -279,6 +279,10 @@ class MeasurementsWidget(QWidget):
         super().__init__(parent)
 
         self._selected_button: QAbstractButton | None = None
+        # Whichever tile was selected right before manual calibration took
+        # over placement, so finishing/cancelling it can resume that tile
+        # instead of leaving placement disarmed — see _start_manual_calibration.
+        self._pre_calibration_button: QAbstractButton | None = None
         self._current_dpi: float | None = None
         self._is_live = True
 
@@ -735,8 +739,7 @@ class MeasurementsWidget(QWidget):
 
     def _on_calibrate_dpi_clicked(self) -> None:
         if self._calibration_panel.isVisible():
-            self._show_calibration_panel(False)
-            self.calibration_cancelled.emit()
+            self._end_calibration()
             return
         if self._current_dpi and self._current_dpi > 0:
             self._dpi_entry_spin.setValue(self._current_dpi)
@@ -753,8 +756,19 @@ class MeasurementsWidget(QWidget):
         the tile checked (orange) regardless of its native toggle state —
         every click here means "I want to be placing a line right now",
         never "turn calibration mode off" (Cancel/Finish handle that).
+
+        Remembers whichever measurement tile was selected beforehand (if
+        any) so finishing or cancelling calibration can resume it — see
+        _end_calibration — rather than leaving placement disarmed until
+        the user picks a tool again.
         """
+        # A re-click while already placing (restarting the line) shouldn't
+        # overwrite the tile remembered from before calibration first
+        # started with None (clear_selection already dropped it by then).
+        already_active = self._calibration_button.isChecked()
         self._calibration_button.setChecked(True)
+        if not already_active:
+            self._pre_calibration_button = self._selected_button
         self.clear_selection()
         self.manual_calibration_started.emit()
 
@@ -763,18 +777,27 @@ class MeasurementsWidget(QWidget):
 
     def _on_dpi_entry_set_clicked(self) -> None:
         self.dpi_value_submitted.emit(self._dpi_entry_spin.value())
-        self._show_calibration_panel(False)
-        self.calibration_cancelled.emit()
+        self._end_calibration()
 
     def _on_calibration_set_clicked(self) -> None:
         unit = self._calibration_unit_combo.currentData()
         self.calibration_dpi_submitted.emit(self._calibration_value_spin.value(), unit)
-        self._show_calibration_panel(False)
-        self.calibration_cancelled.emit()
+        self._end_calibration()
 
     def _on_calibration_cancel_clicked(self) -> None:
+        self._end_calibration()
+
+    def _end_calibration(self) -> None:
+        """Common tail for every way calibration mode closes (Finish, Cancel, the DPI entry Set button, or toggling the panel shut) — hides the panel, tells CaptureControlWidget to drop calibration placement, then re-selects whichever measurement tile was active before manual calibration started, if any."""
         self._show_calibration_panel(False)
         self.calibration_cancelled.emit()
+        button = self._pre_calibration_button
+        self._pre_calibration_button = None
+        if button is None:
+            return
+        self._selected_button = button
+        button.setChecked(True)
+        self.selection_changed.emit(button.name)
 
     def _on_button_clicked(self, button: QAbstractButton) -> None:
         if button is self._selected_button:

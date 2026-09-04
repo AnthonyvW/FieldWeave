@@ -1704,7 +1704,10 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     # A single-point text annotation — the "title" holds its text; drawn
     # directly on the image (no length tag). Preset to white-on-black.
     name="Text", required_points=1, category="text", resolve=_point_resolve,
-    meta_preset={"tag_text_color": "#ffffff", "tag_background_color": "#000000"},
+    # Opacity fades only the background panel (see
+    # MeasurementOverlay._draw_text_annotation) — half by default so text
+    # placed over live content reads over it without fully blocking it.
+    meta_preset={"tag_text_color": "#ffffff", "tag_background_color": "#000000", "opacity": 0.5},
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # A 2-point arrow annotation whose length tag is hidden by default.

@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QMouseEvent, QPainter, QPen, QPi
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFontComboBox, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox,
-    QVBoxLayout, QWidget,
+    QStyle, QVBoxLayout, QWidget,
 )
 
 from UI.widgets.measurements.measurement_style import OVERLAY_LABEL_FONT_SIZE
@@ -443,6 +443,9 @@ class MeasurementCustomizeMenu(QFrame):
         # Whether the measurement currently open is a text annotation, whose
         # content comes from the multi-line editor rather than the title.
         self._is_text: bool = False
+        # Whether the measurement currently open is a scale bar, whose Unit
+        # combo lives on its own Bar Length row rather than the generic one.
+        self._is_scalebar: bool = False
         # Once the user drags the panel out of the way (feature 2), it
         # stops auto-following its tag until reopened.
         self._manually_moved: bool = False
@@ -457,7 +460,12 @@ class MeasurementCustomizeMenu(QFrame):
         # footer built at the end of __init__.
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(14, 14, 14, 14)
+        # Extra right margin beyond the other three sides' 14px — the
+        # scroll area's vertical scrollbar (when it appears) otherwise eats
+        # directly into a plain 14px margin, leaving fields looking
+        # cramped against it rather than evenly padded.
+        scrollbar_width = QApplication.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        layout.setContentsMargins(14, 14, 14 + scrollbar_width, 14)
         layout.setSpacing(8)
         self._scroll_content = content
         self._outer_layout = outer_layout
@@ -489,6 +497,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._description_edit.setObjectName("MeasurementCustomizeDescription")
         self._description_edit.setFixedHeight(60)
         self._description_edit.resized.connect(self.adjustSize)
+        self._description_edit.textChanged.connect(self._on_live_field_changed)
         layout.addWidget(self._description_edit)
 
         unit_row = QHBoxLayout()
@@ -696,6 +705,10 @@ class MeasurementCustomizeMenu(QFrame):
         """
         self._scalebar_widgets: list[QWidget] = []
 
+        # Unit sits on the same row as Bar Length — the bar has no separate
+        # per-measurement decimal-places setting the way ordinary tags do
+        # (its label always shows the length as entered), so there's no
+        # Decimals field to pair it with.
         length_row = QHBoxLayout()
         self._scalebar_length_label = _field_label("Bar Length")
         length_row.addWidget(self._scalebar_length_label)
@@ -705,6 +718,13 @@ class MeasurementCustomizeMenu(QFrame):
         block_wheel(self._scalebar_length_spin)
         self._scalebar_length_spin.valueChanged.connect(self._on_live_field_changed)
         length_row.addWidget(self._scalebar_length_spin, 1)
+        length_row.addWidget(_field_label("Unit"))
+        self._scalebar_unit_combo = QComboBox()
+        for unit in MeasurementUnit:
+            self._scalebar_unit_combo.addItem(unit.value, unit)
+        block_wheel(self._scalebar_unit_combo)
+        self._scalebar_unit_combo.currentIndexChanged.connect(self._on_live_field_changed)
+        length_row.addWidget(self._scalebar_unit_combo)
         length_container = QWidget()
         length_container.setLayout(length_row)
         length_row.setContentsMargins(0, 0, 0, 0)
@@ -764,6 +784,14 @@ class MeasurementCustomizeMenu(QFrame):
         self._scalebar_bg_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._scalebar_bg_check)
         self._scalebar_widgets.append(self._scalebar_bg_check)
+
+        # Bar Color edits the same line_color field the generic Line Color
+        # picker does (see _current_meta) — kept last here so Font/Size,
+        # built right after this method returns, sit just below it.
+        self._scalebar_color_picker = _ColorPicker("Bar Color", OVERLAY_LINE_COLOR.name())
+        self._scalebar_color_picker.color_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._scalebar_color_picker)
+        self._scalebar_widgets.append(self._scalebar_color_picker)
 
     def _build_line_style_controls(self, layout: QVBoxLayout) -> None:
         self._build_fill_controls(layout)
@@ -905,7 +933,9 @@ class MeasurementCustomizeMenu(QFrame):
         self._font_size_spin.setValue(round(meta.font_size) if meta.font_size > 0 else round(OVERLAY_LABEL_FONT_SIZE))
         self._tag_width_control.set_value(meta.tag_width)
         show_scalebar = entry is not None and entry.category == "scalebar"
+        self._is_scalebar = show_scalebar
         self._scalebar_length_spin.setValue(meta.scalebar_length if meta.scalebar_length > 0 else 1.0)
+        self._scalebar_unit_combo.setCurrentIndex(self._scalebar_unit_combo.findData(unit))
         self._scalebar_thickness_control.set_value(meta.scalebar_thickness)
         self._scalebar_anchor_combo.setCurrentIndex(0 if meta.scalebar_anchor_preview else 1)
         position_index = self._scalebar_position_combo.findData(meta.scalebar_position)
@@ -932,9 +962,11 @@ class MeasurementCustomizeMenu(QFrame):
         # always-show-description toggles don't apply.
         self._always_show_description_check.setVisible(not is_annotation)
         self._hidden_check.setVisible(not is_annotation)
-        # A scale bar's label needs a unit; a text annotation has no
-        # measured value, so neither unit nor decimals apply to it.
-        self._unit_container.setVisible(not show_text)
+        # A text annotation has no measured value at all; a scale bar has
+        # its own Unit combo on the Bar Length row instead (and no
+        # separate decimal-places setting), so this generic Unit/Decimals
+        # row is only for ordinary measurements.
+        self._unit_container.setVisible(not is_annotation)
         # An auto-sizing tag width is meaningless for a free-drawn text box
         # or a scale bar (each sizes to its own content).
         self._tag_width_label.setVisible(not is_annotation)
@@ -952,9 +984,11 @@ class MeasurementCustomizeMenu(QFrame):
         self._line_color_picker.set_color(meta.line_color)
         self._line_thickness_control.set_value(meta.line_thickness or OVERLAY_LINE_WIDTH)
         self._line_style_picker.set_value(meta.line_dash_style)
-        # Line color doubles as the scale bar's bar color, so it stays for
-        # a scale bar; a text annotation draws no line at all.
-        self._line_color_picker.setVisible(not show_text)
+        # A scale bar edits the same line_color field through its own "Bar
+        # Color" picker up in the scale-bar section instead; neither
+        # annotation strokes an ordinary line at all.
+        self._line_color_picker.setVisible(not is_annotation)
+        self._scalebar_color_picker.set_color(meta.line_color)
         # A point has no line to dash, so its dash-style picker is hidden;
         # circles and lines both keep it. Neither annotation strokes a line
         # the ordinary way, so both hide line thickness/style too.
@@ -1098,11 +1132,11 @@ class MeasurementCustomizeMenu(QFrame):
             title=title,
             description=self._description_edit.toPlainText().strip(),
             font_bold=self._text_bold_check.isChecked(),
-            unit=self._unit_combo.currentData(),
+            unit=self._scalebar_unit_combo.currentData() if self._is_scalebar else self._unit_combo.currentData(),
             tag_background_color=self._tag_bg_picker.color(),
             tag_text_color=self._tag_text_picker.color(),
             always_show_description=self._always_show_description_check.isChecked(),
-            line_color=self._line_color_picker.color(),
+            line_color=self._scalebar_color_picker.color() if self._is_scalebar else self._line_color_picker.color(),
             line_thickness=self._line_thickness_control.value(),
             outline_enabled=self._outline_enabled_check.isChecked(),
             outline_color=self._outline_color_picker.color(),
