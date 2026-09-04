@@ -136,6 +136,17 @@ class MeasurementKind:
     curve_points: Callable[[tuple[Point2D, ...]], list[Point2D] | None] | None = None
     angle_value: Callable[[tuple[Point2D, ...], tuple[int, int]], float | None] | None = None
     angle_anchor: Callable[[tuple[Point2D, ...]], Point2D] | None = None
+    # "polygon" category (rectangles, polygons): the ordered boundary
+    # vertices (fraction space) — drawn as a closed, optionally filled
+    # outline, tagged with the enclosed area. Some forms (rotated
+    # rectangles, squares) need full_dims to keep their right angles /
+    # equal sides true under the frame's aspect ratio.
+    polygon_points: Callable[[tuple[Point2D, ...], tuple[int, int] | None], list[Point2D] | None] | None = None
+    # "annulus" category: (center_fraction, outer_radius_px, inner_radius_px).
+    annulus_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], tuple[Point2D, float, float] | None] | None = None
+    # "two_circle" category: (center1, r1_px, center2, r2_px) — two
+    # circles whose center-to-center distance is the measurement.
+    two_circle_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], tuple[Point2D, float, Point2D, float] | None] | None = None
     # True when segment_pairs' segments are actually consecutive (share
     # an endpoint, like "3 Point Angle"'s two legs at the vertex) — drawn
     # as one polyline (proper joint, matching "Arbitrary Line") instead
@@ -1067,6 +1078,221 @@ def _arbitrary_perpendicular_connectors(
     return connectors
 
 
+# ----------------------------------------------------------------------
+# Rectangles & polygons — "polygon" category. polygon_points returns the
+# ordered boundary vertices; the overlay closes and (optionally) fills
+# them. Rotated forms compute in true pixel space so their right angles
+# and equal sides survive the frame's aspect ratio.
+# ----------------------------------------------------------------------
+
+
+def _rectangle_2pt_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None) -> list[Point2D] | None:
+    if len(points) < 2 or points[0] == points[1]:
+        return None
+    (x0, y0), (x1, y1) = points[0], points[1]
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+def _perp_unit_px(p0: Point2D, p1: Point2D, full_dims: tuple[int, int]) -> tuple[float, float, float, float, float] | None:
+    """(ax_px, ay_px, unit_perp_x, unit_perp_y, edge_len_px) for the edge p0->p1, or None if degenerate. Pixel space."""
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+    ax, ay = p0[0] * full_w, p0[1] * full_h
+    bx, by = p1[0] * full_w, p1[1] * full_h
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length < _DEGENERATE_EPSILON:
+        return None
+    return ax, ay, -dy / length, dx / length, length
+
+
+def _rectangle_3pt_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None) -> list[Point2D] | None:
+    if len(points) < 3 or full_dims is None:
+        return None
+    basis = _perp_unit_px(points[0], points[1], full_dims)
+    if basis is None:
+        return None
+    full_w, full_h = full_dims
+    _ax, _ay, nx, ny, _length = basis
+    bx, by = points[1][0] * full_w, points[1][1] * full_h
+    cx, cy = points[2][0] * full_w, points[2][1] * full_h
+    depth = (cx - bx) * nx + (cy - by) * ny
+    off = (nx * depth, ny * depth)
+    corners_px = [
+        (points[0][0] * full_w, points[0][1] * full_h),
+        (bx, by),
+        (bx + off[0], by + off[1]),
+        (points[0][0] * full_w + off[0], points[0][1] * full_h + off[1]),
+    ]
+    return [(x / full_w, y / full_h) for x, y in corners_px]
+
+
+def _square_from_edge(points: tuple[Point2D, ...], full_dims: tuple[int, int], sign: float) -> list[Point2D] | None:
+    basis = _perp_unit_px(points[0], points[1], full_dims)
+    if basis is None:
+        return None
+    full_w, full_h = full_dims
+    ax, ay, nx, ny, length = basis
+    bx, by = points[1][0] * full_w, points[1][1] * full_h
+    off = (nx * length * sign, ny * length * sign)
+    corners_px = [(ax, ay), (bx, by), (bx + off[0], by + off[1]), (ax + off[0], ay + off[1])]
+    return [(x / full_w, y / full_h) for x, y in corners_px]
+
+
+def _square_2pt_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None) -> list[Point2D] | None:
+    if len(points) < 2 or full_dims is None:
+        return None
+    return _square_from_edge(points, full_dims, 1.0)
+
+
+def _square_3pt_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None) -> list[Point2D] | None:
+    if len(points) < 3 or full_dims is None:
+        return None
+    basis = _perp_unit_px(points[0], points[1], full_dims)
+    if basis is None:
+        return None
+    full_w, full_h = full_dims
+    _ax, _ay, nx, ny, _length = basis
+    bx, by = points[1][0] * full_w, points[1][1] * full_h
+    cx, cy = points[2][0] * full_w, points[2][1] * full_h
+    sign = 1.0 if (cx - bx) * nx + (cy - by) * ny >= 0 else -1.0
+    return _square_from_edge(points, full_dims, sign)
+
+
+def _polygon_points(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None) -> list[Point2D] | None:
+    return list(points) if len(points) >= 2 else None
+
+
+def _rectangle_2pt_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 2 or points[0] == points[1]:
+        return None
+    return tuple(points[:2])
+
+
+def _polygon_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    return tuple(points) if len(points) >= 3 else None
+
+
+# ----------------------------------------------------------------------
+# Annulus (ring) — "annulus" category: two concentric circles.
+# ----------------------------------------------------------------------
+
+
+def _annulus_from(center: Point2D, outer_r: float, inner_r: float) -> tuple[Point2D, float, float] | None:
+    if outer_r < _DEGENERATE_EPSILON or inner_r < _DEGENERATE_EPSILON:
+        return None
+    lo, hi = sorted((outer_r, inner_r))
+    return center, hi, lo
+
+
+def _radius_annulus_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, float] | None:
+    if len(points) < 3:
+        return None
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+    cx, cy = points[0][0] * full_w, points[0][1] * full_h
+    r1 = math.hypot(points[1][0] * full_w - cx, points[1][1] * full_h - cy)
+    r2 = math.hypot(points[2][0] * full_w - cx, points[2][1] * full_h - cy)
+    return _annulus_from(points[0], r1, r2)
+
+
+def _diameter_annulus_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, float] | None:
+    if len(points) < 3:
+        return None
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+    a = (points[0][0] * full_w, points[0][1] * full_h)
+    b = (points[1][0] * full_w, points[1][1] * full_h)
+    center_px = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    outer_r = math.hypot(b[0] - a[0], b[1] - a[1]) / 2
+    center = (center_px[0] / full_w, center_px[1] / full_h)
+    inner_r = math.hypot(points[2][0] * full_w - center_px[0], points[2][1] * full_h - center_px[1])
+    return _annulus_from(center, outer_r, inner_r)
+
+
+def _three_point_annulus_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, float] | None:
+    if len(points) < 4:
+        return None
+    outer = _circle_geometry_from_three_points(points[:3], full_dims)
+    if outer is None:
+        return None
+    center, outer_r = outer
+    full_w, full_h = full_dims
+    inner_r = math.hypot(points[3][0] * full_w - center[0] * full_w, points[3][1] * full_h - center[1] * full_h)
+    return _annulus_from(center, outer_r, inner_r)
+
+
+def _radius_annulus_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3 or points[0] == points[1]:
+        return None
+    return tuple(points[:3])
+
+
+def _diameter_annulus_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3 or points[0] == points[1]:
+        return None
+    return tuple(points[:3])
+
+
+def _three_point_annulus_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 4 or _collinear(points[0], points[1], points[2]):
+        return None
+    return tuple(points[:4])
+
+
+# ----------------------------------------------------------------------
+# Two Circle — "two_circle" category: two circles, tagged with the
+# distance between their centers.
+# ----------------------------------------------------------------------
+
+
+def _radius_two_circle_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, Point2D, float] | None:
+    if len(points) < 4:
+        return None
+    c1 = _circle_geometry_from_center_edge(points[:2], full_dims)
+    c2 = _circle_geometry_from_center_edge(points[2:4], full_dims)
+    if c1 is None or c2 is None:
+        return None
+    return c1[0], c1[1], c2[0], c2[1]
+
+
+def _diameter_two_circle_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, Point2D, float] | None:
+    if len(points) < 4:
+        return None
+    c1 = _circle_geometry_from_diameter(points[:2], full_dims)
+    c2 = _circle_geometry_from_diameter(points[2:4], full_dims)
+    if c1 is None or c2 is None:
+        return None
+    return c1[0], c1[1], c2[0], c2[1]
+
+
+def _three_point_two_circle_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, Point2D, float] | None:
+    if len(points) < 6:
+        return None
+    c1 = _circle_geometry_from_three_points(points[:3], full_dims)
+    c2 = _circle_geometry_from_three_points(points[3:6], full_dims)
+    if c1 is None or c2 is None:
+        return None
+    return c1[0], c1[1], c2[0], c2[1]
+
+
+def _two_point_pair_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 4 or points[0] == points[1] or points[2] == points[3]:
+        return None
+    return tuple(points[:4])
+
+
+def _three_point_two_circle_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 6:
+        return None
+    if _collinear(points[0], points[1], points[2]) or _collinear(points[3], points[4], points[5]):
+        return None
+    return tuple(points[:6])
+
+
 DEFAULT_REGISTRY = MeasurementKindRegistry()
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Point", required_points=1, category="point", resolve=_point_resolve,
@@ -1213,6 +1439,56 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     # distinct tile icon; kept separate so the menu can group it under
     # the Line category alongside the plain arbitrary line.
     name="Multipoint Line", required_points=None, category="line", resolve=_arbitrary_line_resolve,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # A 2-point line preset to arrow caps on both ends.
+    name="Double Arrow", required_points=2, category="line", resolve=_two_point_resolve,
+    meta_preset={"line_start_cap": "arrow", "line_end_cap": "arrow"},
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="2pt Rectangle", required_points=2, category="polygon",
+    resolve=_rectangle_2pt_resolve, polygon_points=_rectangle_2pt_points,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="3pt Rectangle", required_points=3, category="polygon",
+    resolve=_three_point_circle_resolve, polygon_points=_rectangle_3pt_points,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="2pt Square", required_points=2, category="polygon",
+    resolve=_rectangle_2pt_resolve, polygon_points=_square_2pt_points,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="3pt Square", required_points=3, category="polygon",
+    resolve=_three_point_angle_resolve, polygon_points=_square_3pt_points,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Unbounded closed polygon — right-click to finish.
+    name="Polygon", required_points=None, category="polygon",
+    resolve=_polygon_resolve, polygon_points=_polygon_points, min_points=3,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="Radius Annulus", required_points=3, category="annulus",
+    resolve=_radius_annulus_resolve, annulus_geometry=_radius_annulus_geometry,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="3pt Annulus", required_points=4, category="annulus",
+    resolve=_three_point_annulus_resolve, annulus_geometry=_three_point_annulus_geometry,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="Diameter Annulus", required_points=3, category="annulus",
+    resolve=_diameter_annulus_resolve, annulus_geometry=_diameter_annulus_geometry,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="Radius 2 Circle", required_points=4, category="two_circle",
+    resolve=_two_point_pair_resolve, two_circle_geometry=_radius_two_circle_geometry,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="3pt 2 Circle", required_points=6, category="two_circle",
+    resolve=_three_point_two_circle_resolve, two_circle_geometry=_three_point_two_circle_geometry,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    name="Diameter 2 Circle", required_points=4, category="two_circle",
+    resolve=_two_point_pair_resolve, two_circle_geometry=_diameter_two_circle_geometry,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real

@@ -199,6 +199,10 @@ class _ColorPicker(QWidget):
     def color(self) -> str:
         return self._color
 
+    def effective_color(self) -> str:
+        """The color actually shown — the override, or the default when none is set. Used where an empty override still needs a concrete color (e.g. an enabled fill)."""
+        return self._color or self._default_hex
+
     def _refresh(self) -> None:
         display = self._color or self._default_hex
         self._swatch.setStyleSheet(f"background-color: {display}; border: 1px solid #888888; border-radius: 3px;")
@@ -484,7 +488,23 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_text_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._tag_text_picker)
 
+    def _build_fill_controls(self, layout: QVBoxLayout) -> None:
+        self._fill_enabled_check = QCheckBox("Fill interior")
+        self._fill_enabled_check.toggled.connect(self._on_fill_toggled)
+        layout.addWidget(self._fill_enabled_check)
+
+        self._fill_color_picker = _ColorPicker("Fill Color", "#1a73e8")
+        self._fill_color_picker.color_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._fill_color_picker)
+
+        self._fill_opacity_label = _field_label("Fill Opacity")
+        layout.addWidget(self._fill_opacity_label)
+        self._fill_opacity_control = _ThicknessControl(0.0, 1.0)
+        self._fill_opacity_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._fill_opacity_control)
+
     def _build_line_style_controls(self, layout: QVBoxLayout) -> None:
+        self._build_fill_controls(layout)
         self._line_color_picker = _ColorPicker("Line Color", OVERLAY_LINE_COLOR.name())
         self._line_color_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._line_color_picker)
@@ -579,6 +599,7 @@ class MeasurementCustomizeMenu(QFrame):
         show_area = entry is not None and entry.category in ("circle", "ellipse")
         show_center = (entry is not None and entry.category in ("circle", "ellipse")) or kind == "Radius Arc"
         show_angle_extras = entry is not None and entry.category == "angle"
+        show_fill = entry is not None and entry.category in ("circle", "ellipse", "polygon", "annulus")
         self._title_edit.setText(meta.title)
         self._description_edit.setPlainText(meta.description)
         unit = meta.unit if meta.unit is not None else MeasurementUnit.MM
@@ -624,6 +645,14 @@ class MeasurementCustomizeMenu(QFrame):
         self._cap_size_control.set_value(meta.cap_size_scale)
         self._cap_size_control.setVisible(show_caps)
         self._cap_size_label.setVisible(show_caps)
+        fill_on = bool(meta.fill_color)
+        self._fill_enabled_check.setChecked(fill_on)
+        self._fill_enabled_check.setVisible(show_fill)
+        self._fill_color_picker.set_color(meta.fill_color)
+        self._fill_color_picker.setVisible(show_fill and fill_on)
+        self._fill_opacity_control.set_value(meta.fill_opacity)
+        self._fill_opacity_label.setVisible(show_fill and fill_on)
+        self._fill_opacity_control.setVisible(show_fill and fill_on)
         self._outline_enabled_check.setChecked(meta.outline_enabled)
         self._set_outline_controls_visible(meta.outline_enabled)
         self._outline_color_picker.set_color(meta.outline_color)
@@ -700,6 +729,13 @@ class MeasurementCustomizeMenu(QFrame):
         self.adjustSize()
         self._on_live_field_changed()
 
+    def _on_fill_toggled(self, enabled: bool) -> None:
+        self._fill_color_picker.setVisible(enabled and self._fill_enabled_check.isVisible())
+        self._fill_opacity_label.setVisible(enabled and self._fill_enabled_check.isVisible())
+        self._fill_opacity_control.setVisible(enabled and self._fill_enabled_check.isVisible())
+        self.adjustSize()
+        self._on_live_field_changed()
+
     def _current_meta(self) -> MeasurementMeta:
         # Built from the original so per-measurement state the menu
         # doesn't edit — style_id and the tag's dragged offset — carries
@@ -732,6 +768,8 @@ class MeasurementCustomizeMenu(QFrame):
             midpoint_style=self._midpoint_picker.value(),
             show_area=self._area_check.isChecked(),
             area_unit=self._area_unit_combo.currentData(),
+            fill_color=self._fill_color_picker.effective_color() if self._fill_enabled_check.isChecked() else "",
+            fill_opacity=self._fill_opacity_control.value(),
         )
 
     def _on_live_field_changed(self, *_args: object) -> None:

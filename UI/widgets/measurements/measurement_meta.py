@@ -74,6 +74,11 @@ class MeasurementMeta(NamedTuple):
     # lines (see MeasurementOverlay._draw_angle_indicator). Named among
     # the dash styles in MEASUREMENT_DASH_STYLES.
     angle_indicator_dash_style: str = "dash"
+    # Enclosed shapes (circle/ellipse/rectangle/polygon/annulus): a
+    # translucent interior fill. Empty means no fill; fill_opacity scales
+    # the fill's alpha independently of the whole-measurement opacity.
+    fill_color: str = ""
+    fill_opacity: float = 0.3
 
 
 DEFAULT_META = MeasurementMeta()

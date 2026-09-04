@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -47,15 +49,33 @@ from UI.widgets.measurements.line_pairs import (
     ThreePointParallelMeasurement,
     ThreePointPerpMeasurement,
 )
+from UI.widgets.measurements.annulus import (
+    DiameterAnnulusMeasurement,
+    RadiusAnnulusMeasurement,
+    ThreePointAnnulusMeasurement,
+)
 from UI.widgets.measurements.lines import (
     ArbitraryLineMeasurement,
     ArrowMeasurement,
     BracketMeasurement,
+    DoubleArrowMeasurement,
     HorizontalLineMeasurement,
     MEASUREMENT_LINE_CAPS,
     MEASUREMENT_MIDPOINT_STYLES,
     MultipointLineMeasurement,
     VerticalLineMeasurement,
+)
+from UI.widgets.measurements.polygons import PolygonMeasurement
+from UI.widgets.measurements.rectangles import (
+    ThreePointRectangleMeasurement,
+    ThreePointSquareMeasurement,
+    TwoPointRectangleMeasurement,
+    TwoPointSquareMeasurement,
+)
+from UI.widgets.measurements.two_circle import (
+    DiameterTwoCircleMeasurement,
+    RadiusTwoCircleMeasurement,
+    ThreePointTwoCircleMeasurement,
 )
 from UI.widgets.measurements.measurement_meta import MeasurementMeta
 from UI.widgets.measurements.measurement_style import (
@@ -71,31 +91,43 @@ from UI.widgets.preview_overlay.measurement_overlay import MEASUREMENT_DASH_PATT
 
 GRID_COLUMNS = 4
 
-_MEASUREMENT_TYPES = (
-    PointMeasurement,
-    ArbitraryLineMeasurement,
-    MultipointLineMeasurement,
-    HorizontalLineMeasurement,
-    VerticalLineMeasurement,
-    ArrowMeasurement,
-    BracketMeasurement,
-    RadiusCircleMeasurement,
-    DiameterMeasurement,
-    ThreePointCircleMeasurement,
-    ThreePointEllipseMeasurement,
-    FivePointEllipseMeasurement,
-    ThreePointAngleMeasurement,
-    FourPointAngleMeasurement,
-    ThreePointArcMeasurement,
-    RadiusArcMeasurement,
-    CurveMeasurement,
-    ThreePointParallelMeasurement,
-    FourPointParallelMeasurement,
-    EightPointParallelMeasurement,
-    ArbitraryParallelMeasurement,
-    ThreePointPerpMeasurement,
-    FourPointPerpMeasurement,
-    ArbitraryPerpMeasurement,
+# Measurement tiles grouped into categories. Each entry is
+# (category chip label, content-section title, tile classes). The tab
+# shows a chip per category (bearing the first tile's icon); picking one
+# reveals that category's tiles below, under its section title. Selection
+# itself is still one exclusive group spanning every tile (see
+# MeasurementsWidget) — categories only decide which tiles are visible.
+_CATEGORY_GROUPS = (
+    ("Point", "Point Measurements", (PointMeasurement,)),
+    ("Line", "Line Measurements", (
+        ArbitraryLineMeasurement, MultipointLineMeasurement, HorizontalLineMeasurement, VerticalLineMeasurement,
+    )),
+    ("Angle", "Angle Measurements", (ThreePointAngleMeasurement, FourPointAngleMeasurement)),
+    ("Arrow", "Arrow Annotations", (ArrowMeasurement, DoubleArrowMeasurement)),
+    ("Bracket", "Bracket Annotations", (BracketMeasurement,)),
+    ("Circle", "Circle Measurements", (
+        RadiusCircleMeasurement, DiameterMeasurement, ThreePointCircleMeasurement,
+    )),
+    ("Ellipse", "Ellipse Measurements", (ThreePointEllipseMeasurement, FivePointEllipseMeasurement)),
+    ("Curves", "Curve Measurements", (ThreePointArcMeasurement, RadiusArcMeasurement, CurveMeasurement)),
+    ("Parallel", "Parallel Measurements", (
+        ThreePointParallelMeasurement, FourPointParallelMeasurement, EightPointParallelMeasurement,
+        ArbitraryParallelMeasurement,
+    )),
+    ("Perp", "Perpendicular Measurements", (
+        ThreePointPerpMeasurement, FourPointPerpMeasurement, ArbitraryPerpMeasurement,
+    )),
+    ("Rectangle", "Rectangle Measurements", (
+        TwoPointRectangleMeasurement, ThreePointRectangleMeasurement,
+        TwoPointSquareMeasurement, ThreePointSquareMeasurement,
+    )),
+    ("Annulus", "Annulus Measurements", (
+        RadiusAnnulusMeasurement, ThreePointAnnulusMeasurement, DiameterAnnulusMeasurement,
+    )),
+    ("2 Circle", "Two-Circle Measurements", (
+        RadiusTwoCircleMeasurement, ThreePointTwoCircleMeasurement, DiameterTwoCircleMeasurement,
+    )),
+    ("Polygon", "Polygon Measurements", (PolygonMeasurement,)),
 )
 
 
@@ -192,18 +224,7 @@ class MeasurementsWidget(QWidget):
         self._calibration_panel.setVisible(False)
         outer_layout.addWidget(self._calibration_panel)
 
-        group = QGroupBox("Measurement Types")
-        grid = QGridLayout(group)
-        grid.setContentsMargins(4, 12, 4, 4)
-        grid.setSpacing(0)
-
-        for index, measurement_cls in enumerate(_MEASUREMENT_TYPES):
-            button = measurement_cls(group)
-            self._button_group.addButton(button)
-            row, column = divmod(index, GRID_COLUMNS)
-            grid.addWidget(button, row, column)
-
-        outer_layout.addWidget(group)
+        outer_layout.addWidget(self._build_measurement_types())
 
         data_group = QGroupBox("Import / Export")
         data_row = QHBoxLayout(data_group)
@@ -217,6 +238,69 @@ class MeasurementsWidget(QWidget):
 
         self._customize_panel = self._build_customize_panel()
         outer_layout.addWidget(self._customize_panel)
+
+    def _build_measurement_types(self) -> QGroupBox:
+        """
+        Two stacked sections: a row of category chips (each showing the
+        icon of its category's first tile) and, below, the selected
+        category's own tiles under its section title. Every tile across
+        every category still shares one exclusive selection group — the
+        categories only decide which tiles are on screen.
+        """
+        group = QGroupBox("Measurement Types")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(4, 12, 4, 4)
+        layout.setSpacing(6)
+
+        self._category_group = QButtonGroup(self)
+        self._category_group.setExclusive(True)
+        chip_grid = QGridLayout()
+        chip_grid.setSpacing(0)
+        self._content_stack = QStackedWidget()
+
+        for index, (chip_label, _title, tile_classes) in enumerate(_CATEGORY_GROUPS):
+            sample = tile_classes[0]()
+            chip = QToolButton()
+            chip.setObjectName("MeasurementTile")
+            chip.setCheckable(True)
+            chip.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            chip.setIcon(sample.icon())
+            chip.setIconSize(sample.iconSize())
+            chip.setFixedSize(sample.size())
+            chip.setText(chip_label)
+            self._category_group.addButton(chip, index)
+            row, column = divmod(index, GRID_COLUMNS)
+            chip_grid.addWidget(chip, row, column)
+
+            page = QWidget()
+            page_grid = QGridLayout(page)
+            page_grid.setContentsMargins(0, 0, 0, 0)
+            page_grid.setSpacing(0)
+            for tile_index, tile_cls in enumerate(tile_classes):
+                button = tile_cls(page)
+                self._button_group.addButton(button)
+                tile_row, tile_col = divmod(tile_index, GRID_COLUMNS)
+                page_grid.addWidget(button, tile_row, tile_col)
+            self._content_stack.addWidget(page)
+
+        layout.addLayout(chip_grid)
+
+        self._content_box = QGroupBox(_CATEGORY_GROUPS[0][1])
+        content_layout = QVBoxLayout(self._content_box)
+        content_layout.setContentsMargins(4, 12, 4, 4)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self._content_stack)
+        layout.addWidget(self._content_box)
+
+        self._category_group.idClicked.connect(self._on_category_selected)
+        first_chip = self._category_group.button(0)
+        if first_chip is not None:
+            first_chip.setChecked(True)
+        return group
+
+    def _on_category_selected(self, index: int) -> None:
+        self._content_stack.setCurrentIndex(index)
+        self._content_box.setTitle(_CATEGORY_GROUPS[index][1])
 
     def _build_customize_panel(self) -> QGroupBox:
         """

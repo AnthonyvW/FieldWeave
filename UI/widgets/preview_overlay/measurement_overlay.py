@@ -638,7 +638,50 @@ class MeasurementOverlay(Overlay):
                     for a, b in zip(curve_screen, curve_screen[1:]):
                         if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                             return index
+            elif entry.category == "polygon" and entry.polygon_points is not None and full_dims is not None:
+                verts = entry.polygon_points(measurement.points, full_dims)
+                if verts is not None and len(verts) >= 2:
+                    screen = [self._screen_point(self._to_point(rect, p), rect, widget_rect) for p in verts]
+                    for a, b in zip(screen, screen[1:] + screen[:1]):
+                        if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
+                            return index
+            elif entry.category == "annulus" and entry.annulus_geometry is not None and full_dims is not None:
+                geometry = entry.annulus_geometry(measurement.points, full_dims)
+                if geometry is not None and self._near_annulus(cursor, geometry, rect, widget_rect, full_dims):
+                    return index
+            elif entry.category == "two_circle" and entry.two_circle_geometry is not None and full_dims is not None:
+                geometry = entry.two_circle_geometry(measurement.points, full_dims)
+                if geometry is not None:
+                    c1, r1, c2, r2 = geometry
+                    for center, radius in ((c1, r1), (c2, r2)):
+                        if self._near_circle_edge(cursor, center, radius, rect, widget_rect, full_dims):
+                            return index
         return None
+
+    def _near_circle_edge(
+        self, cursor: QPointF, center: tuple[float, float], radius_px: float,
+        rect: QRect, widget_rect: QRect, full_dims: tuple[int, int],
+    ) -> bool:
+        full_w, full_h = full_dims
+        edge = []
+        for i in range(self._CIRCLE_EDGE_SAMPLES):
+            angle = 2 * math.pi * i / self._CIRCLE_EDGE_SAMPLES
+            fraction = (center[0] + (radius_px * math.cos(angle)) / full_w, center[1] + (radius_px * math.sin(angle)) / full_h)
+            edge.append(self._screen_point(self._to_point(rect, fraction), rect, widget_rect))
+        return any(
+            self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS
+            for a, b in zip(edge, edge[1:] + edge[:1])
+        )
+
+    def _near_annulus(
+        self, cursor: QPointF, geometry: tuple[tuple[float, float], float, float],
+        rect: QRect, widget_rect: QRect, full_dims: tuple[int, int],
+    ) -> bool:
+        center, outer_r, inner_r = geometry
+        return (
+            self._near_circle_edge(cursor, center, outer_r, rect, widget_rect, full_dims)
+            or self._near_circle_edge(cursor, center, inner_r, rect, widget_rect, full_dims)
+        )
 
     _CIRCLE_EDGE_SAMPLES = 32
 
@@ -989,7 +1032,7 @@ class MeasurementOverlay(Overlay):
                 line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width,
                 dash_style=meta.line_dash_style, start_cap=meta.line_start_cap, end_cap=meta.line_end_cap,
-                cap_size=meta.cap_size_scale,
+                cap_size=meta.cap_size_scale, fill_color=self._resolve_fill(meta),
             )
             entry = DEFAULT_REGISTRY.get(measurement.kind)
             if entry is not None and entry.category == "line" and meta.midpoint_style != "none":
@@ -1070,6 +1113,7 @@ class MeasurementOverlay(Overlay):
         start_cap: str = "curved",
         end_cap: str = "curved",
         cap_size: float = 1.0,
+        fill_color: QColor | None = None,
     ) -> None:
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None:
@@ -1084,13 +1128,36 @@ class MeasurementOverlay(Overlay):
             self._draw_circle(
                 painter, rect, kind, points, stroke_scale, full_dims,
                 dashed=dashed, line_color=line_color, line_width=line_width,
-                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
+                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style, fill_color=fill_color,
             )
         elif entry.category == "ellipse" and full_dims is not None:
             self._draw_ellipse(
                 painter, rect, kind, points, stroke_scale, full_dims,
                 dashed=dashed, line_color=line_color, line_width=line_width,
-                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
+                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style, fill_color=fill_color,
+            )
+        elif entry.category == "polygon" and entry.polygon_points is not None:
+            verts = entry.polygon_points(points, full_dims)
+            if verts is not None and len(verts) >= 2:
+                closed = tuple(verts) + (verts[0],)
+                if fill_color is not None and len(verts) >= 3:
+                    self._fill_polygon(painter, rect, verts, fill_color)
+                self._draw_polyline(
+                    painter, rect, closed, stroke_scale, dashed=dashed,
+                    line_color=line_color, line_width=line_width,
+                    outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
+                )
+        elif entry.category == "annulus" and full_dims is not None and entry.annulus_geometry is not None:
+            self._draw_annulus(
+                painter, rect, kind, points, stroke_scale, full_dims,
+                dashed=dashed, line_color=line_color, line_width=line_width,
+                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style, fill_color=fill_color,
+            )
+        elif entry.category == "two_circle" and full_dims is not None and entry.two_circle_geometry is not None:
+            self._draw_two_circle(
+                painter, rect, kind, points, stroke_scale, full_dims,
+                dashed=dashed, line_color=line_color, line_width=line_width,
+                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style, fill_color=fill_color,
             )
         elif entry.category in ("angle", "line_pair") and entry.segment_pairs is not None:
             if entry.connected_segments:
@@ -1400,6 +1467,17 @@ class MeasurementOverlay(Overlay):
         color = QColor(hex_color)
         return color if color.isValid() else default
 
+    @staticmethod
+    def _resolve_fill(meta: MeasurementMeta) -> QColor | None:
+        """Interior fill color (with its own alpha) for an enclosed shape, or None when no fill is set — see meta.fill_color."""
+        if not meta.fill_color:
+            return None
+        color = QColor(meta.fill_color)
+        if not color.isValid():
+            return None
+        color.setAlphaF(max(0.0, min(1.0, meta.fill_opacity)))
+        return color
+
     def _reference_dims(self, full_dims: tuple[int, int] | None) -> tuple[int, int] | None:
         """
         For live view, *full_dims* (the zoom handler's current frame —
@@ -1579,6 +1657,48 @@ class MeasurementOverlay(Overlay):
                     _, suffix_radius_px, _start, suffix_sweep = suffix_geometry
                     radius_text = format_length(suffix_radius_px, self.dpi or 1.0, unit, decimals)
                     suffix = f"R {radius_text} \u00b7 {abs(suffix_sweep):.{decimals}f}\u00b0"
+        elif entry.category == "polygon":
+            if entry.polygon_points is None or full_dims is None:
+                return None
+            verts = entry.polygon_points(points, full_dims)
+            if verts is None or len(verts) < 2:
+                return None
+            anchor = self._polygon_centroid(verts)
+            suffix = None
+            if self._can_measure(unit) and dims is not None and len(verts) >= 3:
+                area_unit = meta.area_unit if meta.area_unit is not None else unit
+                area_px = self._polygon_area_px(verts, dims)
+                suffix = format_area(area_px, self.dpi or 1.0, area_unit, decimals)
+        elif entry.category == "annulus":
+            if entry.annulus_geometry is None or full_dims is None:
+                return None
+            geometry = entry.annulus_geometry(points, full_dims)
+            if geometry is None:
+                return None
+            anchor = geometry[0]
+            suffix = None
+            if self._can_measure(unit) and dims is not None:
+                suffix_geometry = entry.annulus_geometry(points, dims)
+                if suffix_geometry is not None:
+                    _, outer_r, inner_r = suffix_geometry
+                    outer = format_length(outer_r * 2, self.dpi or 1.0, unit, decimals)
+                    inner = format_length(inner_r * 2, self.dpi or 1.0, unit, decimals)
+                    suffix = f"\u00d8 {outer} / {inner}"
+                    if meta.show_area:
+                        area_unit = meta.area_unit if meta.area_unit is not None else unit
+                        ring_px = math.pi * (outer_r * outer_r - inner_r * inner_r)
+                        suffix = f"{suffix} \u00b7 {format_area(ring_px, self.dpi or 1.0, area_unit, decimals)}"
+        elif entry.category == "two_circle":
+            if entry.two_circle_geometry is None or full_dims is None:
+                return None
+            geometry = entry.two_circle_geometry(points, full_dims)
+            if geometry is None:
+                return None
+            c1, _r1, c2, _r2 = geometry
+            anchor = self._midpoint((c1, c2))
+            suffix = None
+            if self._can_measure(unit) and dims is not None:
+                suffix = self._length_suffix((c1, c2), dims, unit, decimals)
         else:
             if not points:
                 return None
@@ -1622,6 +1742,22 @@ class MeasurementOverlay(Overlay):
             dy = (points[i + 1][1] - points[i][1]) * full_h
             total += math.hypot(dx, dy)
         return total
+
+    @staticmethod
+    def _polygon_centroid(verts: list[tuple[float, float]]) -> tuple[float, float]:
+        return sum(v[0] for v in verts) / len(verts), sum(v[1] for v in verts) / len(verts)
+
+    @staticmethod
+    def _polygon_area_px(verts: list[tuple[float, float]], full_dims: tuple[int, int]) -> float:
+        """Shoelace area of the closed polygon in true square pixels — computed in pixel space since an anisotropic frame scales x and y differently."""
+        full_w, full_h = full_dims
+        pts = [(x * full_w, y * full_h) for x, y in verts]
+        total = 0.0
+        for i in range(len(pts)):
+            x0, y0 = pts[i]
+            x1, y1 = pts[(i + 1) % len(pts)]
+            total += x0 * y1 - x1 * y0
+        return abs(total) / 2
 
     @staticmethod
     def _midpoint(points: tuple[tuple[float, float], ...]) -> tuple[float, float]:
@@ -1946,7 +2082,7 @@ class MeasurementOverlay(Overlay):
 
             self._draw_measurement(painter, rect, kind, display_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True)
 
-            if entry.category in ("circle", "ellipse", "arc") and len(preview_points) >= 2:
+            if entry.category in ("circle", "ellipse", "arc", "annulus", "two_circle") and len(preview_points) >= 2:
                 required = entry.required_points or len(preview_points)
                 if len(preview_points) < required:
                     # Not enough points for a circle/ellipse/arc yet — a
@@ -2043,6 +2179,7 @@ class MeasurementOverlay(Overlay):
         outline_color: QColor = OVERLAY_OUTLINE_COLOR,
         outline_width: float = OVERLAY_OUTLINE_WIDTH,
         dash_style: str = "solid",
+        fill_color: QColor | None = None,
     ) -> None:
         geometry = self._circle_geometry(kind, points, full_dims)
         if geometry is None:
@@ -2058,6 +2195,11 @@ class MeasurementOverlay(Overlay):
         center_point = self._to_point(rect, center)
         rx = radius_px * (rect.width() / full_w)
         ry = radius_px * (rect.height() / full_h)
+
+        if fill_color is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(fill_color))
+            painter.drawEllipse(center_point, rx, ry)
 
         total_outline_width = line_width + outline_width * 2
         pattern = None if dashed else resolve_dash_pattern(dash_style, line_width)
@@ -2104,6 +2246,7 @@ class MeasurementOverlay(Overlay):
         outline_color: QColor = OVERLAY_OUTLINE_COLOR,
         outline_width: float = OVERLAY_OUTLINE_WIDTH,
         dash_style: str = "solid",
+        fill_color: QColor | None = None,
     ) -> None:
         """
         Same treatment as _draw_circle — genuine image content, sized
@@ -2131,6 +2274,11 @@ class MeasurementOverlay(Overlay):
         painter.rotate(rotation_deg)
         ellipse_rect = QRectF(-rx, -ry, 2 * rx, 2 * ry)
 
+        if fill_color is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(fill_color))
+            painter.drawEllipse(ellipse_rect)
+
         outline = QPen(outline_color)
         outline.setWidthF(total_outline_width / stroke_scale)
         outline.setCapStyle(dash_cap)
@@ -2146,6 +2294,139 @@ class MeasurementOverlay(Overlay):
         painter.setPen(fill)
         painter.drawEllipse(ellipse_rect)
         painter.restore()
+
+    def _draw_circle_at(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        center: tuple[float, float],
+        radius_px: float,
+        full_dims: tuple[int, int],
+        stroke_scale: float,
+        *,
+        dashed: bool,
+        line_color: QColor,
+        line_width: float,
+        outline_color: QColor,
+        outline_width: float,
+        dash_style: str,
+        fill_color: QColor | None = None,
+    ) -> None:
+        """One circle by center-fraction and true-pixel radius — the shared outline/fill pass _draw_annulus and _draw_two_circle build on, mirroring _draw_circle's own pen treatment."""
+        full_w, full_h = full_dims
+        if full_w <= 0 or full_h <= 0 or radius_px <= 0:
+            return
+        center_point = self._to_point(rect, center)
+        rx = radius_px * (rect.width() / full_w)
+        ry = radius_px * (rect.height() / full_h)
+        if fill_color is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(fill_color))
+            painter.drawEllipse(center_point, rx, ry)
+        total_outline_width = line_width + outline_width * 2
+        pattern = None if dashed else resolve_dash_pattern(dash_style, line_width)
+        dash_cap = Qt.PenCapStyle.RoundCap if dash_style in ROUND_CAP_DASH_STYLES else Qt.PenCapStyle.FlatCap
+        outline = QPen(outline_color)
+        outline.setWidthF(total_outline_width / stroke_scale)
+        outline.setCapStyle(dash_cap)
+        self._apply_dash(outline, total_outline_width, dashed, pattern)
+        painter.setPen(outline)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(center_point, rx, ry)
+        fill = QPen(line_color)
+        fill.setWidthF(line_width / stroke_scale)
+        fill.setCapStyle(dash_cap)
+        self._apply_dash(fill, line_width, dashed, pattern)
+        painter.setPen(fill)
+        painter.drawEllipse(center_point, rx, ry)
+
+    def _fill_polygon(
+        self, painter: QPainter, rect: QRect, verts: list[tuple[float, float]], fill_color: QColor
+    ) -> None:
+        path = QPainterPath()
+        path.moveTo(self._to_point(rect, verts[0]))
+        for v in verts[1:]:
+            path.lineTo(self._to_point(rect, v))
+        path.closeSubpath()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(fill_color))
+        painter.drawPath(path)
+
+    def _draw_annulus(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        stroke_scale: float,
+        full_dims: tuple[int, int],
+        *,
+        dashed: bool,
+        line_color: QColor,
+        line_width: float,
+        outline_color: QColor,
+        outline_width: float,
+        dash_style: str,
+        fill_color: QColor | None = None,
+    ) -> None:
+        entry = DEFAULT_REGISTRY.get(kind)
+        geometry = entry.annulus_geometry(points, full_dims) if entry is not None and entry.annulus_geometry is not None else None
+        if geometry is None:
+            return
+        center, outer_r, inner_r = geometry
+        if fill_color is not None:
+            full_w, full_h = full_dims
+            cp = self._to_point(rect, center)
+            orx, ory = outer_r * (rect.width() / full_w), outer_r * (rect.height() / full_h)
+            irx, iry = inner_r * (rect.width() / full_w), inner_r * (rect.height() / full_h)
+            # Odd-even fill rule leaves the inner disc hollow, filling only the ring.
+            path = QPainterPath()
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+            path.addEllipse(cp, orx, ory)
+            path.addEllipse(cp, irx, iry)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(fill_color))
+            painter.drawPath(path)
+        for radius_px in (outer_r, inner_r):
+            self._draw_circle_at(
+                painter, rect, center, radius_px, full_dims, stroke_scale,
+                dashed=dashed, line_color=line_color, line_width=line_width,
+                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
+            )
+
+    def _draw_two_circle(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        kind: str,
+        points: tuple[tuple[float, float], ...],
+        stroke_scale: float,
+        full_dims: tuple[int, int],
+        *,
+        dashed: bool,
+        line_color: QColor,
+        line_width: float,
+        outline_color: QColor,
+        outline_width: float,
+        dash_style: str,
+        fill_color: QColor | None = None,
+    ) -> None:
+        entry = DEFAULT_REGISTRY.get(kind)
+        geometry = entry.two_circle_geometry(points, full_dims) if entry is not None and entry.two_circle_geometry is not None else None
+        if geometry is None:
+            return
+        c1, r1, c2, r2 = geometry
+        for center, radius_px in ((c1, r1), (c2, r2)):
+            self._draw_circle_at(
+                painter, rect, center, radius_px, full_dims, stroke_scale,
+                dashed=dashed, line_color=line_color, line_width=line_width,
+                outline_color=outline_color, outline_width=outline_width, dash_style=dash_style, fill_color=fill_color,
+            )
+        # A dashed guide between the two centers — the distance the tag reports.
+        self._draw_polyline(
+            painter, rect, (c1, c2), stroke_scale, dashed=True,
+            line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
+        )
 
     def _draw_stroke(
         self,

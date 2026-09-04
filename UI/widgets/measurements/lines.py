@@ -166,6 +166,36 @@ class ArrowMeasurement(MeasurementButton):
         painter.drawEllipse(end, POINT_RADIUS // 2, POINT_RADIUS // 2)
 
 
+class DoubleArrowMeasurement(MeasurementButton):
+    # A 2-point line preset to arrow caps on both ends — see the "Double
+    # Arrow" MeasurementKind's meta_preset.
+    name = "Double Arrow"
+    display_name = "Dbl Arrow"
+
+    def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        start = QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN)
+        end = QPoint(rect.right() - LINE_MARGIN, rect.top() + LINE_MARGIN)
+
+        self._set_pen(painter, LINE_COLOR)
+        painter.drawLine(start, end)
+
+        dx, dy = end.x() - start.x(), end.y() - start.y()
+        length = (dx * dx + dy * dy) ** 0.5
+        if length > 0:
+            ux, uy = dx / length, dy / length
+            px, py = -uy, ux
+            head_len, head_half = 9.0, 4.0
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(LINE_COLOR)
+            for tip, back in ((end, (-ux, -uy)), (start, (ux, uy))):
+                base_x, base_y = tip.x() + back[0] * head_len, tip.y() + back[1] * head_len
+                painter.drawPolygon(QPolygonF([
+                    QPointF(tip),
+                    QPointF(base_x + px * head_half, base_y + py * head_half),
+                    QPointF(base_x - px * head_half, base_y - py * head_half),
+                ]))
+
+
 class BracketMeasurement(MeasurementButton):
     # Same kind/placement as any other 2-point line — see the "Bracket"
     # MeasurementKind's meta_preset in measurement_kind.py, which is what
