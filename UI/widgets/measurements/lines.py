@@ -109,6 +109,25 @@ class ArbitraryLineMeasurement(MeasurementButton):
         self._draw_point(painter, end, ENDPOINT_RADIUS, active)
 
 
+class MultipointLineMeasurement(MeasurementButton):
+    # Same unbounded polyline as "Arbitrary Line" (see its MeasurementKind)
+    # — a distinct zig-zag icon is the only difference, so the two can sit
+    # side by side under the Line category.
+    name = "Multipoint Line"
+    display_name = "Multipoint"
+
+    def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        p0 = QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN)
+        p1 = QPoint(rect.left() + rect.width() // 3, rect.top() + LINE_MARGIN)
+        p2 = QPoint(rect.left() + 2 * rect.width() // 3, rect.bottom() - LINE_MARGIN)
+        p3 = QPoint(rect.right() - LINE_MARGIN, rect.top() + LINE_MARGIN)
+
+        self._set_pen(painter, LINE_COLOR)
+        painter.drawPolyline([p0, p1, p2, p3])
+        for point in (p0, p1, p2, p3):
+            self._draw_point(painter, point, ENDPOINT_RADIUS, active)
+
+
 class ArrowMeasurement(MeasurementButton):
     # Same kind/placement as any other 2-point line — see the "Arrow"
     # MeasurementKind's meta_preset in measurement_kind.py, which is what

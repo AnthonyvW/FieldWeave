@@ -105,15 +105,31 @@ class MeasurementKind:
     # draws two independent, disconnected segments — which is why this
     # isn't just handled generically the way "line"'s always-consecutive
     # polyline is.
-    # Also used by "line_pair" category kinds ("Parallel Line",
-    # "Perpendicular Line") — their second segment is derived from the
-    # first rather than drawn straight from clicked points, which is why
-    # this exists as a callback instead of consecutive-point pairing.
+    # Also used by "line_pair" category kinds (the parallel/perpendicular
+    # families) — their derived segments come from the first line rather
+    # than straight from clicked points, which is why this exists as a
+    # callback instead of consecutive-point pairing.
     # full_dims is None whenever true pixel geometry isn't available yet
-    # (or isn't needed — most kinds ignore it entirely, only
-    # "Perpendicular Line" needs it, since "perpendicular" is an angle
+    # (or isn't needed — most kinds ignore it entirely; the
+    # perpendicular kinds need it, since "perpendicular" is an angle
     # concept sensitive to the frame's own aspect ratio).
     segment_pairs: Callable[[tuple[Point2D, ...], tuple[int, int] | None], list[tuple[Point2D, Point2D]]] | None = None
+    # "line_pair" category only: dashed guide segments drawn alongside the
+    # solid ones from segment_pairs — the connectors tying a parallel
+    # pair together, or the midlines an "8pt Parallel" shows between its
+    # two pairs. Never carry caps or a length label of their own.
+    connector_segments: Callable[[tuple[Point2D, ...], tuple[int, int] | None], list[tuple[Point2D, Point2D]]] | None = None
+    # "line_pair" category only: (tag anchor fraction, distance in true
+    # pixels) the tag shows instead of a plain segment length — the
+    # perpendicular gap between a parallel pair, say. Needs full_dims
+    # since a distance/perpendicularity is aspect-ratio sensitive. When
+    # None, a line_pair tags its first segment's own length instead.
+    pair_distance: Callable[[tuple[Point2D, ...], tuple[int, int]], tuple[Point2D, float] | None] | None = None
+    # Unbounded kinds (required_points is None) only: the fewest points a
+    # cancel (right-click) will keep as a finished measurement rather than
+    # discarding — 2 for a plain polyline, more for kinds needing a first
+    # full line before their extra points mean anything.
+    min_points: int = 2
     # "curve" category only: sampled points (fraction space) along the
     # curve *points* describes, for however many control points have
     # been placed so far — see MeasurementOverlay's "curve" dispatch.
@@ -711,69 +727,344 @@ def _curve_points(points: tuple[Point2D, ...]) -> list[Point2D] | None:
 
 
 # ----------------------------------------------------------------------
-# Parallel/Perpendicular Line — both place a first line (two points),
-# then a third point anchors a second, derived line. "line_pair"
-# category kinds all share this drawing/hit-testing treatment (see
-# MeasurementOverlay's "line_pair" dispatch): two segments from
-# segment_pairs, a length label (from the first, "reference" segment)
-# rather than an angle.
+# Parallel/Perpendicular Line families — "line_pair" category. All place
+# a first reference line, then derive further lines from it. The overlay
+# draws segment_pairs solid and connector_segments dashed, hit-tests
+# both, and tags either the perpendicular gap between a parallel pair
+# (pair_distance) or, lacking that, the first segment's own length.
+#
+# Direction, perpendicularity and distance are aspect-ratio sensitive, so
+# — like the angle tools — these compute in true pixel space via
+# full_dims and convert the result back to fraction space. (Plain
+# parallelism alone is affine-invariant, but the *gap* between the lines
+# isn't, so full_dims is needed regardless.)
 # ----------------------------------------------------------------------
+
+
+def _mid2(a: Point2D, b: Point2D) -> Point2D:
+    return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+
+
+def _line_gap_px(line: tuple[Point2D, Point2D], point: Point2D, full_dims: tuple[int, int]) -> float | None:
+    """Perpendicular distance (true pixels) from *point* to the infinite line through *line*'s two points, or None if the line is degenerate."""
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+    ax, ay = line[0][0] * full_w, line[0][1] * full_h
+    bx, by = line[1][0] * full_w, line[1][1] * full_h
+    dx, dy = bx - ax, by - ay
+    length = math.hypot(dx, dy)
+    if length < _DEGENERATE_EPSILON:
+        return None
+    px, py = point[0] * full_w, point[1] * full_h
+    cross = (px - ax) * dy - (py - ay) * dx
+    return abs(cross) / length
+
+
+def _parallel_second_centered(p0: Point2D, p1: Point2D, center: Point2D) -> tuple[Point2D, Point2D]:
+    """The reference line p0->p1 translated so its own midpoint lands on *center* — a plain translation, affine-invariant, so no full_dims needed."""
+    mid = _mid2(p0, p1)
+    off = (center[0] - mid[0], center[1] - mid[1])
+    return (p0[0] + off[0], p0[1] + off[1]), (p1[0] + off[0], p1[1] + off[1])
+
+
+# --- 3pt Parallel: line, then a point centering a same-length parallel copy ---
 
 
 def _two_line_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
     if len(points) < 3:
         return None
-    p0, p1, p2 = points[0], points[1], points[2]
-    if p0 == p1:
+    if points[0] == points[1]:
         return None
-    return p0, p1, p2
+    return tuple(points[:3])
 
 
-def _parallel_line_segments(
+def _parallel3_segments(
     points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
 ) -> list[tuple[Point2D, Point2D]]:
     pairs = []
     if len(points) >= 2:
         pairs.append((points[0], points[1]))
     if len(points) >= 3:
-        p0, p1, p2 = points[0], points[1], points[2]
-        # Translating the first line so its start lands exactly on p2 —
-        # a plain translation, so (unlike "perpendicular") this is
-        # correct straight in fraction space; no pixel-space detour needed.
-        offset = (p2[0] - p0[0], p2[1] - p0[1])
-        pairs.append((p2, (p1[0] + offset[0], p1[1] + offset[1])))
+        pairs.append(_parallel_second_centered(points[0], points[1], points[2]))
     return pairs
 
 
-def _perpendicular_line_segments(
+def _parallel3_connectors(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    if len(points) < 3:
+        return []
+    a, b = _parallel_second_centered(points[0], points[1], points[2])
+    return [(points[0], a), (points[1], b)]
+
+
+def _parallel3_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
+    if len(points) < 3:
+        return None
+    gap = _line_gap_px((points[0], points[1]), points[2], full_dims)
+    if gap is None:
+        return None
+    return _mid2(_mid2(points[0], points[1]), points[2]), gap
+
+
+# --- 4pt Parallel: reference line, then both ends of a parallel-locked line ---
+
+
+def _four_point_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 4 or points[0] == points[1]:
+        return None
+    return tuple(points[:4])
+
+
+def _parallel4_second(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None) -> tuple[Point2D, Point2D] | None:
+    """Second line: starts at p2, runs parallel to p0->p1, its far end the projection of p3 onto that direction (so all four points are placed, yet the line stays parallel). Pixel space, since a projection isn't affine-invariant."""
+    if full_dims is None:
+        return None
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+    a = (points[0][0] * full_w, points[0][1] * full_h)
+    b = (points[1][0] * full_w, points[1][1] * full_h)
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length < _DEGENERATE_EPSILON:
+        return None
+    ux, uy = dx / length, dy / length
+    c = (points[2][0] * full_w, points[2][1] * full_h)
+    d = (points[3][0] * full_w, points[3][1] * full_h)
+    t = (d[0] - c[0]) * ux + (d[1] - c[1]) * uy
+    end = (c[0] + t * ux, c[1] + t * uy)
+    return points[2], (end[0] / full_w, end[1] / full_h)
+
+
+def _parallel4_segments(
     points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
 ) -> list[tuple[Point2D, Point2D]]:
     pairs = []
     if len(points) >= 2:
         pairs.append((points[0], points[1]))
-    if len(points) < 3 or full_dims is None:
-        return pairs
+    if len(points) >= 4:
+        second = _parallel4_second(points, full_dims)
+        pairs.append(second if second is not None else (points[2], points[3]))
+    return pairs
+
+
+def _parallel4_connectors(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    if len(points) < 4:
+        return []
+    second = _parallel4_second(points, full_dims)
+    if second is None:
+        return []
+    return [(points[0], second[0]), (points[1], second[1])]
+
+
+def _parallel4_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
+    if len(points) < 4:
+        return None
+    gap = _line_gap_px((points[0], points[1]), points[2], full_dims)
+    if gap is None:
+        return None
+    return _mid2(_mid2(points[0], points[1]), _mid2(points[2], points[3])), gap
+
+
+# --- 8pt Parallel: two pairs of parallel lines, gap between their midlines ---
+
+
+def _eight_point_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 8:
+        return None
+    return tuple(points[:8])
+
+
+def _parallel8_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    pairs = []
+    for i in range(0, min(len(points), 8) - 1, 2):
+        pairs.append((points[i], points[i + 1]))
+    return pairs
+
+
+def _parallel8_midlines(points: tuple[Point2D, ...]) -> tuple[tuple[Point2D, Point2D], tuple[Point2D, Point2D]] | None:
+    """The midline of each pair of lines (line0/line1 and line2/line3): the line joining the two lines' averaged start points to their averaged end points."""
+    if len(points) < 8:
+        return None
+    mid_a = (_mid2(points[0], points[2]), _mid2(points[1], points[3]))
+    mid_b = (_mid2(points[4], points[6]), _mid2(points[5], points[7]))
+    return mid_a, mid_b
+
+
+def _parallel8_connectors(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    midlines = _parallel8_midlines(points)
+    return list(midlines) if midlines is not None else []
+
+
+def _parallel8_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
+    midlines = _parallel8_midlines(points)
+    if midlines is None:
+        return None
+    (a0, a1), (b0, b1) = midlines
+    gap = _line_gap_px((a0, a1), _mid2(b0, b1), full_dims)
+    if gap is None:
+        return None
+    return _mid2(_mid2(a0, a1), _mid2(b0, b1)), gap
+
+
+# --- Arbitrary Parallel: a line, then each extra point adds a parallel copy ---
+
+
+def _arbitrary_parallel_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3 or points[0] == points[1]:
+        return None
+    return tuple(points)
+
+
+def _arbitrary_parallel_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    pairs = []
+    if len(points) >= 2:
+        pairs.append((points[0], points[1]))
+    for extra in points[2:]:
+        pairs.append(_parallel_second_centered(points[0], points[1], extra))
+    return pairs
+
+
+# --- 3pt Perpendicular: line, then a point; the perpendicular foot->point line ---
+
+
+def _perpendicular_foot(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None) -> Point2D | None:
+    """Foot of the perpendicular from p2 onto the infinite line through p0/p1, in fraction space — computed via true pixel space, since a right angle is aspect-ratio sensitive."""
+    if full_dims is None or len(points) < 3:
+        return None
     full_w, full_h = full_dims
     if full_w <= 0 or full_h <= 0:
-        return pairs
-
-    def to_px(p: Point2D) -> Point2D:
-        return p[0] * full_w, p[1] * full_h
-
-    a, b, c = to_px(points[0]), to_px(points[1]), to_px(points[2])
+        return None
+    a = (points[0][0] * full_w, points[0][1] * full_h)
+    b = (points[1][0] * full_w, points[1][1] * full_h)
     dx, dy = b[0] - a[0], b[1] - a[1]
     length_sq = dx * dx + dy * dy
     if length_sq < _DEGENERATE_EPSILON:
-        return pairs
-    # Foot of the perpendicular from p2 onto the infinite line through
-    # p0/p1 — computed in true pixel space, since "perpendicular" is an
-    # angle concept and the frame's own aspect ratio can otherwise skew
-    # a fraction-space-only projection away from a true right angle.
+        return None
+    c = (points[2][0] * full_w, points[2][1] * full_h)
     t = ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / length_sq
-    foot_px = (a[0] + t * dx, a[1] + t * dy)
-    foot = (foot_px[0] / full_w, foot_px[1] / full_h)
-    pairs.append((foot, points[2]))
-    return pairs
+    return (a[0] + t * dx) / full_w, (a[1] + t * dy) / full_h
+
+
+def _perpendicular3_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    """Only the reference line is solid — the perpendicular itself is drawn dashed via connector_segments."""
+    return [(points[0], points[1])] if len(points) >= 2 else []
+
+
+def _perpendicular3_connectors(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    if len(points) < 3:
+        return []
+    foot = _perpendicular_foot(points, full_dims)
+    if foot is None:
+        return []
+    return [(foot, points[2])]
+
+
+def _perpendicular3_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
+    if len(points) < 3:
+        return None
+    foot = _perpendicular_foot(points, full_dims)
+    if foot is None:
+        return None
+    gap = _line_gap_px((points[0], points[1]), points[2], full_dims)
+    if gap is None:
+        return None
+    return _mid2(foot, points[2]), gap
+
+
+# --- 4pt Perpendicular: reference line, then both ends of a perpendicular line ---
+
+
+def _perpendicular4_second(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None) -> tuple[Point2D, Point2D] | None:
+    """Second line from p2, perpendicular to p0->p1, its length the projection of p3-p2 onto that perpendicular direction — so both of the perpendicular line's ends are placed while it stays at a true right angle. Pixel space."""
+    if full_dims is None:
+        return None
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return None
+    a = (points[0][0] * full_w, points[0][1] * full_h)
+    b = (points[1][0] * full_w, points[1][1] * full_h)
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length < _DEGENERATE_EPSILON:
+        return None
+    # Perpendicular unit direction.
+    nx, ny = -dy / length, dx / length
+    c = (points[2][0] * full_w, points[2][1] * full_h)
+    d = (points[3][0] * full_w, points[3][1] * full_h)
+    t = (d[0] - c[0]) * nx + (d[1] - c[1]) * ny
+    end = (c[0] + t * nx, c[1] + t * ny)
+    return points[2], (end[0] / full_w, end[1] / full_h)
+
+
+def _perpendicular4_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    return [(points[0], points[1])] if len(points) >= 2 else []
+
+
+def _perpendicular4_connectors(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    if len(points) < 4:
+        return []
+    second = _perpendicular4_second(points, full_dims)
+    return [second] if second is not None else []
+
+
+def _perpendicular4_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
+    if len(points) < 4:
+        return None
+    second = _perpendicular4_second(points, full_dims)
+    if second is None:
+        return None
+    full_w, full_h = full_dims
+    dx = (second[1][0] - second[0][0]) * full_w
+    dy = (second[1][1] - second[0][1]) * full_h
+    dist = math.hypot(dx, dy)
+    if dist < _DEGENERATE_EPSILON:
+        return None
+    return _mid2(second[0], second[1]), dist
+
+
+# --- Arbitrary Perpendicular: a line, then each extra point adds a perpendicular ---
+
+
+def _arbitrary_perpendicular_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3 or points[0] == points[1]:
+        return None
+    return tuple(points)
+
+
+def _arbitrary_perpendicular_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    return [(points[0], points[1])] if len(points) >= 2 else []
+
+
+def _arbitrary_perpendicular_connectors(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    connectors = []
+    for extra in points[2:]:
+        foot = _perpendicular_foot((points[0], points[1], extra), full_dims)
+        if foot is not None:
+            connectors.append((foot, extra))
+    return connectors
 
 
 DEFAULT_REGISTRY = MeasurementKindRegistry()
@@ -867,18 +1158,61 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     resolve=_curve_resolve, curve_points=_curve_points,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
-    # First line (2 points), then a third point anchors a second line
-    # translated to pass through it, parallel to and the same length as
-    # the first.
-    name="Parallel Line", required_points=3, category="line_pair",
-    resolve=_two_line_resolve, segment_pairs=_parallel_line_segments,
+    # First line (2 points), then a third point centering a same-length
+    # parallel copy; dashed connectors tie the pair, the tag shows the
+    # perpendicular gap between them.
+    name="3pt Parallel", required_points=3, category="line_pair",
+    resolve=_two_line_resolve, segment_pairs=_parallel3_segments,
+    connector_segments=_parallel3_connectors, pair_distance=_parallel3_distance,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
-    # First line (2 points), then a third point anchors a second line
-    # running from its own perpendicular foot on the first line out to
-    # that point.
-    name="Perpendicular Line", required_points=3, category="line_pair",
-    resolve=_two_line_resolve, segment_pairs=_perpendicular_line_segments,
+    # Reference line, then both ends of a second line locked parallel to
+    # it (its far end is p3 projected onto the parallel direction).
+    name="4pt Parallel", required_points=4, category="line_pair",
+    resolve=_four_point_resolve, segment_pairs=_parallel4_segments,
+    connector_segments=_parallel4_connectors, pair_distance=_parallel4_distance,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Four parallel lines (8 points); dashed midlines between each pair,
+    # the tag showing the gap between those two midlines.
+    name="8pt Parallel", required_points=8, category="line_pair",
+    resolve=_eight_point_resolve, segment_pairs=_parallel8_segments,
+    connector_segments=_parallel8_connectors, pair_distance=_parallel8_distance,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # A first line, then each additional click drops another parallel copy
+    # centered on it — right-click to finish.
+    name="Arbitrary Parallel", required_points=None, category="line_pair",
+    resolve=_arbitrary_parallel_resolve, segment_pairs=_arbitrary_parallel_segments,
+    min_points=3,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # First line (2 points), then a third point; the perpendicular from
+    # its foot on the line out to that point, drawn dashed, tagged with
+    # its length.
+    name="3pt Perp", required_points=3, category="line_pair",
+    resolve=_two_line_resolve, segment_pairs=_perpendicular3_segments,
+    connector_segments=_perpendicular3_connectors, pair_distance=_perpendicular3_distance,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Reference line, then both ends of a perpendicular line (its length
+    # is p3 projected onto the perpendicular direction).
+    name="4pt Perp", required_points=4, category="line_pair",
+    resolve=_four_point_resolve, segment_pairs=_perpendicular4_segments,
+    connector_segments=_perpendicular4_connectors, pair_distance=_perpendicular4_distance,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # A first line, then each additional click drops another perpendicular
+    # off it — right-click to finish.
+    name="Arbitrary Perp", required_points=None, category="line_pair",
+    resolve=_arbitrary_perpendicular_resolve, segment_pairs=_arbitrary_perpendicular_segments,
+    connector_segments=_arbitrary_perpendicular_connectors, min_points=3,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Same behavior as "Arbitrary Line" — an unbounded polyline — with a
+    # distinct tile icon; kept separate so the menu can group it under
+    # the Line category alongside the plain arbitrary line.
+    name="Multipoint Line", required_points=None, category="line", resolve=_arbitrary_line_resolve,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real

@@ -39,8 +39,13 @@ from UI.widgets.measurements.ellipses import (
     ThreePointEllipseMeasurement,
 )
 from UI.widgets.measurements.line_pairs import (
-    ParallelLineMeasurement,
-    PerpendicularLineMeasurement,
+    ArbitraryParallelMeasurement,
+    ArbitraryPerpMeasurement,
+    EightPointParallelMeasurement,
+    FourPointParallelMeasurement,
+    FourPointPerpMeasurement,
+    ThreePointParallelMeasurement,
+    ThreePointPerpMeasurement,
 )
 from UI.widgets.measurements.lines import (
     ArbitraryLineMeasurement,
@@ -49,6 +54,7 @@ from UI.widgets.measurements.lines import (
     HorizontalLineMeasurement,
     MEASUREMENT_LINE_CAPS,
     MEASUREMENT_MIDPOINT_STYLES,
+    MultipointLineMeasurement,
     VerticalLineMeasurement,
 )
 from UI.widgets.measurements.measurement_meta import MeasurementMeta
@@ -68,6 +74,7 @@ GRID_COLUMNS = 4
 _MEASUREMENT_TYPES = (
     PointMeasurement,
     ArbitraryLineMeasurement,
+    MultipointLineMeasurement,
     HorizontalLineMeasurement,
     VerticalLineMeasurement,
     ArrowMeasurement,
@@ -82,8 +89,13 @@ _MEASUREMENT_TYPES = (
     ThreePointArcMeasurement,
     RadiusArcMeasurement,
     CurveMeasurement,
-    ParallelLineMeasurement,
-    PerpendicularLineMeasurement,
+    ThreePointParallelMeasurement,
+    FourPointParallelMeasurement,
+    EightPointParallelMeasurement,
+    ArbitraryParallelMeasurement,
+    ThreePointPerpMeasurement,
+    FourPointPerpMeasurement,
+    ArbitraryPerpMeasurement,
 )
 
 

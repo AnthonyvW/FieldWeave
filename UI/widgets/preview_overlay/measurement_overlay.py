@@ -418,10 +418,19 @@ class MeasurementOverlay(Overlay):
         by cancelling once its shape is right rather than needing a
         fixed number of clicks.
         """
-        if self._draft_points is not None and self._draft_type == "Arbitrary Line" and len(self._draft_points) >= 2:
-            self.measurements.append(
-                Measurement(self._draft_type, tuple(self._draft_points), self._resolve_meta(self._draft_type))
-            )
+        entry = DEFAULT_REGISTRY.get(self._draft_type)
+        if (
+            self._draft_points is not None
+            and entry is not None
+            and entry.required_points is None
+            and self._draft_type != CALIBRATION_KIND
+            and len(self._draft_points) >= entry.min_points
+        ):
+            resolved = entry.resolve(list(self._draft_points))
+            if resolved is not None:
+                self.measurements.append(
+                    Measurement(self._draft_type, resolved, self._resolve_meta(self._draft_type))
+                )
         self._draft_type = None
         self._draft_points = None
         self._draft_preview = None
@@ -608,7 +617,10 @@ class MeasurementOverlay(Overlay):
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
             elif entry.category in ("angle", "line_pair") and entry.segment_pairs is not None:
-                for pa, pb in entry.segment_pairs(measurement.points, full_dims):
+                segments = list(entry.segment_pairs(measurement.points, full_dims))
+                if entry.connector_segments is not None:
+                    segments += entry.connector_segments(measurement.points, full_dims)
+                for pa, pb in segments:
                     a = self._screen_point(self._to_point(rect, pa), rect, widget_rect)
                     b = self._screen_point(self._to_point(rect, pb), rect, widget_rect)
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
@@ -1105,6 +1117,16 @@ class MeasurementOverlay(Overlay):
                         outline_color=outline_color, outline_width=outline_width,
                         dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
                     )
+            # Dashed guides (parallel connectors, midlines, the derived
+            # perpendicular line) — always dashed regardless of the
+            # measurement's own solid/preview state, and never capped.
+            if entry.connector_segments is not None:
+                for pair in entry.connector_segments(points, full_dims):
+                    self._draw_polyline(
+                        painter, rect, pair, stroke_scale, dashed=True,
+                        line_color=line_color, line_width=line_width,
+                        outline_color=outline_color, outline_width=outline_width,
+                    )
         elif entry.category == "arc" and full_dims is not None:
             # Drawn as a many-segment polyline sampled along the arc —
             # reuses the same stroke/dash/cap machinery as any other
@@ -1516,11 +1538,17 @@ class MeasurementOverlay(Overlay):
             legs = entry.segment_pairs(points, full_dims)
             if not legs:
                 return None
-            # The first ("reference") segment's own length and midpoint \u2014
-            # a Parallel/Perpendicular Line reads like an ordinary line's
-            # tag, not an angle's.
-            anchor = self._midpoint(legs[0])
-            suffix = self._length_suffix(legs[0], dims, unit, decimals)
+            # A parallel/perpendicular pair tags the perpendicular gap (or
+            # the derived line's length) between its lines via
+            # pair_distance; lacking that (e.g. arbitrary parallel), it
+            # falls back to the reference segment's own length.
+            pair = entry.pair_distance(points, dims) if (entry.pair_distance is not None and dims is not None) else None
+            if pair is not None and self._can_measure(unit):
+                anchor, distance_px = pair
+                suffix = format_length(distance_px, self.dpi or 1.0, unit, decimals)
+            else:
+                anchor = self._midpoint(legs[0])
+                suffix = self._length_suffix(legs[0], dims, unit, decimals)
         elif entry.category == "curve":
             if entry.curve_points is None:
                 return None
@@ -1877,13 +1905,13 @@ class MeasurementOverlay(Overlay):
         if entry is None:
             return
 
-        if entry.required_points is None:
-            # Unbounded kinds (e.g. "Arbitrary Line") keep accumulating
-            # points until cancelled. Confirmed segments are drawn solid
-            # — they're placed, just not yet finalized into a stored
-            # Measurement — and only the pending segment to the cursor
-            # dashes, so it's clear which part of the shape is still
-            # being decided.
+        if entry.required_points is None and entry.category == "line":
+            # Unbounded polyline kinds (e.g. "Arbitrary Line"/"Multipoint
+            # Line") keep accumulating points until cancelled. Confirmed
+            # segments are drawn solid — they're placed, just not yet
+            # finalized into a stored Measurement — and only the pending
+            # segment to the cursor dashes, so it's clear which part of
+            # the shape is still being decided.
             if len(points) >= 2:
                 self._draw_polyline(painter, rect, points, stroke_scale, dashed=False)
             if preview is not None:
@@ -1892,6 +1920,16 @@ class MeasurementOverlay(Overlay):
             label_points = (*points, preview) if preview is not None else tuple(points)
             if len(label_points) >= 2:
                 self._draw_draft_label(painter, rect, kind, label_points, scale_x, scale_y, full_dims)
+        elif entry.required_points is None:
+            # Unbounded non-polyline kinds (arbitrary parallel/perp) —
+            # draw the whole in-progress shape, including the line the
+            # cursor is currently placing, via the kind's own dispatch.
+            preview_points = (*points, preview) if preview is not None else tuple(points)
+            self._draw_measurement(
+                painter, rect, kind, preview_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True
+            )
+            if len(preview_points) >= 2:
+                self._draw_draft_label(painter, rect, kind, preview_points, scale_x, scale_y, full_dims)
         else:
             preview_points = (*points, preview) if preview is not None else tuple(points)
             display_points = preview_points
