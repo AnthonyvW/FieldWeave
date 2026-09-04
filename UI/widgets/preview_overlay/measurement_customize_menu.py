@@ -483,6 +483,8 @@ class MeasurementCustomizeMenu(QFrame):
         unit_row.addWidget(self._decimals_spin)
         layout.addLayout(unit_row)
 
+        self._build_font_width_controls(layout)
+
         self._area_check = QCheckBox("Show area")
         self._area_check.toggled.connect(self._on_area_toggled)
         area_row = QHBoxLayout()
@@ -540,10 +542,24 @@ class MeasurementCustomizeMenu(QFrame):
         self._build_scalebar_controls(layout)
         self._build_line_style_controls(layout)
 
+        # Reset Style lives at the bottom of the scrollable field list
+        # itself, not the fixed footer below it — it acts on the fields
+        # above it, not as a persistent action like Apply/Cancel/Delete.
+        reset_button = QPushButton("Reset Style")
+        reset_button.setToolTip("Reset this measurement's style to the current default and restore hidden tags")
+        reset_button.clicked.connect(self._on_reset_clicked)
+        layout.addWidget(reset_button)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Otherwise the scroll area's own Base-colored viewport shows
+        # through as a lighter rectangle against #MeasurementCustomizeMenu's
+        # background rather than one continuous panel color.
+        scroll.setStyleSheet("background: transparent;")
+        scroll.viewport().setStyleSheet("background: transparent;")
+        content.setStyleSheet("background: transparent;")
         scroll.setWidget(content)
         outer_layout.addWidget(scroll, 1)
 
@@ -564,31 +580,23 @@ class MeasurementCustomizeMenu(QFrame):
         button_row.addWidget(apply_button)
         button_row.addWidget(cancel_button)
         footer.addLayout(button_row)
-        reset_button = QPushButton("Reset Style")
-        reset_button.setToolTip("Reset this measurement's style to the current default and restore hidden tags")
-        reset_button.clicked.connect(self._on_reset_clicked)
-        footer.addWidget(reset_button)
         outer_layout.addLayout(footer)
 
         self.setMaximumHeight(560)
+        # Baseline width the panel is built for — grown (never shrunk) when
+        # Tag Width exceeds it, so the description box and the rest of the
+        # panel widen to fill the extra space (feature 7).
+        self._base_width = self.sizeHint().width()
         self.hide()
 
-    def _build_tag_style_controls(self, layout: QVBoxLayout) -> None:
-        self._tag_transparent_check = QCheckBox("Transparent tag background")
-        self._tag_transparent_check.toggled.connect(self._on_tag_transparent_toggled)
-        layout.addWidget(self._tag_transparent_check)
-
-        self._tag_bg_picker = _ColorPicker("Tag Background Color", OVERLAY_LINE_COLOR.name())
-        self._tag_bg_picker.color_changed.connect(self._on_live_field_changed)
-        layout.addWidget(self._tag_bg_picker)
-
-        self._tag_text_picker = _ColorPicker("Tag Text Color", OVERLAY_OUTLINE_COLOR.name())
-        self._tag_text_picker.color_changed.connect(self._on_live_field_changed)
-        layout.addWidget(self._tag_text_picker)
-
+    def _build_font_width_controls(self, layout: QVBoxLayout) -> None:
         font_row = QHBoxLayout()
         font_row.addWidget(_field_label("Font"))
         self._font_combo = QFontComboBox()
+        # Non-scalable (bitmap) fonts like "Fixedsys" make DirectWrite log a
+        # warning to the console whenever they're scrolled past on Windows —
+        # excluding them from the list avoids hitting one at all.
+        self._font_combo.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
         block_wheel(self._font_combo)
         self._font_combo.currentFontChanged.connect(self._on_live_field_changed)
         font_row.addWidget(self._font_combo, 1)
@@ -605,8 +613,21 @@ class MeasurementCustomizeMenu(QFrame):
 
         layout.addWidget(_field_label("Tag Width (0 = auto)"))
         self._tag_width_control = _ThicknessControl(0.0, 400.0)
-        self._tag_width_control.value_changed.connect(self._on_live_field_changed)
+        self._tag_width_control.value_changed.connect(self._on_tag_width_changed)
         layout.addWidget(self._tag_width_control)
+
+    def _build_tag_style_controls(self, layout: QVBoxLayout) -> None:
+        self._tag_transparent_check = QCheckBox("Transparent tag background")
+        self._tag_transparent_check.toggled.connect(self._on_tag_transparent_toggled)
+        layout.addWidget(self._tag_transparent_check)
+
+        self._tag_bg_picker = _ColorPicker("Tag Background Color", OVERLAY_LINE_COLOR.name())
+        self._tag_bg_picker.color_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._tag_bg_picker)
+
+        self._tag_text_picker = _ColorPicker("Tag Text Color", OVERLAY_OUTLINE_COLOR.name())
+        self._tag_text_picker.color_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._tag_text_picker)
 
         # Text-annotation only: background transparency and padding.
         self._text_transparency_label = _field_label("Text BG Transparency")
@@ -832,6 +853,7 @@ class MeasurementCustomizeMenu(QFrame):
             self._font_combo.setCurrentFont(QFont(meta.font_family))
         self._font_size_spin.setValue(round(meta.font_size) if meta.font_size > 0 else round(OVERLAY_LABEL_FONT_SIZE))
         self._tag_width_control.set_value(meta.tag_width)
+        self._sync_width_to_tag_width(meta.tag_width)
         show_scalebar = entry is not None and entry.category == "scalebar"
         self._scalebar_length_spin.setValue(meta.scalebar_length if meta.scalebar_length > 0 else 1.0)
         self._scalebar_thickness_control.set_value(meta.scalebar_thickness)
@@ -1009,6 +1031,16 @@ class MeasurementCustomizeMenu(QFrame):
             scalebar_position=self._scalebar_position_combo.currentData(),
             scalebar_show_bg=self._scalebar_bg_check.isChecked(),
         )
+
+    def _on_tag_width_changed(self, value: float) -> None:
+        self._sync_width_to_tag_width(value)
+        self._on_live_field_changed()
+
+    def _sync_width_to_tag_width(self, value: float) -> None:
+        """Widen the panel (never narrow it) so it's always at least as wide as the tag it's sizing — the description box, spanning the full content width, grows along with it (feature 7)."""
+        margin = 40  # scroll content's own left+right margins plus breathing room
+        self.setMinimumWidth(max(self._base_width, int(value) + margin))
+        self.adjustSize()
 
     def _on_live_field_changed(self, *_args: object) -> None:
         if self._index is not None and not self._loading:

@@ -429,6 +429,33 @@ class MeasurementsWidget(QWidget):
         default_unit_row.addWidget(self._default_decimals_spin)
         layout.addLayout(default_unit_row)
 
+        font_row = QHBoxLayout()
+        font_row.addWidget(_field_label("Font"))
+        self._default_font_combo = QFontComboBox()
+        # Non-scalable (bitmap) fonts like "Fixedsys" make DirectWrite log a
+        # warning to the console whenever they're scrolled past on Windows —
+        # excluding them from the list avoids hitting one at all.
+        self._default_font_combo.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
+        block_wheel(self._default_font_combo)
+        self._default_font_combo.currentFontChanged.connect(self._on_default_meta_edited)
+        font_row.addWidget(self._default_font_combo, 1)
+        layout.addLayout(font_row)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(_field_label("Font Size"))
+        self._default_font_size_spin = QSpinBox()
+        self._default_font_size_spin.setRange(6, 96)
+        self._default_font_size_spin.setValue(13)
+        block_wheel(self._default_font_size_spin)
+        self._default_font_size_spin.valueChanged.connect(self._on_default_meta_edited)
+        size_row.addWidget(self._default_font_size_spin, 1)
+        layout.addLayout(size_row)
+
+        layout.addWidget(_field_label("Tag Width (0 = auto)"))
+        self._default_tag_width_control = _ThicknessControl(0.0, 400.0)
+        self._default_tag_width_control.value_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._default_tag_width_control)
+
         self._default_show_area_check = QCheckBox("Show area (circles)")
         self._default_show_area_check.toggled.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_show_area_check)
@@ -454,29 +481,6 @@ class MeasurementsWidget(QWidget):
         self._default_tag_text_picker = _ColorPicker("Tag Text Color", OVERLAY_OUTLINE_COLOR.name())
         self._default_tag_text_picker.color_changed.connect(self._on_default_meta_edited)
         layout.addWidget(self._default_tag_text_picker)
-
-        font_row = QHBoxLayout()
-        font_row.addWidget(_field_label("Font"))
-        self._default_font_combo = QFontComboBox()
-        block_wheel(self._default_font_combo)
-        self._default_font_combo.currentFontChanged.connect(self._on_default_meta_edited)
-        font_row.addWidget(self._default_font_combo, 1)
-        layout.addLayout(font_row)
-
-        size_row = QHBoxLayout()
-        size_row.addWidget(_field_label("Font Size"))
-        self._default_font_size_spin = QSpinBox()
-        self._default_font_size_spin.setRange(6, 96)
-        self._default_font_size_spin.setValue(13)
-        block_wheel(self._default_font_size_spin)
-        self._default_font_size_spin.valueChanged.connect(self._on_default_meta_edited)
-        size_row.addWidget(self._default_font_size_spin, 1)
-        layout.addLayout(size_row)
-
-        layout.addWidget(_field_label("Tag Width (0 = auto)"))
-        self._default_tag_width_control = _ThicknessControl(0.0, 400.0)
-        self._default_tag_width_control.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_tag_width_control)
 
         self._default_indicator_check = QCheckBox("Show indicator line")
         self._default_indicator_check.setChecked(True)

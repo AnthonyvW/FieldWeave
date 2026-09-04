@@ -479,15 +479,10 @@ def apply_style(app: QApplication) -> None:
         }}
 
         /* Measurement tag/customize-menu title and description fields —
-           same bordered-field look as the rest of the app, just with
-           slightly rounded corners to match the floating popup they sit
-           in rather than a docked panel. */
-        QLineEdit#MeasurementCustomizeTitle {{
-            border-radius: 4px;
-        }}
-        QPlainTextEdit#MeasurementCustomizeDescription {{
-            border-radius: 4px;
-        }}
+           same bordered-field, square-cornered look as every other
+           QLineEdit/QPlainTextEdit in the app (see below); the popup is
+           its own rectangular window now, so there's no rounded frame
+           left to match. */
 
         /* Plain text edits (measurement descriptions, etc.) — same
            bordered-field look as QLineEdit, since Qt gives it no
@@ -501,13 +496,17 @@ def apply_style(app: QApplication) -> None:
         }}
 
         /* Measurement tab — customize-menu popup opened from a tag on
-           the preview itself. Needs an explicit background: unlike a
-           docked panel it floats directly over live video, so without
-           one it reads as fully transparent. */
+           the preview itself. Now a genuine top-level window rather than
+           a floating child of the preview, so it's styled like the rest
+           of the app's panels (the same window background and QGroupBox
+           border the Measurements tab itself uses) instead of the
+           preview-overlay look it had as a child widget — square
+           corners throughout, since a rectangular OS window has none of
+           its own to match. */
         QFrame#MeasurementCustomizeMenu {{
-            background: rgb(245, 246, 248);
-            border: 1px solid rgba(0, 0, 0, 0.25);
-            border-radius: 4px;
+            background: rgb(215, 218, 222);
+            border: 1px solid rgb(180, 180, 180);
+            border-radius: 0px;
         }}
 
         /* Field labels within that popup — Qt stylesheets have no
