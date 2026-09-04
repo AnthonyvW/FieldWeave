@@ -147,6 +147,11 @@ class MeasurementKind:
     # "two_circle" category: (center1, r1_px, center2, r2_px) — two
     # circles whose center-to-center distance is the measurement.
     two_circle_geometry: Callable[[tuple[Point2D, ...], tuple[int, int]], tuple[Point2D, float, Point2D, float] | None] | None = None
+    # "two_circle" category: the circles determinable from the points so
+    # far (1 while the second is still being placed, 2 once complete) — so
+    # each circle previews as its own points arrive rather than the whole
+    # thing waiting on the last click.
+    two_circle_partial: Callable[[tuple[Point2D, ...], tuple[int, int]], list[CircleGeometry]] | None = None
     # True when segment_pairs' segments are actually consecutive (share
     # an endpoint, like "3 Point Angle"'s two legs at the vertex) — drawn
     # as one polyline (proper joint, matching "Arbitrary Line") instead
@@ -1165,27 +1170,33 @@ def _polygon_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
 # ----------------------------------------------------------------------
 
 
-def _annulus_from(center: Point2D, outer_r: float, inner_r: float) -> tuple[Point2D, float, float] | None:
-    if outer_r < _DEGENERATE_EPSILON or inner_r < _DEGENERATE_EPSILON:
+def _annulus_pair(center: Point2D, outer_r: float, inner_r: float) -> tuple[Point2D, float, float] | None:
+    """(center, larger_r, smaller_r) — or, when only the outer radius is
+    known yet (inner_r ~0, still being placed), (center, outer_r, 0.0) so
+    the outer circle can preview on its own. None only if even the outer
+    radius is degenerate."""
+    if outer_r < _DEGENERATE_EPSILON:
         return None
+    if inner_r < _DEGENERATE_EPSILON:
+        return center, outer_r, 0.0
     lo, hi = sorted((outer_r, inner_r))
     return center, hi, lo
 
 
 def _radius_annulus_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, float] | None:
-    if len(points) < 3:
+    if len(points) < 2:
         return None
     full_w, full_h = full_dims
     if full_w <= 0 or full_h <= 0:
         return None
     cx, cy = points[0][0] * full_w, points[0][1] * full_h
-    r1 = math.hypot(points[1][0] * full_w - cx, points[1][1] * full_h - cy)
-    r2 = math.hypot(points[2][0] * full_w - cx, points[2][1] * full_h - cy)
-    return _annulus_from(points[0], r1, r2)
+    outer_r = math.hypot(points[1][0] * full_w - cx, points[1][1] * full_h - cy)
+    inner_r = math.hypot(points[2][0] * full_w - cx, points[2][1] * full_h - cy) if len(points) >= 3 else 0.0
+    return _annulus_pair(points[0], outer_r, inner_r)
 
 
 def _diameter_annulus_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, float] | None:
-    if len(points) < 3:
+    if len(points) < 2:
         return None
     full_w, full_h = full_dims
     if full_w <= 0 or full_h <= 0:
@@ -1195,20 +1206,20 @@ def _diameter_annulus_geometry(points: tuple[Point2D, ...], full_dims: tuple[int
     center_px = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
     outer_r = math.hypot(b[0] - a[0], b[1] - a[1]) / 2
     center = (center_px[0] / full_w, center_px[1] / full_h)
-    inner_r = math.hypot(points[2][0] * full_w - center_px[0], points[2][1] * full_h - center_px[1])
-    return _annulus_from(center, outer_r, inner_r)
+    inner_r = math.hypot(points[2][0] * full_w - center_px[0], points[2][1] * full_h - center_px[1]) if len(points) >= 3 else 0.0
+    return _annulus_pair(center, outer_r, inner_r)
 
 
 def _three_point_annulus_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, float] | None:
-    if len(points) < 4:
+    if len(points) < 3:
         return None
     outer = _circle_geometry_from_three_points(points[:3], full_dims)
     if outer is None:
         return None
     center, outer_r = outer
     full_w, full_h = full_dims
-    inner_r = math.hypot(points[3][0] * full_w - center[0] * full_w, points[3][1] * full_h - center[1] * full_h)
-    return _annulus_from(center, outer_r, inner_r)
+    inner_r = math.hypot(points[3][0] * full_w - center[0] * full_w, points[3][1] * full_h - center[1] * full_h) if len(points) >= 4 else 0.0
+    return _annulus_pair(center, outer_r, inner_r)
 
 
 def _radius_annulus_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
@@ -1235,34 +1246,52 @@ def _three_point_annulus_resolve(points: list[Point2D]) -> tuple[Point2D, ...] |
 # ----------------------------------------------------------------------
 
 
+def _two_circle_partial(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int], per_circle: int,
+    builder: Callable[[tuple[Point2D, ...], tuple[int, int]], CircleGeometry | None],
+) -> list[CircleGeometry]:
+    """The circles determinable so far: each *per_circle*-point slice fed through *builder*, stopping at the first slice that isn't complete or doesn't resolve."""
+    circles = []
+    for start in (0, per_circle):
+        slice_ = points[start:start + per_circle]
+        if len(slice_) < per_circle:
+            break
+        circle = builder(slice_, full_dims)
+        if circle is None:
+            break
+        circles.append(circle)
+    return circles
+
+
+def _radius_two_circle_partial(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> list[CircleGeometry]:
+    return _two_circle_partial(points, full_dims, 2, _circle_geometry_from_center_edge)
+
+
+def _diameter_two_circle_partial(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> list[CircleGeometry]:
+    return _two_circle_partial(points, full_dims, 2, _circle_geometry_from_diameter)
+
+
+def _three_point_two_circle_partial(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> list[CircleGeometry]:
+    return _two_circle_partial(points, full_dims, 3, _circle_geometry_from_three_points)
+
+
+def _two_circle_full(circles: list[CircleGeometry]) -> tuple[Point2D, float, Point2D, float] | None:
+    if len(circles) < 2:
+        return None
+    (c1, r1), (c2, r2) = circles[0], circles[1]
+    return c1, r1, c2, r2
+
+
 def _radius_two_circle_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, Point2D, float] | None:
-    if len(points) < 4:
-        return None
-    c1 = _circle_geometry_from_center_edge(points[:2], full_dims)
-    c2 = _circle_geometry_from_center_edge(points[2:4], full_dims)
-    if c1 is None or c2 is None:
-        return None
-    return c1[0], c1[1], c2[0], c2[1]
+    return _two_circle_full(_radius_two_circle_partial(points, full_dims))
 
 
 def _diameter_two_circle_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, Point2D, float] | None:
-    if len(points) < 4:
-        return None
-    c1 = _circle_geometry_from_diameter(points[:2], full_dims)
-    c2 = _circle_geometry_from_diameter(points[2:4], full_dims)
-    if c1 is None or c2 is None:
-        return None
-    return c1[0], c1[1], c2[0], c2[1]
+    return _two_circle_full(_diameter_two_circle_partial(points, full_dims))
 
 
 def _three_point_two_circle_geometry(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float, Point2D, float] | None:
-    if len(points) < 6:
-        return None
-    c1 = _circle_geometry_from_three_points(points[:3], full_dims)
-    c2 = _circle_geometry_from_three_points(points[3:6], full_dims)
-    if c1 is None or c2 is None:
-        return None
-    return c1[0], c1[1], c2[0], c2[1]
+    return _two_circle_full(_three_point_two_circle_partial(points, full_dims))
 
 
 def _two_point_pair_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
@@ -1463,14 +1492,17 @@ DEFAULT_REGISTRY.register(MeasurementKind(
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Radius 2 Circle", required_points=4, category="two_circle",
     resolve=_two_point_pair_resolve, two_circle_geometry=_radius_two_circle_geometry,
+    two_circle_partial=_radius_two_circle_partial,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="3pt 2 Circle", required_points=6, category="two_circle",
     resolve=_three_point_two_circle_resolve, two_circle_geometry=_three_point_two_circle_geometry,
+    two_circle_partial=_three_point_two_circle_partial,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Diameter 2 Circle", required_points=4, category="two_circle",
     resolve=_two_point_pair_resolve, two_circle_geometry=_diameter_two_circle_geometry,
+    two_circle_partial=_diameter_two_circle_partial,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real

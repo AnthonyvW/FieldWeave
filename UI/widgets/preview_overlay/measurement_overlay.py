@@ -2086,7 +2086,10 @@ class MeasurementOverlay(Overlay):
 
             self._draw_measurement(painter, rect, kind, display_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True)
 
-            if entry.category in ("circle", "ellipse", "arc", "annulus", "two_circle") and len(preview_points) >= 2:
+            # Annulus and two-circle aren't listed here: they preview each
+            # sub-circle on its own as its points arrive (see their
+            # partial geometry), so a straight guide would just clutter.
+            if entry.category in ("circle", "ellipse", "arc") and len(preview_points) >= 2:
                 required = entry.required_points or len(preview_points)
                 if len(preview_points) < required:
                     # Not enough points for a circle/ellipse/arc yet — a
@@ -2416,21 +2419,22 @@ class MeasurementOverlay(Overlay):
         fill_color: QColor | None = None,
     ) -> None:
         entry = DEFAULT_REGISTRY.get(kind)
-        geometry = entry.two_circle_geometry(points, full_dims) if entry is not None and entry.two_circle_geometry is not None else None
-        if geometry is None:
+        if entry is None or entry.two_circle_partial is None:
             return
-        c1, r1, c2, r2 = geometry
-        for center, radius_px in ((c1, r1), (c2, r2)):
+        circles = entry.two_circle_partial(points, full_dims)
+        for center, radius_px in circles:
             self._draw_circle_at(
                 painter, rect, center, radius_px, full_dims, stroke_scale,
                 dashed=dashed, line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width, dash_style=dash_style, fill_color=fill_color,
             )
-        # A solid line between the two centers — the distance the tag reports.
-        self._draw_polyline(
-            painter, rect, (c1, c2), stroke_scale, dashed=dashed,
-            line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
-        )
+        # A solid line between the two centers — the distance the tag
+        # reports — once both circles exist.
+        if len(circles) >= 2:
+            self._draw_polyline(
+                painter, rect, (circles[0][0], circles[1][0]), stroke_scale, dashed=dashed,
+                line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
+            )
 
     def _draw_stroke(
         self,
