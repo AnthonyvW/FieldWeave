@@ -4,7 +4,7 @@ from PySide6.QtCore import QEvent, QObject, Qt, Signal, QPoint, QPointF, QSize
 from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 
@@ -401,6 +401,7 @@ class MeasurementCustomizeMenu(QFrame):
     applied = Signal(int, object)  # measurement index, MeasurementMeta
     preview_changed = Signal(int, object)  # measurement index, MeasurementMeta — live, while still open
     cancelled = Signal()
+    delete_requested = Signal(int)  # measurement index — after the user confirms deletion
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -421,9 +422,19 @@ class MeasurementCustomizeMenu(QFrame):
         self._manually_moved: bool = False
         self._drag_origin: QPoint | None = None
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # The many fields live in a scroll area so a tall set of options
+        # never pushes the Apply/Cancel/Delete footer off-screen — see the
+        # footer built at the end of __init__.
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(8)
+        self._scroll_content = content
+        self._outer_layout = outer_layout
 
         layout.addWidget(_field_label("Title"))
         self._title_edit = QLineEdit()
@@ -510,6 +521,22 @@ class MeasurementCustomizeMenu(QFrame):
         self._build_tag_style_controls(layout)
         self._build_line_style_controls(layout)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll, 1)
+
+        # Footer stays fixed below the scroll area so its buttons are
+        # always reachable, however tall the field list gets.
+        footer = QVBoxLayout()
+        footer.setContentsMargins(14, 8, 14, 14)
+        footer.setSpacing(8)
+        self._delete_button = QPushButton("Delete measurement")
+        self._delete_button.setObjectName("MeasurementDeleteButton")
+        self._delete_button.clicked.connect(self._on_delete_clicked)
+        footer.addWidget(self._delete_button)
         button_row = QHBoxLayout()
         apply_button = QPushButton("Apply")
         apply_button.clicked.connect(self._on_apply_clicked)
@@ -517,8 +544,10 @@ class MeasurementCustomizeMenu(QFrame):
         cancel_button.clicked.connect(self._on_cancel_clicked)
         button_row.addWidget(apply_button)
         button_row.addWidget(cancel_button)
-        layout.addLayout(button_row)
+        footer.addLayout(button_row)
+        outer_layout.addLayout(footer)
 
+        self.setMaximumHeight(560)
         self.hide()
 
     def _build_tag_style_controls(self, layout: QVBoxLayout) -> None:
@@ -846,6 +875,22 @@ class MeasurementCustomizeMenu(QFrame):
         self._original_meta = None
         self.hide()
         self.applied.emit(index, self._current_meta())
+
+    def _on_delete_clicked(self) -> None:
+        if self._index is None:
+            return
+        confirm = QMessageBox.question(
+            self, "Delete measurement", "Delete this measurement?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        index = self._index
+        self._index = None
+        self._original_meta = None
+        self.hide()
+        self.delete_requested.emit(index)
 
     def _on_cancel_clicked(self) -> None:
         if self._index is not None and self._original_meta is not None:

@@ -228,8 +228,13 @@ class MeasurementOverlay(Overlay):
         # drops out.
         self._label_boxes: dict[int, QRectF] = {}
         self._delete_boxes: dict[int, QRectF] = {}
+        # Secondary (extra_measures) tag boxes, keyed by (measurement
+        # index, extra index), so hovering one and pressing Delete can
+        # dismiss just that tag — see delete_hovered_extra.
+        self._extra_label_boxes: dict[tuple[int, int], QRectF] = {}
         self._hovered_index: int | None = None
         self._hover_delete: bool = False
+        self._hovered_extra: tuple[int, int] | None = None
 
         # Which measurement's anchor points are drawn — only the one
         # the cursor is currently near (see update_proximity), plus
@@ -533,18 +538,53 @@ class MeasurementOverlay(Overlay):
     def hover_delete(self) -> bool:
         return self._hover_delete
 
+    @property
+    def hovered_extra(self) -> tuple[int, int] | None:
+        """Which secondary (extra_measures) tag the cursor is over, as (measurement index, extra index), or None."""
+        return self._hovered_extra
+
     def clear_hover(self) -> bool:
-        changed = self._hovered_index is not None
+        changed = self._hovered_index is not None or self._hovered_extra is not None
         self._hovered_index = None
         self._hover_delete = False
+        self._hovered_extra = None
         return changed
 
     def update_hover(self, pos: QPoint, rect: QRect, widget_rect: QRect) -> bool:
-        """Recompute which tag (if any) *pos* is over, and whether it's over that tag's delete glyph. Returns True if either changed, so the caller knows whether to repaint."""
+        """Recompute which tag (if any) *pos* is over, and whether it's over that tag's delete glyph. Returns True if anything changed, so the caller knows whether to repaint."""
         index, over_delete = self._hit_test_tag(pos, rect, widget_rect)
-        changed = index != self._hovered_index or over_delete != self._hover_delete
-        self._hovered_index, self._hover_delete = index, over_delete
+        # A primary tag wins over a secondary one where they overlap.
+        extra = self._hit_test_extra(pos, rect, widget_rect) if index is None else None
+        changed = (
+            index != self._hovered_index
+            or over_delete != self._hover_delete
+            or extra != self._hovered_extra
+        )
+        self._hovered_index, self._hover_delete, self._hovered_extra = index, over_delete, extra
         return changed
+
+    def _hit_test_extra(self, pos: QPoint, rect: QRect, widget_rect: QRect) -> tuple[int, int] | None:
+        if self._zoom_handler is None:
+            return None
+        for key, box in self._extra_label_boxes.items():
+            if self._screen_rect(box, rect, widget_rect).contains(QPointF(pos)):
+                return key
+        return None
+
+    def delete_hovered_extra(self) -> bool:
+        """Dismiss the hovered secondary tag by recording its index in the measurement's meta.hidden_extra. Returns True if one was hovered and dismissed."""
+        if self._hovered_extra is None:
+            return False
+        m_index, extra_index = self._hovered_extra
+        meta = self.measurement_meta(m_index)
+        if meta is None:
+            return False
+        if extra_index not in meta.hidden_extra:
+            self.set_measurement_meta(
+                m_index, meta._replace(hidden_extra=tuple(sorted(set(meta.hidden_extra) | {extra_index})))
+            )
+        self._hovered_extra = None
+        return True
 
     def label_screen_rect(self, index: int, rect: QRect, widget_rect: QRect) -> QRectF | None:
         """Screen-space box of measurement *index*'s tag from the most recent draw(), or None if it isn't currently tagged — used to anchor MeasurementCustomizeMenu under the actual tag rather than wherever within it the opening click happened to land."""
@@ -1020,6 +1060,7 @@ class MeasurementOverlay(Overlay):
 
         self._label_boxes = {}
         self._delete_boxes = {}
+        self._extra_label_boxes = {}
 
         for index, measurement in enumerate(self.measurements):
             meta = measurement.meta
@@ -1074,23 +1115,25 @@ class MeasurementOverlay(Overlay):
         # hides only the tag, not the geometry drawn above.
         for index, measurement in enumerate(self.measurements):
             self._draw_measurement_label(painter, rect, index, measurement, scale_x, scale_y, full_dims)
-            self._draw_extra_measure_labels(painter, rect, measurement, scale_x, scale_y, full_dims)
+            self._draw_extra_measure_labels(painter, rect, index, measurement, scale_x, scale_y, full_dims)
 
     def _draw_extra_measure_labels(
         self,
         painter: QPainter,
         rect: QRect,
+        index: int,
         measurement: Measurement,
         scale_x: float,
         scale_y: float,
         full_dims: tuple[int, int] | None,
     ) -> None:
         """
-        Secondary, non-interactive distance tags a kind exposes via
+        Secondary distance tags a kind exposes via
         MeasurementKind.extra_measures — every gap between an arbitrary
-        parallel's lines, or the perpendicular leg of a 3pt perp. Not
-        recorded into _label_boxes (so not hoverable/clickable), unlike
-        the one primary tag.
+        parallel's lines, or the perpendicular leg of a 3pt perp. Each is
+        recorded into _extra_label_boxes so hovering one and pressing
+        Delete can dismiss it (meta.hidden_extra); one already dismissed
+        is skipped entirely.
         """
         meta = measurement.meta
         if meta.hidden or full_dims is None:
@@ -1103,14 +1146,17 @@ class MeasurementOverlay(Overlay):
         if dims is None or not self._can_measure(unit):
             return
         decimals = meta.decimal_places
-        for anchor, distance_px in entry.extra_measures(measurement.points, dims):
+        for extra_index, (anchor, distance_px) in enumerate(entry.extra_measures(measurement.points, dims)):
+            if extra_index in meta.hidden_extra:
+                continue
             text = format_length(distance_px, self.dpi or 1.0, unit, decimals)
-            self._draw_label(
+            box, _ = self._draw_label(
                 painter, rect, anchor, text, scale_x, scale_y,
                 bg_color=self._resolve_color(meta.tag_background_color, OVERLAY_LINE_COLOR),
                 text_color=self._resolve_color(meta.tag_text_color, OVERLAY_OUTLINE_COLOR),
                 transparent_bg=meta.tag_background_transparent,
             )
+            self._extra_label_boxes[(index, extra_index)] = box
 
     def _measurement_center(
         self, kind: str, points: tuple[tuple[float, float], ...], full_dims: tuple[int, int]

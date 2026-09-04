@@ -82,6 +82,10 @@ class MeasurementMeta(NamedTuple):
     # the fill's alpha independently of the whole-measurement opacity.
     fill_color: str = ""
     fill_opacity: float = 0.3
+    # Indices (into a kind's extra_measures list) of secondary tags the
+    # user has dismissed by hovering one and pressing Delete — see
+    # MeasurementOverlay._draw_extra_measure_labels.
+    hidden_extra: tuple[int, ...] = ()
 
 
 DEFAULT_META = MeasurementMeta()

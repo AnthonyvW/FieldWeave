@@ -40,6 +40,7 @@ class MeasurementInteraction:
         self._menu.applied.connect(self._on_menu_closed)
         self._menu.preview_changed.connect(self._on_meta_changed)
         self._menu.cancelled.connect(self._on_menu_closed)
+        self._menu.delete_requested.connect(self._on_delete_requested)
 
     def set_active(self, active: bool) -> None:
         """
@@ -114,10 +115,22 @@ class MeasurementInteraction:
             self._video_label.update()
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
-        """True if Delete/Backspace removed the hovered tag's measurement — OverlayLabel should accept the event rather than let it fall through to any other shortcut handling."""
-        if not self._active or self._overlay.hovered_index is None:
+        """
+        True if Delete/Backspace acted on a hovered tag — dismissing a
+        hovered secondary tag if there is one, otherwise removing the
+        hovered measurement outright. OverlayLabel should then accept the
+        event rather than let it fall through to other shortcut handling.
+        """
+        if not self._active:
             return False
         if event.key() not in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            return False
+        if self._overlay.hovered_extra is not None:
+            if self._overlay.delete_hovered_extra():
+                self._video_label.update()
+                return True
+            return False
+        if self._overlay.hovered_index is None:
             return False
         self._overlay.remove_measurement(self._overlay.hovered_index)
         self._close_for_removed_measurement()
@@ -167,6 +180,12 @@ class MeasurementInteraction:
 
     def _on_menu_closed(self, *_args: object) -> None:
         self._popup_tracking_index = None
+
+    def _on_delete_requested(self, index: int) -> None:
+        """The customize menu's own "Delete measurement" button (already confirmed) — remove it and drop the now-stale popup."""
+        self._overlay.remove_measurement(index)
+        self._close_for_removed_measurement()
+        self._video_label.update()
 
     def _close_for_removed_measurement(self) -> None:
         """
