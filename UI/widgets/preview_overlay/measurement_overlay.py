@@ -97,6 +97,12 @@ _DASH_MULTIPLIERS: dict[str, list[float] | None] = {
 }
 _DASH_REFERENCE_MIN = 3.0  # keeps a thin line's dashes/gaps from shrinking below a legible size
 
+# Screen-pixel/degree tolerance below which a value is treated as zero —
+# used only by _draw_angle_indicator's own screen-space geometry (a
+# coincident near-point/anchor, or a near-zero sweep), distinct from
+# MeasurementKind's fraction/pixel-space _DEGENERATE_EPSILON.
+_INDICATOR_EPSILON = 1e-6
+
 # Minimum wrap width for a tag's description block, so a short title (or
 # none) doesn't force it down to one word per line — see
 # MeasurementOverlay._draw_label.
@@ -973,6 +979,8 @@ class MeasurementOverlay(Overlay):
                     line_color=line_color, line_width=line_width,
                     outline_color=outline_color, outline_width=outline_width,
                 )
+            if entry is not None and entry.category == "angle" and meta.show_angle_indicator:
+                self._draw_angle_indicator(painter, rect, measurement.kind, measurement.points, stroke_scale, line_color)
             painter.restore()
             if index == self._near_index or index == self._drag_measurement_index:
                 for point in measurement.points:
@@ -1063,18 +1071,29 @@ class MeasurementOverlay(Overlay):
                 outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
             )
         elif entry.category == "angle" and entry.segment_pairs is not None:
-            # Each segment drawn independently rather than as one
-            # polyline — correct either way for "3 Point Angle" (whose
-            # segments happen to be consecutive), and necessary for
-            # "4 Point Angle" (two genuinely disconnected segments,
-            # which a single polyline would wrongly join at the middle).
-            for pair in entry.segment_pairs(points):
+            if entry.connected_segments:
+                # The segments share an endpoint (e.g. "3 Point Angle"'s
+                # vertex) — draw as one polyline over the raw points, the
+                # same proper-joint union "Arbitrary Line" uses, rather
+                # than two independently-stroked segments that would
+                # double up the stroke/outline right at the joint.
                 self._draw_polyline(
-                    painter, rect, pair, stroke_scale, dashed=dashed,
+                    painter, rect, points, stroke_scale, dashed=dashed,
                     line_color=line_color, line_width=line_width,
                     outline_color=outline_color, outline_width=outline_width,
                     dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
                 )
+            else:
+                # Genuinely disconnected segments (e.g. "4 Point Angle"'s
+                # two independent lines) — drawing them as one polyline
+                # would wrongly join them at the middle.
+                for pair in entry.segment_pairs(points):
+                    self._draw_polyline(
+                        painter, rect, pair, stroke_scale, dashed=dashed,
+                        line_color=line_color, line_width=line_width,
+                        outline_color=outline_color, outline_width=outline_width,
+                        dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
+                    )
         elif entry.category == "arc" and full_dims is not None:
             # Drawn as a many-segment polyline sampled along the arc —
             # reuses the same stroke/dash/cap machinery as any other
@@ -1202,6 +1221,66 @@ class MeasurementOverlay(Overlay):
             painter.setPen(pen)
             for a, b in segments:
                 painter.drawLine(a, b)
+
+    def _draw_angle_indicator(
+        self, painter: QPainter, rect: QRect, kind: str, points: tuple[tuple[float, float], ...],
+        stroke_scale: float, color: QColor,
+    ) -> None:
+        """
+        A dashed guide from each leg's own nearer end out to the angle's
+        anchor (skipped for "3 Point Angle", whose legs already meet
+        there), plus a small curved arc at the anchor sweeping between
+        the two legs' directions — see meta.show_angle_indicator.
+
+        Fixed on-screen size UI chrome, not image content, so — like
+        ``_draw_midpoint_marker`` — everything here is computed directly
+        from screen ("rect") positions, with only the radius counter-
+        scaled by *stroke_scale* to hold it constant across zoom; no
+        separate true-pixel-space angle math is needed, since ``rect``
+        space shares the source frame's own aspect ratio.
+        """
+        entry = DEFAULT_REGISTRY.get(kind)
+        if entry is None or entry.angle_anchor is None or entry.segment_pairs is None:
+            return
+        legs = entry.segment_pairs(points)
+        if len(legs) < 2:
+            return
+        anchor = self._to_point(rect, entry.angle_anchor(points))
+
+        far_points = []
+        guide_pen = QPen(color)
+        guide_pen.setWidthF(1.0 / stroke_scale)
+        guide_pen.setStyle(Qt.PenStyle.CustomDashLine)
+        guide_pen.setDashPattern([OVERLAY_DASH_LENGTH, OVERLAY_DASH_GAP])
+        for leg_a, leg_b in legs:
+            a_pt, b_pt = self._to_point(rect, leg_a), self._to_point(rect, leg_b)
+            near, far = (a_pt, b_pt) if self._distance(anchor, a_pt) <= self._distance(anchor, b_pt) else (b_pt, a_pt)
+            far_points.append(far)
+            if not entry.connected_segments and self._distance(anchor, near) > _INDICATOR_EPSILON:
+                painter.setPen(guide_pen)
+                painter.drawLine(near, anchor)
+
+        if len(far_points) < 2:
+            return
+        angle1 = math.degrees(math.atan2(far_points[0].y() - anchor.y(), far_points[0].x() - anchor.x()))
+        angle2 = math.degrees(math.atan2(far_points[1].y() - anchor.y(), far_points[1].x() - anchor.x()))
+        sweep = ((angle2 - angle1 + 180) % 360) - 180
+        if abs(sweep) < _INDICATOR_EPSILON:
+            return
+
+        radius = (OVERLAY_POINT_RADIUS * 2.2) / stroke_scale
+        samples = max(6, round(abs(sweep) / 8))
+        arc_pen = QPen(color)
+        arc_pen.setWidthF(1.2 / stroke_scale)
+        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc_pen)
+        prev = None
+        for i in range(samples + 1):
+            a = math.radians(angle1 + sweep * i / samples)
+            p = QPointF(anchor.x() + radius * math.cos(a), anchor.y() + radius * math.sin(a))
+            if prev is not None:
+                painter.drawLine(prev, p)
+            prev = p
 
     def _draw_measurement_label(
         self,
@@ -1388,6 +1467,17 @@ class MeasurementOverlay(Overlay):
                 angle_deg = entry.angle_value(points, full_dims)
                 if angle_deg is not None:
                     suffix = f"{angle_deg:.{decimals}f}\u00b0"
+            if meta.show_leg_lengths and dims is not None and entry.segment_pairs is not None:
+                # Only once both legs are actually placed (all 2
+                # expected segments present) \u2014 a partial draft, still
+                # being placed, skips this rather than showing just one
+                # leg's length.
+                legs = entry.segment_pairs(points)
+                if len(legs) >= 2:
+                    leg_lengths = [self._length_suffix(pair, dims, unit, decimals) for pair in legs]
+                    if all(leg is not None for leg in leg_lengths):
+                        legs_text = " / ".join(leg_lengths)
+                        suffix = f"{suffix} \u00b7 {legs_text}" if suffix else legs_text
         elif entry.category == "arc":
             if full_dims is None:
                 return None

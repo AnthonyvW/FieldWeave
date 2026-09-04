@@ -108,6 +108,13 @@ class MeasurementKind:
     segment_pairs: Callable[[tuple[Point2D, ...]], list[tuple[Point2D, Point2D]]] | None = None
     angle_value: Callable[[tuple[Point2D, ...], tuple[int, int]], float | None] | None = None
     angle_anchor: Callable[[tuple[Point2D, ...]], Point2D] | None = None
+    # True when segment_pairs' segments are actually consecutive (share
+    # an endpoint, like "3 Point Angle"'s two legs at the vertex) — drawn
+    # as one polyline (proper joint, matching "Arbitrary Line") instead
+    # of independently-stroked segments, which would double up the
+    # stroke/outline where they meet. False (e.g. "4 Point Angle") means
+    # the segments are genuinely disconnected and must stay independent.
+    connected_segments: bool = False
 
 
 class MeasurementKindRegistry:
@@ -434,6 +441,25 @@ def _ellipse_geometry_five_point(points: tuple[Point2D, ...], full_dims: tuple[i
 # ----------------------------------------------------------------------
 
 
+def _line_intersection(p0: Point2D, p1: Point2D, p2: Point2D, p3: Point2D) -> Point2D | None:
+    """
+    Where the infinite lines through (p0,p1) and (p2,p3) cross, or None
+    if they're parallel — line-line intersection is affine-invariant
+    (survives the frame's own anisotropic aspect ratio), so this works
+    directly in fraction space without needing full_dims, unlike the
+    angle *value* itself (see _four_point_angle_value).
+    """
+    x1, y1 = p0
+    x2, y2 = p1
+    x3, y3 = p2
+    x4, y4 = p3
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < _DEGENERATE_EPSILON:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    return x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+
+
 def _angle_between_vectors(u: Point2D, v: Point2D) -> float | None:
     """Unsigned angle in degrees (0-180) between *u* and *v*, or None if either is a zero vector."""
     mag = math.hypot(*u) * math.hypot(*v)
@@ -513,6 +539,11 @@ def _four_point_angle_value(points: tuple[Point2D, ...], full_dims: tuple[int, i
 
 
 def _four_point_angle_anchor(points: tuple[Point2D, ...]) -> Point2D:
+    """The tag anchors at the two lines' own intersection ("placed by the angle") whenever they actually cross; only genuinely parallel lines fall back to the plain centroid of what's been placed."""
+    if len(points) >= 4:
+        intersection = _line_intersection(points[0], points[1], points[2], points[3])
+        if intersection is not None:
+            return intersection
     xs = [p[0] for p in points[:4]]
     ys = [p[1] for p in points[:4]]
     return sum(xs) / len(xs), sum(ys) / len(ys)
@@ -668,6 +699,7 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     name="3 Point Angle", required_points=3, category="angle",
     resolve=_three_point_angle_resolve, segment_pairs=_three_point_angle_segments,
     angle_value=_three_point_angle_value, angle_anchor=_three_point_angle_anchor,
+    connected_segments=True,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Two independent, disconnected segments — showing the angle
