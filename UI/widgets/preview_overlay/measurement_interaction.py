@@ -131,6 +131,9 @@ class MeasurementInteraction:
                 self._video_label.update()
                 return True
             return False
+        if self._overlay.delete_hovered_count_point():
+            self._video_label.update()
+            return True
         if self._overlay.hovered_index is None:
             return False
         self._overlay.remove_measurement(self._overlay.hovered_index)

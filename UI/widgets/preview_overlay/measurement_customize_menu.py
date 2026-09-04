@@ -867,12 +867,19 @@ class MeasurementCustomizeMenu(QFrame):
         self._midpoint_picker.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._midpoint_picker)
 
-        # "Point" only — its own marker shape, in place of a line's caps.
+        # "Point" and "Count" — the placed marker's own shape, in place of
+        # a line's caps.
         self._point_style_picker = _StylePicker(
             "Point Style", [(style, _point_style_icon(style)) for style in MEASUREMENT_POINT_STYLES]
         )
         self._point_style_picker.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._point_style_picker)
+
+        # "Count" only — hides every point's number at once; a specific
+        # point is instead removed by hovering it and pressing Delete.
+        self._count_hide_numbers_check = QCheckBox("Hide Numbers")
+        self._count_hide_numbers_check.toggled.connect(self._on_live_field_changed)
+        layout.addWidget(self._count_hide_numbers_check)
 
         # Caps are a line-only decoration (MeasurementOverlay never
         # passes start_cap/end_cap when drawing a circle) — open_for
@@ -1004,30 +1011,40 @@ class MeasurementCustomizeMenu(QFrame):
             widget.setVisible(show_scalebar)
 
         show_text = entry is not None and entry.category == "text"
+        is_count = entry is not None and entry.category == "count"
         is_annotation = show_text or show_scalebar
+        # A "count" group has no tag at all (its numbers are drawn
+        # directly — see _draw_count_numbers) — folded in with the two
+        # annotation kinds for the tag-only fields that don't apply to it
+        # either (title/description/unit/tag width), but NOT for line
+        # color/thickness, which it still uses for its point markers.
+        no_tag = is_annotation or is_count
         # A text annotation's title IS its drawn content — a multi-line,
         # optionally-bold editor replaces the single-line title/description;
         # a scale bar has neither a title nor a free-form description tag.
         self._title_label.setText("Text Contents" if show_text else "Title")
-        self._title_label.setVisible(not show_scalebar)
-        self._title_edit.setVisible(not is_annotation)
+        self._title_label.setVisible(not show_scalebar and not is_count)
+        self._title_edit.setVisible(not no_tag)
         self._text_contents_edit.setVisible(show_text)
         self._text_bold_check.setVisible(show_text)
-        self._description_label.setVisible(not is_annotation)
-        self._description_edit.setVisible(not is_annotation)
-        # Neither annotation carries a length tag, so its show/hide-tag and
-        # always-show-description toggles don't apply.
-        self._always_show_description_check.setVisible(not is_annotation)
-        self._hidden_check.setVisible(not is_annotation)
+        self._description_label.setVisible(not no_tag)
+        self._description_edit.setVisible(not no_tag)
+        # Neither annotation (nor a tagless "count" group) carries a
+        # length tag, so its show/hide-tag and always-show-description
+        # toggles don't apply.
+        self._always_show_description_check.setVisible(not no_tag)
+        self._hidden_check.setVisible(not no_tag)
         # A text annotation has no measured value at all; a scale bar has
         # its own Unit combo on the Bar Length row instead (and no
-        # separate decimal-places setting), so this generic Unit/Decimals
-        # row is only for ordinary measurements.
-        self._unit_container.setVisible(not is_annotation)
-        # An auto-sizing tag width is meaningless for a free-drawn text box
-        # or a scale bar (each sizes to its own content).
-        self._tag_width_label.setVisible(not is_annotation)
-        self._tag_width_control.setVisible(not is_annotation)
+        # separate decimal-places setting); a "count" group's points have
+        # nothing to measure either — so this generic Unit/Decimals row is
+        # only for ordinary measurements.
+        self._unit_container.setVisible(not no_tag)
+        # An auto-sizing tag width is meaningless for a free-drawn text box,
+        # a scale bar (each sizes to its own content), or a tagless "count"
+        # group.
+        self._tag_width_label.setVisible(not no_tag)
+        self._tag_width_control.setVisible(not no_tag)
         # A margin control serves both the text box's padding and the
         # scale bar's inset; hidden for every ordinary measurement tag.
         self._text_margin_control.set_value(meta.text_margin)
@@ -1046,10 +1063,11 @@ class MeasurementCustomizeMenu(QFrame):
         # annotation strokes an ordinary line at all.
         self._line_color_picker.setVisible(not is_annotation)
         self._scalebar_color_picker.set_color(meta.line_color)
-        # A point has no line to dash, so its dash-style picker is hidden;
-        # circles and lines both keep it. Neither annotation strokes a line
-        # the ordinary way, so both hide line thickness/style too.
-        is_point = entry is not None and entry.category == "point"
+        # A point (or a "count" group of them) has no line to dash, so its
+        # dash-style picker is hidden; circles and lines both keep it.
+        # Neither annotation strokes a line the ordinary way, so both hide
+        # line thickness/style too.
+        is_point = entry is not None and entry.category in ("point", "count")
         self._line_thickness_label.setVisible(not is_annotation)
         self._line_thickness_control.setVisible(not is_annotation)
         self._line_style_picker.setVisible(not is_point and not is_annotation)
@@ -1059,13 +1077,18 @@ class MeasurementCustomizeMenu(QFrame):
         # toggle would just be a second way to do the same thing; a scale
         # bar's panel uses the tag background as its own and colors its
         # label from the bar color.
-        self._tag_transparent_check.setVisible(not is_annotation)
-        self._tag_bg_picker.setVisible(is_annotation or not meta.tag_background_transparent)
+        self._tag_transparent_check.setVisible(not no_tag)
+        # A "count" group has no box to color at all (its number color
+        # comes from Tag Text Color below instead), so its background
+        # picker stays hidden regardless of the transparency toggle's state.
+        self._tag_bg_picker.setVisible(not is_count and (is_annotation or not meta.tag_background_transparent))
         self._tag_text_picker.setVisible(not show_scalebar)
         self._midpoint_picker.set_value(meta.midpoint_style)
         self._midpoint_picker.setVisible(show_caps)
         self._point_style_picker.set_value(meta.point_style)
         self._point_style_picker.setVisible(is_point)
+        self._count_hide_numbers_check.setChecked(meta.count_hide_numbers)
+        self._count_hide_numbers_check.setVisible(is_count)
         self._start_cap_picker.set_value(meta.line_start_cap)
         self._start_cap_picker.setVisible(show_caps)
         self._end_cap_picker.set_value(meta.line_end_cap)
@@ -1219,6 +1242,7 @@ class MeasurementCustomizeMenu(QFrame):
             tag_background_transparent=False if self._is_text else self._tag_transparent_check.isChecked(),
             midpoint_style=self._midpoint_picker.value(),
             point_style=self._point_style_picker.value(),
+            count_hide_numbers=self._count_hide_numbers_check.isChecked(),
             show_area=self._area_check.isChecked(),
             area_unit=self._area_unit_combo.currentData(),
             fill_color=self._fill_color_picker.effective_color() if self._fill_enabled_check.isChecked() else "",

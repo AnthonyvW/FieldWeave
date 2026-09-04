@@ -221,6 +221,10 @@ def _arbitrary_line_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None
     return tuple(points) if len(points) >= 2 else None
 
 
+def _count_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    return tuple(points) if points else None
+
+
 def _three_point_circle_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
     if len(points) < 3:
         return None
@@ -1719,6 +1723,15 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     # the "custom" position preset); white bar on a black panel by default.
     name="Scale Bar", required_points=1, category="scalebar", resolve=_point_resolve, has_label=False,
     meta_preset={"line_color": "#ffffff", "tag_background_color": "#000000"},
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # An unbounded group of numbered points — each click adds one, a
+    # right-click finalizes the group (the same "keeps accumulating,
+    # right-click finishes" placement "Arbitrary Line" uses — see
+    # MeasurementOverlay.cancel_placement). Its numbers are drawn directly
+    # on the image, not as tags — see MeasurementOverlay._draw_count_numbers.
+    name="Count", required_points=None, category="count", resolve=_count_resolve,
+    has_label=False, min_points=1,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real

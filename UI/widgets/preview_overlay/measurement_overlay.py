@@ -252,6 +252,10 @@ class MeasurementOverlay(Overlay):
         # whichever one has an endpoint actively being dragged, so
         # placed points don't otherwise clutter the view.
         self._near_index: int | None = None
+        # Which of that measurement's own points proximity last matched —
+        # only meaningful for a "count" group, whose points otherwise have
+        # no per-point way to remove just one — see delete_hovered_count_point.
+        self._near_point_index: int | None = None
 
     def set_zoom_handler(self, handler: CoordinateSpace | None) -> None:
         """Register the coordinate space used to convert clicks into frame-fraction coordinates — see CoordinateSpace for the contract; ZoomPreviewOverlay is the live preview's implementation."""
@@ -664,7 +668,33 @@ class MeasurementOverlay(Overlay):
     def clear_proximity(self) -> bool:
         changed = self._near_index is not None
         self._near_index = None
+        self._near_point_index = None
         return changed
+
+    def delete_hovered_count_point(self) -> bool:
+        """
+        Remove just the "count" group's point currently hovered (rather
+        than the whole measurement) — the per-point analogue of
+        delete_hovered_extra. Removing a group's last remaining point
+        removes the whole (now-empty) measurement instead. Returns True
+        if a count point was actually hovered and removed.
+        """
+        if self._near_index is None or self._near_point_index is None:
+            return False
+        entry = DEFAULT_REGISTRY.get(self.measurements[self._near_index].kind)
+        if entry is None or entry.category != "count":
+            return False
+        m_index, p_index = self._near_index, self._near_point_index
+        points = list(self.measurements[m_index].points)
+        del points[p_index]
+        self._near_index = None
+        self._near_point_index = None
+        if points:
+            measurement = self.measurements[m_index]
+            self.measurements[m_index] = Measurement(measurement.kind, tuple(points), measurement.meta)
+        else:
+            self.measurements.pop(m_index)
+        return True
 
     def update_proximity(self, pos: QPoint, rect: QRect, widget_rect: QRect) -> bool:
         """Recompute which measurement (if any) *pos* is close enough to that its anchor points should show. Returns True if it changed, so the caller knows whether to repaint."""
@@ -676,6 +706,7 @@ class MeasurementOverlay(Overlay):
     def _hit_test_proximity(self, pos: QPoint, rect: QRect, widget_rect: QRect) -> int | None:
         if self._zoom_handler is None:
             return None
+        self._near_point_index = None
         cursor = QPointF(pos)
         full_dims = self._zoom_handler.current_frame_dims()
         for index, measurement in enumerate(self.measurements):
@@ -683,8 +714,12 @@ class MeasurementOverlay(Overlay):
             if entry is None:
                 continue
             screen_points = [self._screen_point(self._to_point(rect, p), rect, widget_rect) for p in measurement.points]
-            if any(self._distance(cursor, sp) <= OVERLAY_ENDPOINT_HIT_RADIUS for sp in screen_points):
-                return index
+            # Also records which specific point matched (used to delete just
+            # that one point from a "count" group — see delete_hovered_count_point).
+            for p_index, sp in enumerate(screen_points):
+                if self._distance(cursor, sp) <= OVERLAY_ENDPOINT_HIT_RADIUS:
+                    self._near_point_index = p_index
+                    return index
             if entry.category == "line":
                 for a, b in zip(screen_points, screen_points[1:]):
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
@@ -1574,6 +1609,16 @@ class MeasurementOverlay(Overlay):
                 outline_color=outline_color, outline_width=outline_width,
                 style=point_style,
             )
+        elif entry.category == "count":
+            # Every point in the group gets its own marker — its number is
+            # drawn separately, see _draw_count_numbers.
+            for point in points:
+                self._draw_point_marker(
+                    painter, rect, point, scale_x, scale_y,
+                    line_color=line_color, line_width=line_width,
+                    outline_color=outline_color, outline_width=outline_width,
+                    style=point_style,
+                )
 
     # Unit-shape vertex offsets (each axis independently in [-1, 1], so a
     # per-axis radius multiply keeps the shape undistorted under a
@@ -1893,6 +1938,11 @@ class MeasurementOverlay(Overlay):
             # A text annotation is its own content, not a length tag —
             # drawn directly, hoverable/clickable/draggable like a tag.
             self._draw_text_annotation(painter, rect, index, measurement, scale_x, scale_y)
+            return
+        if entry is not None and entry.category == "count":
+            # A numbered-points group draws one number per point directly
+            # on the image — no tag box at all, see _draw_count_numbers.
+            self._draw_count_numbers(painter, rect, measurement, scale_x, scale_y)
             return
         # "Hide measurement" hides the tag only (feature 11 clarified);
         # the geometry is drawn regardless, by the caller.
@@ -2336,6 +2386,46 @@ class MeasurementOverlay(Overlay):
         painter.restore()
 
         self._label_boxes[index] = self._local_rect_to_rect_space(local_box, point, scale_x, scale_y)
+
+    def _draw_count_numbers(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        measurement: Measurement,
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        """
+        Each point in a "count" group gets its own number drawn directly
+        next to it, in the same undistorted local frame _draw_label uses
+        so the glyphs stay unsquished under a non-uniform zoom — real
+        text, not a tag box (feature: numbered points without tags).
+        Skipped entirely when meta.count_hide_numbers is set. No hit-test
+        box is recorded — a click still opens the customize menu via the
+        ordinary endpoint click (see MeasurementEndpointDragTool), since
+        each point is a plain draggable measurement point.
+        """
+        meta = measurement.meta
+        if meta.count_hide_numbers:
+            return
+        base_size = meta.font_size if meta.font_size > 0 else OVERLAY_LABEL_FONT_SIZE
+        font = QFont(painter.font())
+        if meta.font_family:
+            font.setFamily(meta.font_family)
+        font.setPixelSize(max(1, round(base_size)))
+        font.setBold(True)
+        text_color = self._resolve_color(meta.tag_text_color, OVERLAY_LINE_COLOR)
+        offset = OVERLAY_POINT_RADIUS + 4.0
+        for i, point in enumerate(measurement.points):
+            anchor = self._to_point(rect, point)
+            painter.save()
+            painter.translate(anchor)
+            if scale_x > 0 and scale_y > 0:
+                painter.scale(1.0 / scale_x, 1.0 / scale_y)
+            painter.setFont(font)
+            painter.setPen(QPen(text_color))
+            painter.drawText(QRectF(offset, -offset - 14.0, 40.0, 16.0), Qt.AlignmentFlag.AlignLeft, str(i + 1))
+            painter.restore()
 
     def _draw_label(
         self,

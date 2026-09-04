@@ -123,6 +123,11 @@ class MeasurementMeta(NamedTuple):
     # original look), "circle" (hollow ring), "square", "diamond",
     # "cross", "x", or "triangle" — see MeasurementOverlay._draw_point_marker.
     point_style: str = "dot"
+    # "count" category: hide every point's number at once (they're drawn
+    # as real text, not tags — see MeasurementOverlay._draw_count_numbers).
+    # A specific point is instead removed via hover+Delete — see
+    # MeasurementOverlay.delete_hovered_count_point.
+    count_hide_numbers: bool = False
 
 
 DEFAULT_META = MeasurementMeta()

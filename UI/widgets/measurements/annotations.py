@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 
 from UI.widgets.measurements.base_measurement import MeasurementButton
 from UI.widgets.measurements.lines import ArrowMeasurement
-from UI.widgets.measurements.measurement_style import LINE_COLOR, LINE_MARGIN
+from UI.widgets.measurements.measurement_style import ENDPOINT_RADIUS, LINE_COLOR, LINE_MARGIN
 
 
 class TextMeasurement(MeasurementButton):
@@ -44,6 +44,31 @@ class ScaleBarMeasurement(MeasurementButton):
         painter.setFont(font)
         painter.setPen(LINE_COLOR)
         painter.drawText(QRectF(left, y + 4, right - left, 12), Qt.AlignmentFlag.AlignHCenter, "10")
+
+
+class CountMeasurement(MeasurementButton):
+    # An unbounded group of numbered points — click to add each one,
+    # right-click to finish (same "keeps accumulating, right-click
+    # finalizes" placement Arbitrary Line uses). Icon: three unconnected
+    # dots, each labeled with its own number, since points aren't joined.
+    name = "Count"
+
+    def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        points = (
+            QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN),
+            QPoint(rect.center().x(), rect.top() + LINE_MARGIN),
+            QPoint(rect.right() - LINE_MARGIN, rect.center().y()),
+        )
+        font = QFont(painter.font())
+        font.setPixelSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        for i, point in enumerate(points):
+            self._draw_point(painter, point, ENDPOINT_RADIUS, active)
+            painter.setPen(LINE_COLOR)
+            painter.drawText(
+                QRectF(point.x() + 4, point.y() - 10, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
+            )
 
 
 class AnnotationArrowMeasurement(ArrowMeasurement):
