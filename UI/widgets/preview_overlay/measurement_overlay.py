@@ -222,11 +222,13 @@ class MeasurementOverlay(Overlay):
         self._extra_drag_start_fraction: tuple[float, float] | None = None
         self._extra_drag_start_offset: tuple[float, float] = (0.0, 0.0)
 
-        # Template applied to a measurement's meta as it's finalized —
-        # set from MeasurementsWidget's "Customize Measurements" section
-        # (see set_default_meta) so newly placed measurements pick up
-        # whatever description/unit the user has set up ahead of time.
-        self._default_meta: MeasurementMeta = DEFAULT_META
+        # Template applied to a measurement's meta as it's finalized, per
+        # kind — set from MeasurementsWidget's "Customize Default <kind>"
+        # panel (see set_default_meta) so newly placed measurements pick
+        # up whatever description/unit the user has set up ahead of time
+        # for that specific kind. A kind with no template yet uses
+        # DEFAULT_META — see default_meta_for.
+        self._default_meta_by_kind: dict[str, MeasurementMeta] = {}
         self._kind_counts: dict[str, int] = {}
 
         # Tags' own label boxes from the most recent draw() call, in the
@@ -506,13 +508,12 @@ class MeasurementOverlay(Overlay):
     # by the on-canvas tag menu.
     # ------------------------------------------------------------------
 
-    def set_default_meta(self, meta: MeasurementMeta) -> None:
-        self._default_meta = meta
+    def set_default_meta(self, kind: str, meta: MeasurementMeta) -> None:
+        self._default_meta_by_kind[kind] = meta
 
-    @property
-    def default_meta(self) -> MeasurementMeta:
-        """The template new placements pick up — also the target a measurement's "Reset Style" resets to."""
-        return self._default_meta
+    def default_meta_for(self, kind: str) -> MeasurementMeta:
+        """*kind*'s own template new placements of it pick up — also the target a measurement's "Reset Style" resets to. DEFAULT_META if that kind has never had its own template set."""
+        return self._default_meta_by_kind.get(kind, DEFAULT_META)
 
     def _resolve_meta(self, kind: str) -> MeasurementMeta:
         """
@@ -522,9 +523,9 @@ class MeasurementOverlay(Overlay):
         configured stays untitled rather than falling back to its own
         kind name. A kind with its own ``meta_preset`` (see "Arrow"/
         "Bracket" in measurement_kind.py) always gets those fields
-        forced, on top of whatever the panel's own defaults are.
+        forced, on top of whatever that kind's own panel defaults are.
         """
-        base = self._default_meta
+        base = self.default_meta_for(kind)
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is not None and entry.meta_preset:
             base = base._replace(**entry.meta_preset)
@@ -2027,7 +2028,7 @@ class MeasurementOverlay(Overlay):
         _label_boxes/_delete_boxes.
         """
         dims = self._reference_dims(full_dims)
-        text_and_anchor = self._measurement_label(kind, points, self._default_meta, full_dims, dims)
+        text_and_anchor = self._measurement_label(kind, points, self.default_meta_for(kind), full_dims, dims)
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
@@ -2718,11 +2719,12 @@ class MeasurementOverlay(Overlay):
             # cap shapes are drawn solid on top from the kind's own preset.
             if entry.category == "line" and len(display_points) >= 2:
                 preset = entry.meta_preset or {}
-                start_cap = preset.get("line_start_cap", self._default_meta.line_start_cap)
-                end_cap = preset.get("line_end_cap", self._default_meta.line_end_cap)
+                default_meta = self.default_meta_for(kind)
+                start_cap = preset.get("line_start_cap", default_meta.line_start_cap)
+                end_cap = preset.get("line_end_cap", default_meta.line_end_cap)
                 self._draw_preview_caps(
                     painter, rect, tuple(display_points), stroke_scale, start_cap, end_cap,
-                    self._default_meta.cap_size_scale,
+                    default_meta.cap_size_scale,
                 )
 
             # Annulus and two-circle aren't listed here: they preview each
@@ -3598,9 +3600,9 @@ class MeasurementOverlayController:
     def calibration_line_length_px(self) -> float | None:
         return self._overlay.calibration_line_length_px()
 
-    def set_default_meta(self, meta: MeasurementMeta) -> None:
-        """Template a newly placed measurement's meta is built from — see MeasurementsWidget's "Customize Measurements" section."""
-        self._overlay.set_default_meta(meta)
+    def set_default_meta(self, kind: str, meta: MeasurementMeta) -> None:
+        """Template a newly placed measurement of *kind* has its meta built from — see MeasurementsWidget's "Customize Default <kind>" panel."""
+        self._overlay.set_default_meta(kind, meta)
 
     def measurement_meta(self, index: int) -> MeasurementMeta | None:
         return self._overlay.measurement_meta(index)

@@ -470,16 +470,27 @@ class MeasurementCustomizeMenu(QFrame):
     cancelled = Signal()
     delete_requested = Signal(int)  # measurement index — after the user confirms deletion
     reset_requested = Signal(int)  # measurement index — reset this measurement's style to the default
+    defaults_changed = Signal(str, object)  # kind, MeasurementMeta — embedded defaults-template mode only
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, embedded: bool = False) -> None:
+        """
+        *embedded* makes this a plain child widget with no footer, driving
+        a kind's own default template live (see open_defaults_for) instead
+        of a floating popup that edits one placed measurement (open_for) —
+        used by MeasurementsWidget's "Customize Default <kind>" panel so
+        it shares the exact same fields/visibility rules as the popup
+        rather than a hand-maintained subset that drifts out of sync.
+        """
         super().__init__(parent)
+        self._embedded = embedded
         self.setObjectName("MeasurementCustomizeMenu")
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        # A real top-level window, so it can be dragged outside the
-        # preview frame; closing it (its X button) acts like Cancel — see
-        # closeEvent.
-        self.setWindowFlags(Qt.WindowType.Window)
-        self.setWindowTitle("Customize Measurement")
+        if not embedded:
+            # A real top-level window, so it can be dragged outside the
+            # preview frame; closing it (its X button) acts like Cancel —
+            # see closeEvent.
+            self.setWindowFlags(Qt.WindowType.Window)
+            self.setWindowTitle("Customize Measurement")
         # QFrame subclasses don't pick up a stylesheet background on
         # their own unless told to paint one — without this the panel
         # stayed transparent regardless of #MeasurementCustomizeMenu's
@@ -487,6 +498,12 @@ class MeasurementCustomizeMenu(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._index: int | None = None
         self._original_meta: MeasurementMeta | None = None
+        # Embedded-mode state: which kind's template is currently shown,
+        # and every kind's own stored template (so switching back to a
+        # previously-edited kind shows its edits, not fresh defaults) —
+        # see open_defaults_for/default_meta_for.
+        self._current_defaults_kind: str | None = None
+        self._default_meta_by_kind: dict[str, MeasurementMeta] = {}
         # Suppresses live preview_changed emissions while open_for is
         # populating the fields.
         self._loading: bool = False
@@ -633,13 +650,26 @@ class MeasurementCustomizeMenu(QFrame):
         self._build_tag_style_controls(layout)
         self._build_line_style_controls(layout)
 
-        # Reset Style lives at the bottom of the scrollable field list
-        # itself, not the fixed footer below it — it acts on the fields
-        # above it, not as a persistent action like Apply/Cancel/Delete.
-        reset_button = QPushButton("Reset Style")
-        reset_button.setToolTip("Reset this measurement's style to the current default and restore hidden tags")
-        reset_button.clicked.connect(self._on_reset_clicked)
-        layout.addWidget(reset_button)
+        if not embedded:
+            # Reset Style lives at the bottom of the scrollable field list
+            # itself, not the fixed footer below it — it acts on the fields
+            # above it, not as a persistent action like Apply/Cancel/Delete.
+            # Meaningless in embedded (defaults-template) mode: there's no
+            # separate "current default" to reset to, and no per-instance
+            # hidden tags to restore.
+            reset_button = QPushButton("Reset Style")
+            reset_button.setToolTip("Reset this measurement's style to the current default and restore hidden tags")
+            reset_button.clicked.connect(self._on_reset_clicked)
+            layout.addWidget(reset_button)
+
+        if embedded:
+            # No footer, and no scroll area of its own — embedded directly
+            # into MeasurementsWidget's sidebar, which is already one big
+            # scroll area (see MeasurementTab._wrap_scroll); a second,
+            # nested one here would make its own scrolling get stuck
+            # rather than handing off to the sidebar's.
+            outer_layout.addWidget(content, 1)
+            return
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -949,6 +979,25 @@ class MeasurementCustomizeMenu(QFrame):
         self._manually_moved = False
         self._index = index
         self._original_meta = meta
+        self._populate_fields(kind, meta)
+        self._loading = False
+        self.adjustSize()
+        self.reposition(anchor)
+        # As its own window the panel stays where opened (and wherever the
+        # user drags it) rather than chasing its tag through pans/zooms.
+        self._manually_moved = True
+        self.show()
+        self.raise_()
+        self._title_edit.setFocus()
+
+    def _populate_fields(self, kind: str, meta: MeasurementMeta) -> None:
+        """
+        Set every field's value and visibility from (*kind*, *meta*) —
+        shared by open_for (editing one placed measurement) and
+        open_defaults_for (editing a kind's default template), so the two
+        never drift out of sync on which fields a kind actually shows.
+        Caller is responsible for self._loading/adjustSize/etc. around it.
+        """
         entry = DEFAULT_REGISTRY.get(kind)
         show_caps = entry is not None and entry.category in ("line", "angle", "arc", "line_pair", "curve")
         show_area = entry is not None and entry.category in ("circle", "ellipse")
@@ -1111,15 +1160,6 @@ class MeasurementCustomizeMenu(QFrame):
         self._set_outline_controls_visible(meta.outline_enabled and not is_annotation)
         self._outline_color_picker.set_color(meta.outline_color)
         self._outline_thickness_control.set_value(meta.outline_thickness or OVERLAY_OUTLINE_WIDTH)
-        self._loading = False
-        self.adjustSize()
-        self.reposition(anchor)
-        # As its own window the panel stays where opened (and wherever the
-        # user drags it) rather than chasing its tag through pans/zooms.
-        self._manually_moved = True
-        self.show()
-        self.raise_()
-        self._title_edit.setFocus()
 
     def reposition(self, anchor: QPoint) -> None:
         """Position the window near its tag on open, clamped so the whole panel stays on the screen it opens on (feature 9). *anchor* is in the parent's coordinate space; a top-level window is moved in global coordinates, so it's mapped through the parent. A no-op once positioned/dragged (the panel is its own window and stays put)."""
@@ -1260,8 +1300,35 @@ class MeasurementCustomizeMenu(QFrame):
         )
 
     def _on_live_field_changed(self, *_args: object) -> None:
-        if self._index is not None and not self._loading:
+        if self._loading:
+            return
+        if self._index is not None:
             self.preview_changed.emit(self._index, self._current_meta())
+        elif self._current_defaults_kind is not None:
+            meta = self._current_meta()
+            self._default_meta_by_kind[self._current_defaults_kind] = meta
+            self.defaults_changed.emit(self._current_defaults_kind, meta)
+
+    def open_defaults_for(self, kind: str) -> None:
+        """
+        Switch this embedded panel to *kind*'s own default template —
+        see MeasurementsWidget's "Customize Default <kind>" panel. Each
+        kind's edits are kept (in _default_meta_by_kind, updated live by
+        _on_live_field_changed as they're made) so switching back to a
+        previously-edited kind shows its own edits again, not fresh
+        defaults.
+        """
+        if kind == self._current_defaults_kind:
+            return
+        self._loading = True
+        self._current_defaults_kind = kind
+        self._populate_fields(kind, self._default_meta_by_kind.get(kind, DEFAULT_META))
+        self._loading = False
+        self.adjustSize()
+
+    def default_meta_for(self, kind: str) -> MeasurementMeta:
+        """kind's own stored default template, or DEFAULT_META if it's never been edited."""
+        return self._default_meta_by_kind.get(kind, DEFAULT_META)
 
     def _on_apply_clicked(self) -> None:
         if self._index is None:

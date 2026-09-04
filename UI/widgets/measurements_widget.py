@@ -5,7 +5,6 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFrame,
@@ -13,11 +12,8 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QFontComboBox,
-    QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QStackedWidget,
     QToolButton,
     QVBoxLayout,
@@ -69,8 +65,6 @@ from UI.widgets.measurements.lines import (
     BracketMeasurement,
     DoubleArrowMeasurement,
     HorizontalLineMeasurement,
-    MEASUREMENT_LINE_CAPS,
-    MEASUREMENT_MIDPOINT_STYLES,
     MultipointLineMeasurement,
     VerticalLineMeasurement,
 )
@@ -85,17 +79,10 @@ from UI.widgets.measurements.two_circle import (
     RadiusTwoCircleMeasurement,
     ThreePointTwoCircleMeasurement,
 )
-from UI.widgets.measurements.measurement_meta import MeasurementMeta
-from UI.widgets.measurements.measurement_style import (
-    OVERLAY_LINE_COLOR, OVERLAY_LINE_WIDTH, OVERLAY_OUTLINE_COLOR, OVERLAY_OUTLINE_WIDTH,
-)
+from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.points import PointMeasurement
 from UI.widgets.measurements.units import MeasurementUnit
-from UI.widgets.preview_overlay.measurement_customize_menu import (
-    _ColorPicker, _StylePicker, _ThicknessControl, _dash_style_icon, _field_label, _line_cap_icon,
-    _midpoint_style_icon, block_wheel,
-)
-from UI.widgets.preview_overlay.measurement_overlay import MEASUREMENT_DASH_PATTERNS
+from UI.widgets.preview_overlay.measurement_customize_menu import MeasurementCustomizeMenu, block_wheel
 
 GRID_COLUMNS = 4
 
@@ -272,7 +259,7 @@ class MeasurementsWidget(QWidget):
     manual_calibration_started = Signal()
     calibration_dpi_submitted = Signal(float, object)  # value, MeasurementUnit
     calibration_cancelled = Signal()
-    default_meta_changed = Signal(object)  # MeasurementMeta, applied to newly placed measurements
+    default_meta_changed = Signal(str, object)  # kind, MeasurementMeta — applied to newly placed measurements of kind
     export_measurements_requested = Signal()
     import_measurements_requested = Signal()
     delete_all_requested = Signal()  # user confirmed clearing every placed measurement
@@ -322,6 +309,11 @@ class MeasurementsWidget(QWidget):
 
         self._customize_panel = self._build_customize_panel()
         outer_layout.addWidget(self._customize_panel)
+        # _build_measurement_types (above) already selected the first tile
+        # and emitted selection_changed before this panel existed to hear
+        # it, so seed it manually; every later change is caught live.
+        self.selection_changed.connect(self._sync_defaults_panel_to_selection)
+        self._sync_defaults_panel_to_selection(self._selected_button.name if self._selected_button else None)
 
     def _build_measurement_types(self) -> QGroupBox:
         """
@@ -435,217 +427,43 @@ class MeasurementsWidget(QWidget):
 
     def _build_customize_panel(self) -> QGroupBox:
         """
-        Defaults applied to every new measurement as it's placed —
-        every field MeasurementCustomizeMenu offers for an already-
-        placed measurement, applied here as a shared starting point
-        instead. An unset title stays unset (see
-        MeasurementOverlay._resolve_meta), a set one becomes a numbered
-        prefix ("Wingspan 1", "Wingspan 2", ...); everything else
-        applies as-is. A description isn't offered here since it's
-        inherently per-measurement — standardizing one across every
-        placement of a kind doesn't make sense the way a shared title,
-        unit, or appearance choice does. Takes effect as the fields are
-        edited, with no separate apply step, since there's nothing to
-        preview here — it only ever affects measurements placed after
-        the fact. Editing a measurement already placed (including
-        giving it its own description) is a separate, per-instance
-        action — see MeasurementCustomizeMenu, opened by clicking its
-        tag on the preview.
+        Defaults applied to newly placed measurements, per kind — reuses
+        MeasurementCustomizeMenu directly (embedded mode) so this panel
+        shows exactly the same fields, in the same layout, an already-
+        placed measurement's own popup would for that kind, rather than a
+        hand-maintained subset that drifts out of sync with it. Retitles
+        to "Customize Default <kind>" and reloads whenever the selected
+        tile changes — see _sync_defaults_panel_to_selection, wired to
+        selection_changed at the end of __init__ (after both this panel
+        and the tile buttons exist).
         """
-        panel = QGroupBox("Customize Measurements")
+        panel = QGroupBox("Customize Default")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(4, 12, 4, 4)
         layout.setSpacing(6)
 
-        layout.addWidget(QLabel("Default Title:"))
-        self._default_title_edit = QLineEdit()
-        self._default_title_edit.setPlaceholderText("e.g. Wingspan")
-        self._default_title_edit.textChanged.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_title_edit)
-
-        default_unit_row = QHBoxLayout()
-        default_unit_row.addWidget(QLabel("Unit:"))
-        self._default_unit_combo = QComboBox()
-        block_wheel(self._default_unit_combo)
-        for unit in MeasurementUnit:
-            self._default_unit_combo.addItem(unit.value, unit)
-        self._default_unit_combo.setCurrentIndex(self._default_unit_combo.findData(MeasurementUnit.MM))
-        self._default_unit_combo.currentIndexChanged.connect(self._on_default_meta_edited)
-        default_unit_row.addWidget(self._default_unit_combo, 1)
-        default_unit_row.addWidget(_field_label("Decimals"))
-        self._default_decimals_spin = QSpinBox()
-        block_wheel(self._default_decimals_spin)
-        self._default_decimals_spin.setRange(0, 6)
-        self._default_decimals_spin.setValue(2)
-        self._default_decimals_spin.valueChanged.connect(self._on_default_meta_edited)
-        default_unit_row.addWidget(self._default_decimals_spin)
-        layout.addLayout(default_unit_row)
-
-        # Font and size share one row the same way Unit and Decimals do
-        # above, so the size field lines up with the rest rather than
-        # sitting alone as a full-width box.
-        font_row = QHBoxLayout()
-        font_row.addWidget(_field_label("Font"))
-        self._default_font_combo = QFontComboBox()
-        # Non-scalable (bitmap) fonts like "Fixedsys" make DirectWrite log a
-        # warning to the console whenever they're scrolled past on Windows —
-        # excluding them from the list avoids hitting one at all.
-        self._default_font_combo.setFontFilters(QFontComboBox.FontFilter.ScalableFonts)
-        self._default_font_combo.setEditable(False)
-        block_wheel(self._default_font_combo)
-        self._default_font_combo.currentFontChanged.connect(self._on_default_meta_edited)
-        font_row.addWidget(self._default_font_combo, 1)
-        font_row.addWidget(_field_label("Size"))
-        self._default_font_size_spin = QSpinBox()
-        self._default_font_size_spin.setRange(6, 96)
-        self._default_font_size_spin.setValue(13)
-        block_wheel(self._default_font_size_spin)
-        self._default_font_size_spin.valueChanged.connect(self._on_default_meta_edited)
-        font_row.addWidget(self._default_font_size_spin)
-        layout.addLayout(font_row)
-
-        layout.addWidget(_field_label("Tag Width (0 = auto)"))
-        self._default_tag_width_control = _ThicknessControl(0.0, 400.0)
-        self._default_tag_width_control.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_tag_width_control)
-
-        self._default_show_area_check = QCheckBox("Show area (circles)")
-        self._default_show_area_check.toggled.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_show_area_check)
-
-        self._default_always_show_description_check = QCheckBox("Always show description")
-        self._default_always_show_description_check.toggled.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_always_show_description_check)
-
-        layout.addWidget(_field_label("Opacity"))
-        self._default_opacity_control = _ThicknessControl(0.0, 1.0)
-        self._default_opacity_control.set_value(1.0)
-        self._default_opacity_control.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_opacity_control)
-
-        self._default_tag_transparent_check = QCheckBox("Transparent tag background")
-        self._default_tag_transparent_check.toggled.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_tag_transparent_check)
-
-        self._default_tag_bg_picker = _ColorPicker("Tag Background Color", OVERLAY_LINE_COLOR.name())
-        self._default_tag_bg_picker.color_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_tag_bg_picker)
-
-        self._default_tag_text_picker = _ColorPicker("Tag Text Color", OVERLAY_OUTLINE_COLOR.name())
-        self._default_tag_text_picker.color_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_tag_text_picker)
-
-        self._default_indicator_check = QCheckBox("Show indicator line")
-        self._default_indicator_check.setChecked(True)
-        self._default_indicator_check.toggled.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_indicator_check)
-
-        self._default_line_color_picker = _ColorPicker("Line Color", OVERLAY_LINE_COLOR.name())
-        self._default_line_color_picker.color_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_line_color_picker)
-
-        layout.addWidget(_field_label("Line Thickness"))
-        self._default_line_thickness_control = _ThicknessControl(0.5, 12.0)
-        self._default_line_thickness_control.set_value(OVERLAY_LINE_WIDTH)
-        self._default_line_thickness_control.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_line_thickness_control)
-
-        self._default_line_style_picker = _StylePicker(
-            "Line Style", [(style, _dash_style_icon(style)) for style in MEASUREMENT_DASH_PATTERNS]
-        )
-        self._default_line_style_picker.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_line_style_picker)
-
-        self._default_midpoint_picker = _StylePicker(
-            "Midpoint", [(style, _midpoint_style_icon(style)) for style in MEASUREMENT_MIDPOINT_STYLES]
-        )
-        self._default_midpoint_picker.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_midpoint_picker)
-
-        # Caps only ever apply to line-category measurements (see
-        # MeasurementKind.category in measurement_kind.py) but, unlike
-        # MeasurementCustomizeMenu, there's no single placed measurement's
-        # kind to hide these against here — this panel is a shared
-        # template for every tile, line or not, so a circle/point
-        # placement simply never reads its own line_start_cap/line_end_cap.
-        self._default_start_cap_picker = _StylePicker(
-            "Start", [(cap, _line_cap_icon(cap)) for cap in MEASUREMENT_LINE_CAPS]
-        )
-        self._default_start_cap_picker.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_start_cap_picker)
-
-        self._default_end_cap_picker = _StylePicker(
-            "End", [(cap, _line_cap_icon(cap)) for cap in MEASUREMENT_LINE_CAPS]
-        )
-        self._default_end_cap_picker.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_end_cap_picker)
-
-        layout.addWidget(_field_label("Arrow/Bracket Size"))
-        self._default_cap_size_control = _ThicknessControl(0.25, 20.0)
-        self._default_cap_size_control.set_value(1.0)
-        self._default_cap_size_control.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_cap_size_control)
-
-        self._default_outline_enabled_check = QCheckBox("Enable Outline")
-        self._default_outline_enabled_check.setChecked(True)
-        self._default_outline_enabled_check.toggled.connect(self._on_default_outline_enabled_toggled)
-        layout.addWidget(self._default_outline_enabled_check)
-
-        self._default_outline_color_picker = _ColorPicker("Outline Color", OVERLAY_OUTLINE_COLOR.name())
-        self._default_outline_color_picker.color_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_outline_color_picker)
-
-        self._default_outline_thickness_label = _field_label("Outline Thickness")
-        layout.addWidget(self._default_outline_thickness_label)
-        self._default_outline_thickness_control = _ThicknessControl(0.0, 8.0)
-        self._default_outline_thickness_control.set_value(OVERLAY_OUTLINE_WIDTH)
-        self._default_outline_thickness_control.value_changed.connect(self._on_default_meta_edited)
-        layout.addWidget(self._default_outline_thickness_control)
-
+        self._defaults_panel = panel
+        self._defaults_menu = MeasurementCustomizeMenu(panel, embedded=True)
+        self._defaults_menu.defaults_changed.connect(self._on_default_meta_edited)
+        layout.addWidget(self._defaults_menu)
         return panel
 
-    def _set_default_outline_controls_visible(self, visible: bool) -> None:
-        self._default_outline_color_picker.setVisible(visible)
-        self._default_outline_thickness_label.setVisible(visible)
-        self._default_outline_thickness_control.setVisible(visible)
+    def _sync_defaults_panel_to_selection(self, kind: str | None) -> None:
+        """Point the embedded defaults panel at *kind*'s own template — a no-op while nothing is selected (e.g. mid-calibration), so the panel just keeps showing whichever kind was last selected rather than going blank."""
+        if kind is None:
+            return
+        self._defaults_menu.open_defaults_for(kind)
+        self._defaults_panel.setTitle(f"Customize Default {kind}")
 
-    def _on_default_outline_enabled_toggled(self, _enabled: bool) -> None:
-        self._set_default_outline_controls_visible(self._default_outline_enabled_check.isChecked())
-        self._on_default_meta_edited()
+    def current_default_meta(self) -> tuple[str | None, MeasurementMeta]:
+        """The currently selected tile's own (kind, template) — used to seed the preview's fallback unit/default meta at startup, since this panel is the only source of a newly placed measurement's per-kind defaults. (None, DEFAULT_META) if nothing is selected yet."""
+        if self._selected_button is None:
+            return None, DEFAULT_META
+        kind = self._selected_button.name
+        return kind, self._defaults_menu.default_meta_for(kind)
 
-    def _build_default_meta(self) -> MeasurementMeta:
-        return MeasurementMeta(
-            title=self._default_title_edit.text().strip(),
-            unit=self._default_unit_combo.currentData(),
-            always_show_description=self._default_always_show_description_check.isChecked(),
-            tag_background_color=self._default_tag_bg_picker.color(),
-            tag_text_color=self._default_tag_text_picker.color(),
-            line_color=self._default_line_color_picker.color(),
-            line_thickness=self._default_line_thickness_control.value(),
-            line_dash_style=self._default_line_style_picker.value(),
-            line_start_cap=self._default_start_cap_picker.value(),
-            line_end_cap=self._default_end_cap_picker.value(),
-            cap_size_scale=self._default_cap_size_control.value(),
-            outline_enabled=self._default_outline_enabled_check.isChecked(),
-            outline_color=self._default_outline_color_picker.color(),
-            outline_thickness=self._default_outline_thickness_control.value(),
-            decimal_places=self._default_decimals_spin.value(),
-            opacity=self._default_opacity_control.value(),
-            tag_background_transparent=self._default_tag_transparent_check.isChecked(),
-            midpoint_style=self._default_midpoint_picker.value(),
-            show_area=self._default_show_area_check.isChecked(),
-            font_family=self._default_font_combo.currentFont().family(),
-            font_size=float(self._default_font_size_spin.value()),
-            tag_width=self._default_tag_width_control.value(),
-            indicator_enabled=self._default_indicator_check.isChecked(),
-        )
-
-    def current_default_meta(self) -> MeasurementMeta:
-        """The Customize Measurements panel's current template — used to seed the preview's fallback unit/default meta at startup, since this panel (not the removed top-level unit dropdown) is now the only source of a newly placed measurement's unit."""
-        return self._build_default_meta()
-
-    def _on_default_meta_edited(self, *_args: object) -> None:
-        self.default_meta_changed.emit(self._build_default_meta())
+    def _on_default_meta_edited(self, kind: str, meta: MeasurementMeta) -> None:
+        self.default_meta_changed.emit(kind, meta)
 
     def _build_calibration_panel(self) -> QGroupBox:
         panel = QGroupBox("DPI Calibration")

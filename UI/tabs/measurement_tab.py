@@ -29,7 +29,9 @@ class MeasurementTab(CameraWithSidebarPage):
 
         self._measurements.selection_changed.connect(self._on_measurement_selected)
         self._measurements.default_meta_changed.connect(self._on_default_meta_changed)
-        self._on_default_meta_changed(self._measurements.current_default_meta())
+        initial_kind, initial_meta = self._measurements.current_default_meta()
+        if initial_kind is not None:
+            self._on_default_meta_changed(initial_kind, initial_meta)
 
         self._measurements.dpi_value_submitted.connect(self._capture_control.submit_dpi_value)
         self._measurements.manual_calibration_started.connect(self._capture_control.request_manual_calibration)
@@ -142,16 +144,16 @@ class MeasurementTab(CameraWithSidebarPage):
         """A Scale Bar is a one-off measurement — deselect its tile after placing one rather than leaving placement armed for a stray next click."""
         self._measurements.clear_selection()
 
-    def _on_default_meta_changed(self, meta: MeasurementMeta) -> None:
+    def _on_default_meta_changed(self, kind: str, meta: MeasurementMeta) -> None:
         preview = get_app_context().camera_preview
         if preview is not None:
-            preview.overlays.measurement.set_default_meta(meta)
-            # meta.unit is always concrete now that the Customize panel's
-            # own combo is the only source of a default unit (see
+            preview.overlays.measurement.set_default_meta(kind, meta)
+            # meta.unit is always concrete now that the Customize Default
+            # panel's own combo is the only source of a default unit (see
             # MeasurementsWidget.current_default_meta) — keeps
             # MeasurementOverlay._unit's fallback (used only when an
             # imported measurement has no unit override) in sync with
-            # whatever the panel currently has selected.
+            # whatever kind is currently selected there.
             preview.overlays.measurement.set_unit(meta.unit)
 
     # ------------------------------------------------------------------

@@ -221,7 +221,7 @@ class MeasurementInteraction:
         kind = self._overlay.measurement_kind(index)
         if current is None or kind is None:
             return
-        reset = self._overlay.default_meta._replace(title=current.title, description=current.description)
+        reset = self._overlay.default_meta_for(kind)._replace(title=current.title, description=current.description)
         self._overlay.set_measurement_meta(index, reset)
         self._video_label.update()
         anchor = self._tag_anchor_point(index)
