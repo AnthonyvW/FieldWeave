@@ -569,7 +569,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._index = index
         self._original_meta = meta
         entry = DEFAULT_REGISTRY.get(kind)
-        show_caps = entry is not None and entry.category in ("line", "angle", "arc")
+        show_caps = entry is not None and entry.category in ("line", "angle", "arc", "line_pair", "curve")
         show_area = entry is not None and entry.category in ("circle", "ellipse")
         show_center = (entry is not None and entry.category in ("circle", "ellipse")) or kind == "Radius Arc"
         show_angle_extras = entry is not None and entry.category == "angle"

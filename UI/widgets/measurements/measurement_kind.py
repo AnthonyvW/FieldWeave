@@ -105,7 +105,19 @@ class MeasurementKind:
     # draws two independent, disconnected segments — which is why this
     # isn't just handled generically the way "line"'s always-consecutive
     # polyline is.
-    segment_pairs: Callable[[tuple[Point2D, ...]], list[tuple[Point2D, Point2D]]] | None = None
+    # Also used by "line_pair" category kinds ("Parallel Line",
+    # "Perpendicular Line") — their second segment is derived from the
+    # first rather than drawn straight from clicked points, which is why
+    # this exists as a callback instead of consecutive-point pairing.
+    # full_dims is None whenever true pixel geometry isn't available yet
+    # (or isn't needed — most kinds ignore it entirely, only
+    # "Perpendicular Line" needs it, since "perpendicular" is an angle
+    # concept sensitive to the frame's own aspect ratio).
+    segment_pairs: Callable[[tuple[Point2D, ...], tuple[int, int] | None], list[tuple[Point2D, Point2D]]] | None = None
+    # "curve" category only: sampled points (fraction space) along the
+    # curve *points* describes, for however many control points have
+    # been placed so far — see MeasurementOverlay's "curve" dispatch.
+    curve_points: Callable[[tuple[Point2D, ...]], list[Point2D] | None] | None = None
     angle_value: Callable[[tuple[Point2D, ...], tuple[int, int]], float | None] | None = None
     angle_anchor: Callable[[tuple[Point2D, ...]], Point2D] | None = None
     # True when segment_pairs' segments are actually consecutive (share
@@ -478,7 +490,9 @@ def _three_point_angle_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | N
     return p0, p1, p2
 
 
-def _three_point_angle_segments(points: tuple[Point2D, ...]) -> list[tuple[Point2D, Point2D]]:
+def _three_point_angle_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
     """Segments to draw for whatever's been placed so far — partial while still placing (see MeasurementKind.segment_pairs)."""
     pairs = []
     if len(points) >= 2:
@@ -515,7 +529,9 @@ def _four_point_angle_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | No
     return p0, p1, p2, p3
 
 
-def _four_point_angle_segments(points: tuple[Point2D, ...]) -> list[tuple[Point2D, Point2D]]:
+def _four_point_angle_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
     pairs = []
     if len(points) >= 2:
         pairs.append((points[0], points[1]))
@@ -638,6 +654,117 @@ def _radius_arc_move(points: list[Point2D], index: int, new_point: Point2D) -> l
     return [new_point, (points[1][0] + dx, points[1][1] + dy), (points[2][0] + dx, points[2][1] + dy)]
 
 
+# ----------------------------------------------------------------------
+# Curve — both ends placed first, then a third point ("the arc") shapes
+# a smooth quadratic-Bezier bulge between them. Deliberately not another
+# circular arc ("3 Point Arc" already covers that, with the middle point
+# lying ON the curve): here the third point is a Bezier *control* point
+# the curve bends toward without ever touching, giving a curve whose
+# curvature isn't constrained to a single circle's.
+#
+# Bezier interpolation is a purely affine (lerp-based) construction, so
+# — unlike a circular arc's curvature — it's unaffected by the frame's
+# own anisotropic aspect ratio: sampling directly in fraction space and
+# mapping each sample through the same _to_point every other overlay
+# coordinate goes through is already correct, with no true-pixel-space
+# detour needed the way arcs/angles require.
+# ----------------------------------------------------------------------
+
+_CURVE_SAMPLES = 24
+
+
+def _curve_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3:
+        return None
+    p0, p1, p2 = points[0], points[1], points[2]
+    if p0 == p1:
+        return None
+    return p0, p1, p2
+
+
+def _curve_points(points: tuple[Point2D, ...]) -> list[Point2D] | None:
+    """Sampled points along the curve for however many of its 3 points have been placed so far — a straight segment (2 points) while the bulge point isn't placed yet, matching how circle/ellipse/arc kinds show a straight guide during placement."""
+    if len(points) < 2:
+        return None
+    if len(points) < 3:
+        return [points[0], points[1]]
+    p0, p1, control = points[0], points[1], points[2]
+    result = []
+    for i in range(_CURVE_SAMPLES + 1):
+        t = i / _CURVE_SAMPLES
+        mt = 1 - t
+        x = mt * mt * p0[0] + 2 * mt * t * control[0] + t * t * p1[0]
+        y = mt * mt * p0[1] + 2 * mt * t * control[1] + t * t * p1[1]
+        result.append((x, y))
+    return result
+
+
+# ----------------------------------------------------------------------
+# Parallel/Perpendicular Line — both place a first line (two points),
+# then a third point anchors a second, derived line. "line_pair"
+# category kinds all share this drawing/hit-testing treatment (see
+# MeasurementOverlay's "line_pair" dispatch): two segments from
+# segment_pairs, a length label (from the first, "reference" segment)
+# rather than an angle.
+# ----------------------------------------------------------------------
+
+
+def _two_line_resolve(points: list[Point2D]) -> tuple[Point2D, ...] | None:
+    if len(points) < 3:
+        return None
+    p0, p1, p2 = points[0], points[1], points[2]
+    if p0 == p1:
+        return None
+    return p0, p1, p2
+
+
+def _parallel_line_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    pairs = []
+    if len(points) >= 2:
+        pairs.append((points[0], points[1]))
+    if len(points) >= 3:
+        p0, p1, p2 = points[0], points[1], points[2]
+        # Translating the first line so its start lands exactly on p2 —
+        # a plain translation, so (unlike "perpendicular") this is
+        # correct straight in fraction space; no pixel-space detour needed.
+        offset = (p2[0] - p0[0], p2[1] - p0[1])
+        pairs.append((p2, (p1[0] + offset[0], p1[1] + offset[1])))
+    return pairs
+
+
+def _perpendicular_line_segments(
+    points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
+) -> list[tuple[Point2D, Point2D]]:
+    pairs = []
+    if len(points) >= 2:
+        pairs.append((points[0], points[1]))
+    if len(points) < 3 or full_dims is None:
+        return pairs
+    full_w, full_h = full_dims
+    if full_w <= 0 or full_h <= 0:
+        return pairs
+
+    def to_px(p: Point2D) -> Point2D:
+        return p[0] * full_w, p[1] * full_h
+
+    a, b, c = to_px(points[0]), to_px(points[1]), to_px(points[2])
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq < _DEGENERATE_EPSILON:
+        return pairs
+    # Foot of the perpendicular from p2 onto the infinite line through
+    # p0/p1 — computed in true pixel space, since "perpendicular" is an
+    # angle concept and the frame's own aspect ratio can otherwise skew
+    # a fraction-space-only projection away from a true right angle.
+    t = ((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / length_sq
+    foot_px = (a[0] + t * dx, a[1] + t * dy)
+    foot = (foot_px[0] / full_w, foot_px[1] / full_h)
+    pairs.append((foot, points[2]))
+    return pairs
+
+
 DEFAULT_REGISTRY = MeasurementKindRegistry()
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Point", required_points=1, category="point", resolve=_point_resolve,
@@ -721,6 +848,26 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     # ignored) — the shorter way round between start and end angle.
     name="Radius Arc", required_points=3, category="arc",
     resolve=_radius_arc_resolve, move_point=_radius_arc_move, arc_geometry=_arc_geometry_radius,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # Both ends placed first, then a third point shapes a smooth
+    # quadratic-Bezier bulge between them.
+    name="Curve", required_points=3, category="curve",
+    resolve=_curve_resolve, curve_points=_curve_points,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # First line (2 points), then a third point anchors a second line
+    # translated to pass through it, parallel to and the same length as
+    # the first.
+    name="Parallel Line", required_points=3, category="line_pair",
+    resolve=_two_line_resolve, segment_pairs=_parallel_line_segments,
+))
+DEFAULT_REGISTRY.register(MeasurementKind(
+    # First line (2 points), then a third point anchors a second line
+    # running from its own perpendicular foot on the first line out to
+    # that point.
+    name="Perpendicular Line", required_points=3, category="line_pair",
+    resolve=_two_line_resolve, segment_pairs=_perpendicular_line_segments,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Placed the same way as a 2-point line but never becomes a real

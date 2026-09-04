@@ -607,8 +607,8 @@ class MeasurementOverlay(Overlay):
                 for a, b in zip(edge_points, edge_points[1:] + edge_points[:1]):
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
-            elif entry.category == "angle" and entry.segment_pairs is not None:
-                for pa, pb in entry.segment_pairs(measurement.points):
+            elif entry.category in ("angle", "line_pair") and entry.segment_pairs is not None:
+                for pa, pb in entry.segment_pairs(measurement.points, full_dims):
                     a = self._screen_point(self._to_point(rect, pa), rect, widget_rect)
                     b = self._screen_point(self._to_point(rect, pb), rect, widget_rect)
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
@@ -619,6 +619,13 @@ class MeasurementOverlay(Overlay):
                 for a, b in zip(arc_screen, arc_screen[1:]):
                     if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
+            elif entry.category == "curve" and entry.curve_points is not None:
+                curve = entry.curve_points(measurement.points)
+                if curve is not None:
+                    curve_screen = [self._screen_point(self._to_point(rect, p), rect, widget_rect) for p in curve]
+                    for a, b in zip(curve_screen, curve_screen[1:]):
+                        if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
+                            return index
         return None
 
     _CIRCLE_EDGE_SAMPLES = 32
@@ -1070,7 +1077,7 @@ class MeasurementOverlay(Overlay):
                 dashed=dashed, line_color=line_color, line_width=line_width,
                 outline_color=outline_color, outline_width=outline_width, dash_style=dash_style,
             )
-        elif entry.category == "angle" and entry.segment_pairs is not None:
+        elif entry.category in ("angle", "line_pair") and entry.segment_pairs is not None:
             if entry.connected_segments:
                 # The segments share an endpoint (e.g. "3 Point Angle"'s
                 # vertex) — draw as one polyline over the raw points, the
@@ -1085,9 +1092,10 @@ class MeasurementOverlay(Overlay):
                 )
             else:
                 # Genuinely disconnected segments (e.g. "4 Point Angle"'s
-                # two independent lines) — drawing them as one polyline
-                # would wrongly join them at the middle.
-                for pair in entry.segment_pairs(points):
+                # two independent lines, or a "Parallel/Perpendicular
+                # Line"'s derived second line) — drawing them as one
+                # polyline would wrongly join them at the middle.
+                for pair in entry.segment_pairs(points, full_dims):
                     self._draw_polyline(
                         painter, rect, pair, stroke_scale, dashed=dashed,
                         line_color=line_color, line_width=line_width,
@@ -1103,6 +1111,19 @@ class MeasurementOverlay(Overlay):
             if len(arc_points) >= 2:
                 self._draw_polyline(
                     painter, rect, arc_points, stroke_scale, dashed=dashed,
+                    line_color=line_color, line_width=line_width,
+                    outline_color=outline_color, outline_width=outline_width,
+                    dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
+                )
+        elif entry.category == "curve" and entry.curve_points is not None:
+            # Sampled points along the Bezier curve, drawn the same way
+            # an arc's sampled points are — reuses the ordinary polyline
+            # stroke/dash/cap machinery rather than a bespoke Bezier
+            # painter path, so it picks up caps/outline/dash for free.
+            curve = entry.curve_points(points)
+            if curve is not None and len(curve) >= 2:
+                self._draw_polyline(
+                    painter, rect, curve, stroke_scale, dashed=dashed,
                     line_color=line_color, line_width=line_width,
                     outline_color=outline_color, outline_width=outline_width,
                     dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
@@ -1242,7 +1263,7 @@ class MeasurementOverlay(Overlay):
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None or entry.angle_anchor is None or entry.segment_pairs is None:
             return
-        legs = entry.segment_pairs(points)
+        legs = entry.segment_pairs(points, None)  # angle kinds never need full_dims for their own segments
         if len(legs) < 2:
             return
         anchor = self._to_point(rect, entry.angle_anchor(points))
@@ -1472,12 +1493,31 @@ class MeasurementOverlay(Overlay):
                 # expected segments present) \u2014 a partial draft, still
                 # being placed, skips this rather than showing just one
                 # leg's length.
-                legs = entry.segment_pairs(points)
+                legs = entry.segment_pairs(points, full_dims)
                 if len(legs) >= 2:
                     leg_lengths = [self._length_suffix(pair, dims, unit, decimals) for pair in legs]
                     if all(leg is not None for leg in leg_lengths):
                         legs_text = " / ".join(leg_lengths)
                         suffix = f"{suffix} \u00b7 {legs_text}" if suffix else legs_text
+        elif entry.category == "line_pair":
+            if entry.segment_pairs is None:
+                return None
+            legs = entry.segment_pairs(points, full_dims)
+            if not legs:
+                return None
+            # The first ("reference") segment's own length and midpoint \u2014
+            # a Parallel/Perpendicular Line reads like an ordinary line's
+            # tag, not an angle's.
+            anchor = self._midpoint(legs[0])
+            suffix = self._length_suffix(legs[0], dims, unit, decimals)
+        elif entry.category == "curve":
+            if entry.curve_points is None:
+                return None
+            curve = entry.curve_points(points)
+            if curve is None or len(curve) < 2:
+                return None
+            anchor = curve[len(curve) // 2]
+            suffix = self._length_suffix(tuple(curve), dims, unit, decimals)
         elif entry.category == "arc":
             if full_dims is None:
                 return None

@@ -33,9 +33,14 @@ from UI.widgets.measurements.circles import (
     RadiusCircleMeasurement,
     ThreePointCircleMeasurement,
 )
+from UI.widgets.measurements.curves import CurveMeasurement
 from UI.widgets.measurements.ellipses import (
     FivePointEllipseMeasurement,
     ThreePointEllipseMeasurement,
+)
+from UI.widgets.measurements.line_pairs import (
+    ParallelLineMeasurement,
+    PerpendicularLineMeasurement,
 )
 from UI.widgets.measurements.lines import (
     ArbitraryLineMeasurement,
@@ -76,6 +81,9 @@ _MEASUREMENT_TYPES = (
     FourPointAngleMeasurement,
     ThreePointArcMeasurement,
     RadiusArcMeasurement,
+    CurveMeasurement,
+    ParallelLineMeasurement,
+    PerpendicularLineMeasurement,
 )
 
 
