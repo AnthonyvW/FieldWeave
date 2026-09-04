@@ -510,6 +510,11 @@ class MeasurementCustomizeMenu(QFrame):
         self._unit_container.setLayout(unit_row)
         layout.addWidget(self._unit_container)
 
+        # Scale-bar-only fields sit right after Unit/Decimals — effectively
+        # the top of the popup for a scale bar, since Title/Description are
+        # hidden for it — with Bar Length first (feature: length at the top).
+        self._build_scalebar_controls(layout)
+
         self._build_font_width_controls(layout)
 
         self._area_check = QCheckBox("Show area")
@@ -567,7 +572,6 @@ class MeasurementCustomizeMenu(QFrame):
         layout.addWidget(self._opacity_control)
 
         self._build_tag_style_controls(layout)
-        self._build_scalebar_controls(layout)
         self._build_line_style_controls(layout)
 
         # Reset Style lives at the bottom of the scrollable field list
@@ -614,6 +618,9 @@ class MeasurementCustomizeMenu(QFrame):
         self.hide()
 
     def _build_font_width_controls(self, layout: QVBoxLayout) -> None:
+        # Font and its size share one row the same way Unit/Decimals do,
+        # so the size field lines up with the rest rather than sitting
+        # alone as a full-width box.
         font_row = QHBoxLayout()
         font_row.addWidget(_field_label("Font"))
         self._font_combo = QFontComboBox()
@@ -627,16 +634,13 @@ class MeasurementCustomizeMenu(QFrame):
         block_wheel(self._font_combo)
         self._font_combo.currentFontChanged.connect(self._on_live_field_changed)
         font_row.addWidget(self._font_combo, 1)
-        layout.addLayout(font_row)
-
-        size_row = QHBoxLayout()
-        size_row.addWidget(_field_label("Font Size"))
+        font_row.addWidget(_field_label("Size"))
         self._font_size_spin = QSpinBox()
         self._font_size_spin.setRange(6, 96)
         block_wheel(self._font_size_spin)
         self._font_size_spin.valueChanged.connect(self._on_live_field_changed)
-        size_row.addWidget(self._font_size_spin, 1)
-        layout.addLayout(size_row)
+        font_row.addWidget(self._font_size_spin)
+        layout.addLayout(font_row)
 
         self._tag_width_label = _field_label("Tag Width (0 = auto)")
         layout.addWidget(self._tag_width_label)
@@ -682,6 +686,14 @@ class MeasurementCustomizeMenu(QFrame):
         layout.addWidget(self._fill_opacity_control)
 
     def _build_scalebar_controls(self, layout: QVBoxLayout) -> None:
+        """
+        Scale-bar-only fields, ordered: what the bar is (length,
+        thickness) — length first and, since this whole method is now
+        called right after Unit/Decimals (see __init__), effectively at
+        the top of the popup for a scale bar — then where it goes
+        (anchor, position), then how its background panel looks (padding,
+        background toggle).
+        """
         self._scalebar_widgets: list[QWidget] = []
 
         length_row = QHBoxLayout()
@@ -705,16 +717,6 @@ class MeasurementCustomizeMenu(QFrame):
         self._scalebar_thickness_control.value_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._scalebar_thickness_control)
         self._scalebar_widgets += [self._scalebar_thickness_label, self._scalebar_thickness_control]
-
-        # Padding is the gap between the bar/label and the background
-        # panel's edge, separate from the corner margin (Bar Margin, shared
-        # with text via _text_margin_control).
-        self._scalebar_padding_label = _field_label("Bar Padding")
-        layout.addWidget(self._scalebar_padding_label)
-        self._scalebar_padding_control = _ThicknessControl(0.0, 40.0)
-        self._scalebar_padding_control.value_changed.connect(self._on_live_field_changed)
-        layout.addWidget(self._scalebar_padding_control)
-        self._scalebar_widgets += [self._scalebar_padding_label, self._scalebar_padding_control]
 
         anchor_row = QHBoxLayout()
         anchor_row.addWidget(_field_label("Anchor"))
@@ -746,6 +748,17 @@ class MeasurementCustomizeMenu(QFrame):
         position_row.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(position_container)
         self._scalebar_widgets.append(position_container)
+
+        # Padding is the gap between the bar/label and the background
+        # panel's edge, separate from the corner margin (Bar Margin, shared
+        # with text via _text_margin_control) — grouped here with the
+        # background toggle since both are about the panel's own look.
+        self._scalebar_padding_label = _field_label("Bar Padding")
+        layout.addWidget(self._scalebar_padding_label)
+        self._scalebar_padding_control = _ThicknessControl(0.0, 40.0)
+        self._scalebar_padding_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._scalebar_padding_control)
+        self._scalebar_widgets += [self._scalebar_padding_label, self._scalebar_padding_control]
 
         self._scalebar_bg_check = QCheckBox("Scale bar background")
         self._scalebar_bg_check.toggled.connect(self._on_live_field_changed)
@@ -949,11 +962,14 @@ class MeasurementCustomizeMenu(QFrame):
         self._line_thickness_label.setVisible(not is_annotation)
         self._line_thickness_control.setVisible(not is_annotation)
         self._line_style_picker.setVisible(not is_point and not is_annotation)
-        # A text annotation keeps its background/transparency and text
-        # color (its box and glyphs); a scale bar's panel uses the tag
-        # background as its own and colors its label from the bar color.
-        self._tag_transparent_check.setVisible(not show_scalebar)
-        self._tag_bg_picker.setVisible(not meta.tag_background_transparent or show_scalebar)
+        # A text annotation keeps its background color and text color
+        # (its box and glyphs) but not the separate transparency toggle —
+        # Opacity at 0 already makes the background invisible, so the
+        # toggle would just be a second way to do the same thing; a scale
+        # bar's panel uses the tag background as its own and colors its
+        # label from the bar color.
+        self._tag_transparent_check.setVisible(not is_annotation)
+        self._tag_bg_picker.setVisible(is_annotation or not meta.tag_background_transparent)
         self._tag_text_picker.setVisible(not show_scalebar)
         self._midpoint_picker.set_value(meta.midpoint_style)
         self._midpoint_picker.setVisible(show_caps)
@@ -1104,7 +1120,10 @@ class MeasurementCustomizeMenu(QFrame):
             indicator_opacity=self._indicator_opacity_control.value(),
             indicator_dash_style=self._indicator_style_picker.value(),
             opacity=self._opacity_control.value(),
-            tag_background_transparent=self._tag_transparent_check.isChecked(),
+            # Text has no separate transparency toggle (Opacity at 0
+            # already hides its background) — always store it opaque so a
+            # stale checkbox state from another kind never sticks.
+            tag_background_transparent=False if self._is_text else self._tag_transparent_check.isChecked(),
             midpoint_style=self._midpoint_picker.value(),
             show_area=self._area_check.isChecked(),
             area_unit=self._area_unit_combo.currentData(),

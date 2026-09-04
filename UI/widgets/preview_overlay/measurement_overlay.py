@@ -200,6 +200,10 @@ class MeasurementOverlay(Overlay):
         self._draft_type: str | None = None
         self._draft_points: list[tuple[float, float]] | None = None
         self._draft_preview: tuple[float, float] | None = None
+        # Notified right after a Scale Bar is placed (a one-off measurement
+        # — typically only one is wanted) so the UI can deselect its tile
+        # instead of leaving placement armed for a stray next click.
+        self._on_scalebar_placed: Callable[[], None] | None = None
 
         self._drag_measurement_index: int | None = None
         self._drag_point_index: int | None = None
@@ -363,6 +367,22 @@ class MeasurementOverlay(Overlay):
     def in_progress(self) -> bool:
         return self._draft_points is not None
 
+    def active_type_category(self) -> str | None:
+        """The active placement kind's own category, or None if there isn't one — lets a caller ask "is the next click about to place a scale bar" without importing the registry itself."""
+        entry = DEFAULT_REGISTRY.get(self._active_type)
+        return entry.category if entry is not None else None
+
+    def has_category(self, category: str) -> bool:
+        """Whether any already-placed measurement (for the active source) belongs to *category* — e.g. confirming before a second Scale Bar."""
+        for measurement in self.measurements:
+            entry = DEFAULT_REGISTRY.get(measurement.kind)
+            if entry is not None and entry.category == category:
+                return True
+        return False
+
+    def set_on_scalebar_placed(self, callback: Callable[[], None] | None) -> None:
+        self._on_scalebar_placed = callback
+
     # ------------------------------------------------------------------
     # Placement — place_point handles every click, whether it's the
     # first point of a new draft, a middle point, or the one that
@@ -388,6 +408,8 @@ class MeasurementOverlay(Overlay):
                 if entry.category == "scalebar":
                     meta = self._init_scalebar_length(meta)
                 self.measurements.append(Measurement(self._active_type, resolved, meta))
+                if entry.category == "scalebar" and self._on_scalebar_placed is not None:
+                    self._on_scalebar_placed()
                 return True
             self._draft_type = self._active_type
             self._draft_points = [point]
@@ -1304,7 +1326,7 @@ class MeasurementOverlay(Overlay):
                 font.setFamily(meta.font_family)
             font.setPixelSize(max(1, round(base_size)))
             metrics = QFontMetricsF(font)
-            label = f"{meta.scalebar_length:g} {unit.value}"
+            label = f"{meta.scalebar_length:.{max(0, meta.decimal_places)}f} {unit.value}"
             text_w = metrics.horizontalAdvance(label)
             text_h = metrics.height()
             gap = 3.0
@@ -2327,7 +2349,11 @@ class MeasurementOverlay(Overlay):
             desc_font = QFont(font)
             desc_font.setPixelSize(max(1, round(base_size - 2)))
             desc_metrics = QFontMetricsF(desc_font)
-            wrap_width = max(text_w, _DESC_MIN_WRAP_WIDTH)
+            # A set tag_width forces the box wider than the title alone
+            # (see box_w below) — the description should wrap to fill
+            # that width too, not just the title's, or it's left looking
+            # narrower than the box it's actually drawn in.
+            wrap_width = max(text_w, _DESC_MIN_WRAP_WIDTH, tag_width - pad_x * 2)
             desc_wrap_rect = desc_metrics.boundingRect(
                 QRectF(0, 0, wrap_width, 10_000), Qt.TextFlag.TextWordWrap, description
             )
@@ -3344,6 +3370,10 @@ class MeasurementOverlayController:
         """Set which measurement kind new clicks on the preview should place, or None to disable placement."""
         self._overlay.set_active_type(kind)
         self._repaint()
+
+    def set_scalebar_placed_callback(self, callback: Callable[[], None] | None) -> None:
+        """Notified right after a Scale Bar is placed — see MeasurementOverlay.set_on_scalebar_placed."""
+        self._overlay.set_on_scalebar_placed(callback)
 
     @property
     def dpi(self) -> float | None:

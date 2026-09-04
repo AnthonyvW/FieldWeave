@@ -114,6 +114,7 @@ class MeasurementTab(CameraWithSidebarPage):
         preview = get_app_context().camera_preview
         if preview is not None:
             self._mode_token = preview.modes.push(MEASUREMENT_MODE)
+            preview.overlays.measurement.set_scalebar_placed_callback(self._on_scalebar_placed)
 
     def hideEvent(self, event: QEvent) -> None:
         super().hideEvent(event)
@@ -121,6 +122,9 @@ class MeasurementTab(CameraWithSidebarPage):
         if self._mode_token is not None:
             self._mode_token.pop()
             self._mode_token = None
+        preview = get_app_context().camera_preview
+        if preview is not None:
+            preview.overlays.measurement.set_scalebar_placed_callback(None)
 
     def _on_measurement_selected(self, kind: str | None) -> None:
         preview = get_app_context().camera_preview
@@ -133,6 +137,10 @@ class MeasurementTab(CameraWithSidebarPage):
         preview = get_app_context().camera_preview
         if preview is not None:
             preview.overlays.measurement.clear_measurements()
+
+    def _on_scalebar_placed(self) -> None:
+        """A Scale Bar is a one-off measurement — deselect its tile after placing one rather than leaving placement armed for a stray next click."""
+        self._measurements.clear_selection()
 
     def _on_default_meta_changed(self, meta: MeasurementMeta) -> None:
         preview = get_app_context().camera_preview

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -158,16 +158,16 @@ _CATEGORY_GROUPS = (
 
 
 def _delete_all_icon(size: int = 14) -> QIcon:
-    """A plain black X, for the Delete All button in the measurement types header."""
+    """A plain black X, sized like any other category chip's icon, for the Delete All chip."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     pen = QPen(QColor("#000000"))
-    pen.setWidth(2)
+    pen.setWidth(max(2, round(size / 12)))
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     painter.setPen(pen)
-    inset = 3.0
+    inset = size * 0.2
     painter.drawLine(QPointF(inset, inset), QPointF(size - inset, size - inset))
     painter.drawLine(QPointF(size - inset, inset), QPointF(inset, size - inset))
     painter.end()
@@ -372,27 +372,28 @@ class MeasurementsWidget(QWidget):
             self._content_stack.addWidget(page)
             self._category_tiles.append(tiles)
 
+        # Delete All sits in the chip row itself, sized and styled like any
+        # other category chip, rather than inside the content box — it acts
+        # on every placed measurement, not just the selected category.
+        self._delete_all_button = QToolButton()
+        self._delete_all_button.setObjectName("MeasurementTile")
+        self._delete_all_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self._delete_all_button.setIconSize(sample.iconSize())
+        self._delete_all_button.setFixedSize(sample.size())
+        self._delete_all_button.setIcon(_delete_all_icon(sample.iconSize().width()))
+        self._delete_all_button.setText("Delete All")
+        self._delete_all_button.setToolTip("Delete all placed measurements")
+        self._delete_all_button.clicked.connect(self._on_delete_all)
+        delete_all_index = len(_CATEGORY_GROUPS)
+        row, column = divmod(delete_all_index, GRID_COLUMNS)
+        chip_grid.addWidget(self._delete_all_button, row, column)
+
         layout.addLayout(chip_grid)
 
         self._content_box = QGroupBox(_CATEGORY_GROUPS[0][1])
         content_layout = QVBoxLayout(self._content_box)
         content_layout.setContentsMargins(4, 12, 4, 4)
         content_layout.setSpacing(0)
-        # A right-aligned Delete All (black X) above the tiles clears every
-        # placed measurement after a confirmation — see _on_delete_all.
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.addStretch(1)
-        self._delete_all_button = QToolButton()
-        self._delete_all_button.setIcon(_delete_all_icon())
-        self._delete_all_button.setIconSize(QSize(14, 14))
-        self._delete_all_button.setAutoRaise(True)
-        self._delete_all_button.setToolTip("Delete All")
-        self._delete_all_button.setText("Delete All")
-        self._delete_all_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._delete_all_button.clicked.connect(self._on_delete_all)
-        header_row.addWidget(self._delete_all_button)
-        content_layout.addLayout(header_row)
         content_layout.addWidget(self._content_stack)
         layout.addWidget(self._content_box)
 

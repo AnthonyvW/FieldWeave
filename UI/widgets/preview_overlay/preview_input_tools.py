@@ -4,6 +4,7 @@ from typing import Callable, Protocol
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent
+from PySide6.QtWidgets import QMessageBox
 
 from UI.widgets.preview_overlay.click_to_move import ClickToMoveOverlay
 from UI.widgets.preview_overlay.input_tool import DragGestureRecognizer, InputContext, InputTool
@@ -246,6 +247,21 @@ class MeasurementPlacementTool(InputTool):
             if self._zoom.active:
                 self._zoom.end_drag()
         else:
+            # A scale bar is normally a one-off — confirm before a second
+            # one, rather than silently stacking bars on top of each other.
+            if (
+                not self._measurement.in_progress
+                and self._measurement.active_type_category() == "scalebar"
+                and self._measurement.has_category("scalebar")
+            ):
+                confirm = QMessageBox.question(
+                    self._video_label, "Add another scale bar",
+                    "A scale bar is already placed. Add another?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if confirm != QMessageBox.StandardButton.Yes:
+                    return True
             # A plain click (no drag): place_point itself knows whether
             # this starts a new draft, adds a point to one already in
             # progress, or (for "Point") finalizes immediately.
