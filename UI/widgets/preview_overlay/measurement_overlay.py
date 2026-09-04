@@ -18,7 +18,8 @@ from PySide6.QtGui import (
 )
 
 from UI.widgets.measurements.lines import (
-    CALIBRATION_KIND, arrow_dims, arrow_head_path, bracket_path, open_arrow_barbs_path,
+    CALIBRATION_KIND, arrow_dims, arrow_head_path, bracket_path, circle_head_path, circle_head_radius,
+    diamond_head_path, open_arrow_barbs_path,
 )
 from UI.widgets.measurements.measurement_io import (
     DeserializeResult,
@@ -2226,6 +2227,18 @@ class MeasurementOverlay(Overlay):
 
             self._draw_measurement(painter, rect, kind, display_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True)
 
+            # A capped line kind (e.g. an Arrow) shows its head while
+            # placing too — the dashed preview shaft skips caps, so the
+            # cap shapes are drawn solid on top from the kind's own preset.
+            if entry.category == "line" and len(display_points) >= 2:
+                preset = entry.meta_preset or {}
+                start_cap = preset.get("line_start_cap", self._default_meta.line_start_cap)
+                end_cap = preset.get("line_end_cap", self._default_meta.line_end_cap)
+                self._draw_preview_caps(
+                    painter, rect, tuple(display_points), stroke_scale, start_cap, end_cap,
+                    self._default_meta.cap_size_scale,
+                )
+
             # Annulus and two-circle aren't listed here: they preview each
             # sub-circle on its own as its points arrive (see their
             # partial geometry), so a straight guide would just clutter.
@@ -2757,8 +2770,16 @@ class MeasurementOverlay(Overlay):
         than the shaft (their disc/rect/tick never reaches past the true
         endpoint).
         """
+        # Solid heads shorten the shaft to their own back edge, minus a
+        # small *lw* overlap so the shaft fill runs a hair into the head
+        # rather than merely meeting it at a seam (which left a thin
+        # outline-colored line between shaft and head).
         if cap == "arrow":
-            return arrow_dims(lw, stroke_scale, cap_size)[0]
+            return max(0.0, arrow_dims(lw, stroke_scale, cap_size)[0] - lw)
+        if cap == "arrow_diamond":
+            return max(0.0, arrow_dims(lw, stroke_scale, cap_size)[0] - lw)
+        if cap == "arrow_circle":
+            return max(0.0, 2 * circle_head_radius(lw, stroke_scale, cap_size) - lw)
         if cap == "arrow_open":
             return cls._arrow_open_miter_overhang(lw, stroke_scale, cap_size)
         return 0.0
@@ -2791,6 +2812,35 @@ class MeasurementOverlay(Overlay):
         if dash_pattern:
             stroker.setDashPattern(dash_pattern)
         return stroker.createStroke(line)
+
+    def _draw_preview_caps(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        points: tuple[tuple[float, float], ...],
+        stroke_scale: float,
+        start_cap: str,
+        end_cap: str,
+        cap_size: float,
+    ) -> None:
+        """Draw just the end-cap shapes (solid) on a dashed placement preview, so an Arrow's head is visible while placing — see _draw_draft."""
+        if start_cap == "curved" and end_cap == "curved":
+            return
+        lw = OVERLAY_LINE_WIDTH / stroke_scale
+        ow = OVERLAY_OUTLINE_WIDTH / stroke_scale
+        p_first = self._to_point(rect, points[0])
+        p_last = self._to_point(rect, points[-1])
+        for origin, tip, cap in ((p_last, p_first, start_cap), (p_first, p_last, end_cap)):
+            if cap == "curved":
+                continue
+            cap_outline, cap_fill = self._cap_shapes(origin, tip, cap, lw, ow, stroke_scale, cap_size)
+            if cap_fill is None:
+                continue
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(OVERLAY_OUTLINE_COLOR))
+            painter.drawPath(cap_outline)
+            painter.setBrush(QBrush(OVERLAY_LINE_COLOR))
+            painter.drawPath(cap_fill)
 
     @classmethod
     def _cap_shapes(
@@ -2842,6 +2892,12 @@ class MeasurementOverlay(Overlay):
             outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.MiterJoin)
         elif cap == "arrow":
             fill_shape = arrow_head_path(lw, stroke_scale, cap_size)
+            outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.RoundJoin)
+        elif cap == "arrow_diamond":
+            fill_shape = diamond_head_path(lw, stroke_scale, cap_size)
+            outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.MiterJoin)
+        elif cap == "arrow_circle":
+            fill_shape = circle_head_path(lw, stroke_scale, cap_size)
             outline_shape = cls._inflate(fill_shape, ow, Qt.PenJoinStyle.RoundJoin)
         elif cap == "arrow_open":
             barbs = open_arrow_barbs_path(lw, stroke_scale, cap_size)

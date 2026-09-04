@@ -96,36 +96,53 @@ GRID_COLUMNS = 4
 # reveals that category's tiles below, under its section title. Selection
 # itself is still one exclusive group spanning every tile (see
 # MeasurementsWidget) — categories only decide which tiles are visible.
+# Each tile entry is (tile class, short label shown on the tile). The
+# label strips the category-implied word — the category title supplies
+# the context — while the tile's full `name` stays its tooltip.
 _CATEGORY_GROUPS = (
-    ("Point", "Point Measurements", (PointMeasurement,)),
+    ("Point", "Point Measurements", ((PointMeasurement, "Point"),)),
     ("Line", "Line Measurements", (
-        ArbitraryLineMeasurement, MultipointLineMeasurement, HorizontalLineMeasurement, VerticalLineMeasurement,
+        (ArbitraryLineMeasurement, "Arbitrary"), (MultipointLineMeasurement, "Multipoint"),
+        (HorizontalLineMeasurement, "Horizontal"), (VerticalLineMeasurement, "Vertical"),
     )),
-    ("Angle", "Angle Measurements", (ThreePointAngleMeasurement, FourPointAngleMeasurement)),
-    ("Arrow", "Arrow Annotations", (ArrowMeasurement, DoubleArrowMeasurement)),
-    ("Bracket", "Bracket Annotations", (BracketMeasurement,)),
+    ("Angle", "Angle Measurements", (
+        (ThreePointAngleMeasurement, "3 Point"), (FourPointAngleMeasurement, "4 Point"),
+    )),
+    ("Arrow", "Arrow Measurements", (
+        (ArrowMeasurement, "Single"), (DoubleArrowMeasurement, "Double"),
+    )),
+    ("Bracket", "Bracket Measurements", ((BracketMeasurement, "Bracket"),)),
     ("Circle", "Circle Measurements", (
-        RadiusCircleMeasurement, DiameterMeasurement, ThreePointCircleMeasurement,
+        (RadiusCircleMeasurement, "Radius"), (DiameterMeasurement, "Diameter"),
+        (ThreePointCircleMeasurement, "3 Point"),
     )),
-    ("Ellipse", "Ellipse Measurements", (ThreePointEllipseMeasurement, FivePointEllipseMeasurement)),
-    ("Curves", "Curve Measurements", (ThreePointArcMeasurement, RadiusArcMeasurement, CurveMeasurement)),
+    ("Ellipse", "Ellipse Measurements", (
+        (ThreePointEllipseMeasurement, "3 Point"), (FivePointEllipseMeasurement, "5 Point"),
+    )),
+    ("Curves", "Curve Measurements", (
+        (ThreePointArcMeasurement, "3 Point"), (RadiusArcMeasurement, "Radius"), (CurveMeasurement, "Curve"),
+    )),
     ("Parallel", "Parallel Measurements", (
-        ThreePointParallelMeasurement, FourPointParallelMeasurement, EightPointParallelMeasurement,
-        ArbitraryParallelMeasurement,
+        (ThreePointParallelMeasurement, "3 Point"), (FourPointParallelMeasurement, "4 Point"),
+        (EightPointParallelMeasurement, "8 Point"), (ArbitraryParallelMeasurement, "Arbitrary"),
     )),
     ("Perp", "Perpendicular Measurements", (
-        ThreePointPerpMeasurement, FourPointPerpMeasurement, ArbitraryPerpMeasurement,
+        (ThreePointPerpMeasurement, "3 Point"), (FourPointPerpMeasurement, "4 Point"),
+        (ArbitraryPerpMeasurement, "Arbitrary"),
     )),
     ("Rectangle", "Rectangle Measurements", (
-        TwoPointRectangleMeasurement, ThreePointRectangleMeasurement, TwoPointSquareMeasurement,
+        (TwoPointRectangleMeasurement, "2 Point"), (ThreePointRectangleMeasurement, "3 Point"),
+        (TwoPointSquareMeasurement, "Square"),
     )),
     ("Annulus", "Annulus Measurements", (
-        RadiusAnnulusMeasurement, ThreePointAnnulusMeasurement, DiameterAnnulusMeasurement,
+        (RadiusAnnulusMeasurement, "Radius"), (ThreePointAnnulusMeasurement, "3 Point"),
+        (DiameterAnnulusMeasurement, "Diameter"),
     )),
     ("2 Circle", "Two-Circle Measurements", (
-        RadiusTwoCircleMeasurement, ThreePointTwoCircleMeasurement, DiameterTwoCircleMeasurement,
+        (RadiusTwoCircleMeasurement, "Radius"), (ThreePointTwoCircleMeasurement, "3 Point"),
+        (DiameterTwoCircleMeasurement, "Diameter"),
     )),
-    ("Polygon", "Polygon Measurements", (PolygonMeasurement,)),
+    ("Polygon", "Polygon Measurements", ((PolygonMeasurement, "Polygon"),)),
 )
 
 
@@ -296,8 +313,8 @@ class MeasurementsWidget(QWidget):
         self._category_last: dict[int, QAbstractButton] = {}
         self._button_category: dict[QAbstractButton, int] = {}
 
-        for index, (chip_label, _title, tile_classes) in enumerate(_CATEGORY_GROUPS):
-            sample = tile_classes[0]()
+        for index, (chip_label, _title, tile_entries) in enumerate(_CATEGORY_GROUPS):
+            sample = tile_entries[0][0]()
             chip = _CategoryChip(
                 chip_label, sample._idle_icon, sample._active_icon, sample.iconSize(), sample.size(),
             )
@@ -310,8 +327,10 @@ class MeasurementsWidget(QWidget):
             page_grid.setContentsMargins(0, 0, 0, 0)
             page_grid.setSpacing(0)
             tiles: list[QAbstractButton] = []
-            for tile_index, tile_cls in enumerate(tile_classes):
+            for tile_index, (tile_cls, short_label) in enumerate(tile_entries):
                 button = tile_cls(page)
+                button.setText(short_label)
+                button.setToolTip(button.name)
                 self._button_group.addButton(button)
                 self._button_category[button] = index
                 tiles.append(button)

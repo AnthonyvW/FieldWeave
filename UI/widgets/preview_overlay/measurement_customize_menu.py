@@ -114,6 +114,15 @@ def _line_cap_icon(cap: str) -> QIcon:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawPolygon(QPolygonF([tip, QPointF(x2 - 4, y - 5), QPointF(x2 - 4, y + 5)]))
+    elif cap == "arrow_diamond":
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        mid = QPointF((tip.x() + x2 - 4) / 2, y)
+        painter.drawPolygon(QPolygonF([tip, QPointF(mid.x(), y - 5), QPointF(x2 - 4, y), QPointF(mid.x(), y + 5)]))
+    elif cap == "arrow_circle":
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(QPointF(tip.x() - 4, y), 4.0, 4.0)
     elif cap == "arrow_open":
         open_pen = QPen(color)
         open_pen.setWidth(2)

@@ -18,7 +18,7 @@ CALIBRATION_KIND = "Calibration Line"
 # since it's what an unset cap resolves to. Caps are a line-only
 # decoration (MeasurementOverlay never passes start_cap/end_cap when
 # drawing a circle), hence living here.
-MEASUREMENT_LINE_CAPS = ("curved", "square", "arrow", "arrow_open", "bracket")
+MEASUREMENT_LINE_CAPS = ("curved", "square", "arrow", "arrow_open", "arrow_diamond", "arrow_circle", "bracket")
 
 # Marker drawn at a line's midpoint (see MeasurementOverlay._draw_midpoint_marker).
 # "none" is first since it's what an unset style resolves to.
@@ -72,6 +72,30 @@ def open_arrow_barbs_path(line_width: float, stroke_scale: float = 1.0, size_sca
     path.moveTo(-arrow_len, -arrow_half_width)
     path.lineTo(0, 0)
     path.lineTo(-arrow_len, arrow_half_width)
+    return path
+
+
+def diamond_head_path(line_width: float, stroke_scale: float = 1.0, size_scale: float = 1.0) -> QPainterPath:
+    """Closed rhombus for an ("arrow_diamond") arrowhead — forward vertex at the origin (the true endpoint), back vertex at -arrow_len, side vertices halfway along at +-arrow_half. Same sizing as the solid arrow."""
+    arrow_len, arrow_half = arrow_dims(line_width, stroke_scale, size_scale)
+    path = QPainterPath()
+    path.moveTo(0, 0)
+    path.lineTo(-arrow_len / 2, -arrow_half)
+    path.lineTo(-arrow_len, 0)
+    path.lineTo(-arrow_len / 2, arrow_half)
+    path.closeSubpath()
+    return path
+
+
+def circle_head_radius(line_width: float, stroke_scale: float = 1.0, size_scale: float = 1.0) -> float:
+    return arrow_dims(line_width, stroke_scale, size_scale)[1]
+
+
+def circle_head_path(line_width: float, stroke_scale: float = 1.0, size_scale: float = 1.0) -> QPainterPath:
+    """Filled disc for an ("arrow_circle") arrowhead — its forward edge at the origin (the true endpoint), so the disc sits just behind the tip like the other heads."""
+    radius = circle_head_radius(line_width, stroke_scale, size_scale)
+    path = QPainterPath()
+    path.addEllipse(QPointF(-radius, 0), radius, radius)
     return path
 
 

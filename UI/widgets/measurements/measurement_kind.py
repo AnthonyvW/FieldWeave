@@ -1161,6 +1161,15 @@ def _perpendicular4_connectors(
     return _dimension_connectors((points[0], points[1]), points[2], full_dims)
 
 
+def _perpendicular4_snap(points: tuple[Point2D, ...], full_dims: tuple[int, int] | None) -> tuple[Point2D, ...]:
+    if len(points) < 4 or full_dims is None:
+        return points
+    second = _perpendicular4_second(points, full_dims)
+    if second is None:
+        return points
+    return (points[0], points[1], second[0], second[1])
+
+
 def _perpendicular4_distance(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> tuple[Point2D, float] | None:
     if len(points) < 4:
         return None
@@ -1217,6 +1226,22 @@ def _arbitrary_perpendicular_connectors(
         elif t > 1.0:
             connectors.append((ref[1], foot))
     return connectors
+
+
+def _arbitrary_perpendicular_measures(points: tuple[Point2D, ...], full_dims: tuple[int, int]) -> list[tuple[Point2D, float]]:
+    """A length tag for each perpendicular line (from its foot on the reference line out to the placed point)."""
+    if len(points) < 2:
+        return []
+    ref = (points[0], points[1])
+    measures = []
+    for extra in points[2:]:
+        foot = _perpendicular_foot((points[0], points[1], extra), full_dims)
+        if foot is None:
+            continue
+        gap = _line_gap_px(ref, extra, full_dims)
+        if gap is not None:
+            measures.append((_mid2(foot, extra), gap))
+    return measures
 
 
 def _arbitrary_parallel_connectors(
@@ -1603,13 +1628,15 @@ DEFAULT_REGISTRY.register(MeasurementKind(
     name="4pt Perp", required_points=4, category="line_pair",
     resolve=_four_point_resolve, segment_pairs=_perpendicular4_segments,
     connector_segments=_perpendicular4_connectors, pair_distance=_perpendicular4_distance,
+    snap_points=_perpendicular4_snap,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # A first line, then each additional click drops another perpendicular
     # off it — right-click to finish.
     name="Arbitrary Perp", required_points=None, category="line_pair",
     resolve=_arbitrary_perpendicular_resolve, segment_pairs=_arbitrary_perpendicular_segments,
-    connector_segments=_arbitrary_perpendicular_connectors, min_points=3,
+    connector_segments=_arbitrary_perpendicular_connectors,
+    extra_measures=_arbitrary_perpendicular_measures, min_points=3,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     # Same behavior as "Arbitrary Line" — an unbounded polyline — with a
