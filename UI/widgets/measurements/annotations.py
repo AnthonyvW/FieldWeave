@@ -54,28 +54,28 @@ class CountMeasurement(MeasurementButton):
     name = "Count"
 
     def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
-        # Stacked in a column (rather than scattered around the box) so
-        # each point's own number always lands in the clear space to its
-        # right, at a different height than the other two — no per-point
-        # direction juggling needed to dodge the icon's own edges or the
-        # other labels.
-        x = rect.left() + LINE_MARGIN
-        top = rect.top() + LINE_MARGIN
-        bottom = rect.bottom() - LINE_MARGIN
+        # Back to a triangle of unconnected dots (not stacked in a boring
+        # column) — but each number sits off to the outward side of its
+        # own dot, away from the triangle's own middle, rather than all
+        # three crowding together at the centroid the way pointing them
+        # all toward "up-right" did.
         points = (
-            QPoint(x, top),
-            QPoint(x, round((top + bottom) / 2)),
-            QPoint(x, bottom),
+            QPoint(rect.left() + 12, rect.bottom() - 12),   # bottom-left
+            QPoint(rect.left() + 18, rect.top() + 10),       # top-center
+            QPoint(rect.left() + 24, rect.bottom() - 12),   # bottom-right
         )
+        # (dx, dy) for each label's top-left corner, chosen to point away
+        # from the triangle's own middle rather than in toward it.
+        label_offsets = ((-10, -2), (-7, -9), (-2, 0))
         font = QFont(painter.font())
         font.setPixelSize(9)
         font.setBold(True)
         painter.setFont(font)
-        for i, point in enumerate(points):
+        for i, (point, (dx, dy)) in enumerate(zip(points, label_offsets)):
             self._draw_point(painter, point, ENDPOINT_RADIUS, active)
             painter.setPen(LINE_COLOR)
             painter.drawText(
-                QRectF(point.x() + 5, point.y() - 6, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
+                QRectF(point.x() + dx, point.y() + dy, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
             )
 
 

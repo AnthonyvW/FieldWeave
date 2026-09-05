@@ -2545,6 +2545,35 @@ class MeasurementOverlay(Overlay):
 
         local_box = QRectF(-box_w / 2, -OVERLAY_LABEL_OFFSET - box_h, box_w, box_h)
 
+        # Nudge the anchor so the tag's own box stays fully inside the
+        # visible viewport — a shallow-angle 4pt Angle (or any shape whose
+        # label anchor lands near an edge) could otherwise draw a tag
+        # mostly or entirely off-screen with no way to see or reach it.
+        # Computed in device space (the composed transform this box will
+        # actually be drawn through) since local_box's own coordinates
+        # are already undistorted screen pixels, not "rect" units.
+        composed = QTransform(painter.transform())
+        composed.translate(point.x(), point.y())
+        if scale_x > 0 and scale_y > 0:
+            composed.scale(1.0 / scale_x, 1.0 / scale_y)
+        device_box = composed.mapRect(local_box)
+        viewport = painter.viewport()
+        dx = 0.0
+        if device_box.left() < viewport.left():
+            dx = viewport.left() - device_box.left()
+        elif device_box.right() > viewport.right():
+            dx = viewport.right() - device_box.right()
+        dy = 0.0
+        if device_box.top() < viewport.top():
+            dy = viewport.top() - device_box.top()
+        elif device_box.bottom() > viewport.bottom():
+            dy = viewport.bottom() - device_box.bottom()
+        if dx or dy:
+            inv, ok = composed.inverted()
+            if ok:
+                shift = inv.map(QPointF(dx, dy)) - inv.map(QPointF(0.0, 0.0))
+                point = QPointF(point.x() + shift.x(), point.y() + shift.y())
+
         painter.save()
         painter.translate(point)
         if scale_x > 0 and scale_y > 0:
@@ -3108,6 +3137,19 @@ class MeasurementOverlay(Overlay):
                 painter, rect, (circles[0][0], circles[1][0]), stroke_scale, dashed=dashed,
                 line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
             )
+        elif len(circles) == 1 and entry.two_circle_center_offset is not None and entry.required_points:
+            # The second circle's own center point (not its edge/radius
+            # point yet) is enough to preview the connector for a
+            # center-first kind (e.g. "Radius 2 Circle") — no reason to
+            # make the user place the whole second circle first just to
+            # see the distance start forming.
+            per_circle = entry.required_points // 2
+            center_index = per_circle + entry.two_circle_center_offset
+            if center_index < len(points):
+                self._draw_polyline(
+                    painter, rect, (circles[0][0], points[center_index]), stroke_scale, dashed=dashed,
+                    line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
+                )
 
     def _draw_stroke(
         self,

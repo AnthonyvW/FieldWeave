@@ -162,6 +162,16 @@ class MeasurementKind:
     # each circle previews as its own points arrive rather than the whole
     # thing waiting on the last click.
     two_circle_partial: Callable[[tuple[Point2D, ...], tuple[int, int]], list[CircleGeometry]] | None = None
+    # "two_circle" category only, and only for a kind whose second circle
+    # starts with its own center point (e.g. "Radius Two Circle" — center,
+    # then edge): that point's own index within one circle's point slice
+    # (always 0 for a center-first kind), so the center-to-center
+    # connector can preview as soon as the second circle's center alone is
+    # placed rather than waiting on its edge/radius point too. None for a
+    # kind with no single raw point that's already a center on its own
+    # (e.g. "Diameter Two Circle"'s pair of diameter endpoints, or "3
+    # Point Two Circle"'s circumcenter, both undetermined until complete).
+    two_circle_center_offset: int | None = None
     # True when segment_pairs' segments are actually consecutive (share
     # an endpoint, like "3 Point Angle"'s two legs at the vertex) — drawn
     # as one polyline (proper joint, matching "Arbitrary Line") instead
@@ -1167,7 +1177,12 @@ def _perpendicular4_connectors(
     points: tuple[Point2D, ...], full_dims: tuple[int, int] | None = None
 ) -> list[tuple[Point2D, Point2D]]:
     """A dashed line from the perpendicular line's start down to the reference line (collinear with the perpendicular line itself), plus an extension when its foot lands past the reference segment."""
-    if len(points) < 4:
+    # Only points[0..2] (reference line + the perpendicular's start) are
+    # actually needed — showing this as soon as the 3rd point is placed,
+    # rather than waiting on the 4th too, since the dashed connector is
+    # about that point's own foot on the reference line and doesn't
+    # involve the second line's far end at all.
+    if len(points) < 3:
         return []
     return _dimension_connectors((points[0], points[1]), points[2], full_dims)
 
@@ -1692,7 +1707,7 @@ DEFAULT_REGISTRY.register(MeasurementKind(
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="Radius 2 Circle", required_points=4, category="two_circle",
     resolve=_two_point_pair_resolve, two_circle_geometry=_radius_two_circle_geometry,
-    two_circle_partial=_radius_two_circle_partial,
+    two_circle_partial=_radius_two_circle_partial, two_circle_center_offset=0,
 ))
 DEFAULT_REGISTRY.register(MeasurementKind(
     name="3pt 2 Circle", required_points=6, category="two_circle",
