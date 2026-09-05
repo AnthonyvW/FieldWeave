@@ -742,7 +742,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_transparent_check.toggled.connect(self._on_tag_transparent_toggled)
         layout.addWidget(self._tag_transparent_check)
 
-        self._tag_bg_picker = _ColorPicker("Tag Background Color", OVERLAY_LINE_COLOR.name())
+        self._tag_bg_picker = _ColorPicker("Background Color", OVERLAY_LINE_COLOR.name())
         self._tag_bg_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._tag_bg_picker)
 
@@ -805,6 +805,12 @@ class MeasurementCustomizeMenu(QFrame):
         block_wheel(self._scalebar_unit_combo)
         self._scalebar_unit_combo.currentIndexChanged.connect(self._on_live_field_changed)
         length_row.addWidget(self._scalebar_unit_combo)
+        length_row.addWidget(_field_label("Decimals"))
+        self._scalebar_decimals_spin = QSpinBox()
+        self._scalebar_decimals_spin.setRange(0, 6)
+        block_wheel(self._scalebar_decimals_spin)
+        self._scalebar_decimals_spin.valueChanged.connect(self._on_live_field_changed)
+        length_row.addWidget(self._scalebar_decimals_spin)
         length_container = QWidget()
         length_container.setLayout(length_row)
         length_row.setContentsMargins(0, 0, 0, 0)
@@ -860,18 +866,39 @@ class MeasurementCustomizeMenu(QFrame):
         layout.addWidget(self._scalebar_padding_control)
         self._scalebar_widgets += [self._scalebar_padding_label, self._scalebar_padding_control]
 
+        # Own dedicated control (edits the same shared text_margin field a
+        # text annotation's own "Text Margin" control does — see
+        # _current_meta) rather than reusing that widget directly, so its
+        # position here (just below Bar Padding) doesn't move Text Margin
+        # around in a text annotation's own field order.
+        self._scalebar_margin_label = _field_label("Bar Margin")
+        layout.addWidget(self._scalebar_margin_label)
+        self._scalebar_margin_control = _ThicknessControl(0.0, 40.0)
+        self._scalebar_margin_control.value_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._scalebar_margin_control)
+        self._scalebar_widgets += [self._scalebar_margin_label, self._scalebar_margin_control]
+
         self._scalebar_bg_check = QCheckBox("Scale bar background")
         self._scalebar_bg_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._scalebar_bg_check)
         self._scalebar_widgets.append(self._scalebar_bg_check)
 
         # Bar Color edits the same line_color field the generic Line Color
-        # picker does (see _current_meta) — kept last here so Font/Size,
-        # built right after this method returns, sit just below it.
+        # picker does (see _current_meta) — kept here so Font/Size, built
+        # right after this method returns, sit just below the pair of them.
         self._scalebar_color_picker = _ColorPicker("Bar Color", OVERLAY_LINE_COLOR.name())
         self._scalebar_color_picker.color_changed.connect(self._on_live_field_changed)
         layout.addWidget(self._scalebar_color_picker)
         self._scalebar_widgets.append(self._scalebar_color_picker)
+
+        # Own dedicated picker (edits the same shared tag_background_color
+        # field the generic "Background Color" picker below does) so a
+        # scale bar's panel color sits right under Bar Color instead of
+        # down with the other tags' fields.
+        self._scalebar_bg_picker = _ColorPicker("Background Color", OVERLAY_LINE_COLOR.name())
+        self._scalebar_bg_picker.color_changed.connect(self._on_live_field_changed)
+        layout.addWidget(self._scalebar_bg_picker)
+        self._scalebar_widgets.append(self._scalebar_bg_picker)
 
     def _build_line_style_controls(self, layout: QVBoxLayout) -> None:
         self._build_fill_controls(layout)
@@ -1049,6 +1076,7 @@ class MeasurementCustomizeMenu(QFrame):
         self._is_scalebar = show_scalebar
         self._scalebar_length_spin.setValue(meta.scalebar_length if meta.scalebar_length > 0 else 1.0)
         self._scalebar_unit_combo.setCurrentIndex(self._scalebar_unit_combo.findData(unit))
+        self._scalebar_decimals_spin.setValue(meta.decimal_places)
         self._scalebar_thickness_control.set_value(meta.scalebar_thickness)
         self._scalebar_anchor_combo.setCurrentIndex(0 if meta.scalebar_anchor_preview else 1)
         position_index = self._scalebar_position_combo.findData(meta.scalebar_position)
@@ -1056,6 +1084,8 @@ class MeasurementCustomizeMenu(QFrame):
             self._scalebar_position_combo.setCurrentIndex(position_index)
         self._scalebar_bg_check.setChecked(meta.scalebar_show_bg)
         self._scalebar_padding_control.set_value(meta.scalebar_padding)
+        self._scalebar_margin_control.set_value(meta.text_margin)
+        self._scalebar_bg_picker.set_color(meta.tag_background_color)
         for widget in self._scalebar_widgets:
             widget.setVisible(show_scalebar)
 
@@ -1094,12 +1124,12 @@ class MeasurementCustomizeMenu(QFrame):
         # group.
         self._tag_width_label.setVisible(not no_tag)
         self._tag_width_control.setVisible(not no_tag)
-        # A margin control serves both the text box's padding and the
-        # scale bar's inset; hidden for every ordinary measurement tag.
+        # Text's own margin control — a scale bar has its own dedicated
+        # "Bar Margin" control up in the scale-bar section instead (see
+        # _build_scalebar_controls), so this one is text-only.
         self._text_margin_control.set_value(meta.text_margin)
-        self._text_margin_label.setText("Text Margin" if show_text else "Bar Margin")
-        self._text_margin_label.setVisible(is_annotation)
-        self._text_margin_control.setVisible(is_annotation)
+        self._text_margin_label.setVisible(show_text)
+        self._text_margin_control.setVisible(show_text)
         # Opacity fades an ordinary measurement or a text annotation; a
         # scale bar is always fully opaque.
         self._opacity_label.setVisible(not show_scalebar)
@@ -1129,8 +1159,12 @@ class MeasurementCustomizeMenu(QFrame):
         self._tag_transparent_check.setVisible(not no_tag)
         # A "count" group has no box to color at all (its number color
         # comes from Tag Text Color below instead), so its background
-        # picker stays hidden regardless of the transparency toggle's state.
-        self._tag_bg_picker.setVisible(not is_count and (is_annotation or not meta.tag_background_transparent))
+        # picker stays hidden regardless of the transparency toggle's
+        # state; a scale bar edits the same field through its own
+        # "Background Color" picker up in the scale-bar section instead.
+        self._tag_bg_picker.setVisible(
+            not is_count and not show_scalebar and (is_annotation or not meta.tag_background_transparent)
+        )
         self._tag_text_picker.setVisible(not show_scalebar)
         self._midpoint_picker.set_value(meta.midpoint_style)
         self._midpoint_picker.setVisible(show_caps)
@@ -1255,7 +1289,7 @@ class MeasurementCustomizeMenu(QFrame):
             description=self._description_edit.toPlainText().strip(),
             font_bold=self._text_bold_check.isChecked(),
             unit=self._scalebar_unit_combo.currentData() if self._is_scalebar else self._unit_combo.currentData(),
-            tag_background_color=self._tag_bg_picker.color(),
+            tag_background_color=self._scalebar_bg_picker.color() if self._is_scalebar else self._tag_bg_picker.color(),
             tag_text_color=self._tag_text_picker.color(),
             always_show_description=self._always_show_description_check.isChecked(),
             line_color=self._scalebar_color_picker.color() if self._is_scalebar else self._line_color_picker.color(),
@@ -1267,7 +1301,7 @@ class MeasurementCustomizeMenu(QFrame):
             line_start_cap=self._start_cap_picker.value(),
             line_end_cap=self._end_cap_picker.value(),
             cap_size_scale=self._cap_size_control.value(),
-            decimal_places=self._decimals_spin.value(),
+            decimal_places=self._scalebar_decimals_spin.value() if self._is_scalebar else self._decimals_spin.value(),
             hidden=self._hidden_check.isChecked(),
             always_show_center=self._always_show_center_check.isChecked(),
             show_leg_lengths=self._show_leg_lengths_check.isChecked(),
@@ -1290,7 +1324,7 @@ class MeasurementCustomizeMenu(QFrame):
             font_family=self._font_combo.currentFont().family(),
             font_size=float(self._font_size_spin.value()),
             tag_width=self._tag_width_control.value(),
-            text_margin=self._text_margin_control.value(),
+            text_margin=self._scalebar_margin_control.value() if self._is_scalebar else self._text_margin_control.value(),
             scalebar_length=self._scalebar_length_spin.value(),
             scalebar_thickness=self._scalebar_thickness_control.value(),
             scalebar_anchor_preview=bool(self._scalebar_anchor_combo.currentData()),

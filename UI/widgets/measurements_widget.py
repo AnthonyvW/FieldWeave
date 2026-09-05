@@ -398,7 +398,11 @@ class MeasurementsWidget(QWidget):
         self._category_group.idClicked.connect(self._on_category_selected)
         first_chip = self._category_group.button(0)
         if first_chip is not None:
+            # setChecked doesn't emit idClicked (that only fires for an
+            # actual click), so the first category's own first tile would
+            # otherwise never get selected the way clicking the chip does.
             first_chip.setChecked(True)
+            self._on_category_selected(0)
         return group
 
     def _on_delete_all(self) -> None:

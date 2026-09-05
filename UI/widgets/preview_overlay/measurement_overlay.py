@@ -2696,7 +2696,15 @@ class MeasurementOverlay(Overlay):
             self._draw_measurement(
                 painter, rect, kind, preview_points, stroke_scale, scale_x, scale_y, full_dims, dashed=True
             )
-            if len(preview_points) >= 2:
+            if entry.category == "count":
+                # Numbers next to each point placed so far — not the
+                # hovering cursor position, which isn't a placed point
+                # yet — so the count is already visible while placing
+                # rather than only appearing once finalized.
+                if points:
+                    draft_measurement = Measurement(kind, tuple(points), self.default_meta_for(kind))
+                    self._draw_count_numbers(painter, rect, draft_measurement, scale_x, scale_y)
+            elif len(preview_points) >= 2:
                 self._draw_draft_label(painter, rect, kind, preview_points, scale_x, scale_y, full_dims)
         else:
             preview_points = (*points, preview) if preview is not None else tuple(points)
