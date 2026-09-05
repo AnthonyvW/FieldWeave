@@ -54,28 +54,26 @@ class CountMeasurement(MeasurementButton):
     name = "Count"
 
     def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
-        # Back to a triangle of unconnected dots (not stacked in a boring
-        # column) — but each number sits off to the outward side of its
-        # own dot, away from the triangle's own middle, rather than all
-        # three crowding together at the centroid the way pointing them
-        # all toward "up-right" did.
+        # A triangle of unconnected dots, each numbered directly above
+        # itself — matching how numbers actually sit above their own
+        # point on the preview (see MeasurementOverlay._draw_count_numbers)
+        # rather than off to one side. The top-center dot sits lower than
+        # it otherwise would to leave room for its own number above it
+        # without clipping the icon's top edge.
         points = (
-            QPoint(rect.left() + 12, rect.bottom() - 12),   # bottom-left
-            QPoint(rect.left() + 18, rect.top() + 10),       # top-center
-            QPoint(rect.left() + 24, rect.bottom() - 12),   # bottom-right
+            QPoint(rect.left() + 12, rect.bottom() - 10),   # bottom-left
+            QPoint(rect.left() + 18, rect.top() + 16),       # top-center
+            QPoint(rect.left() + 24, rect.bottom() - 10),   # bottom-right
         )
-        # (dx, dy) for each label's top-left corner, chosen to point away
-        # from the triangle's own middle rather than in toward it.
-        label_offsets = ((-10, -2), (-7, -9), (-2, 0))
         font = QFont(painter.font())
         font.setPixelSize(9)
         font.setBold(True)
         painter.setFont(font)
-        for i, (point, (dx, dy)) in enumerate(zip(points, label_offsets)):
+        for i, point in enumerate(points):
             self._draw_point(painter, point, ENDPOINT_RADIUS, active)
             painter.setPen(LINE_COLOR)
             painter.drawText(
-                QRectF(point.x() + dx, point.y() + dy, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
+                QRectF(point.x() - 7, point.y() - 13, 14, 12), Qt.AlignmentFlag.AlignCenter, str(i + 1)
             )
 
 
