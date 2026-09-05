@@ -32,6 +32,14 @@ class MeasurementTab(CameraWithSidebarPage):
         initial_kind, initial_meta = self._measurements.current_default_meta()
         if initial_kind is not None:
             self._on_default_meta_changed(initial_kind, initial_meta)
+        # MeasurementsWidget already auto-selected its first tile during its
+        # own construction, above — before this connect existed to hear it,
+        # so that first selection_changed emission was lost and the overlay
+        # was never told its type, leaving the first placement attempt a
+        # no-op until the user deselected/reselected a tile by hand.
+        initial_selection = self._measurements.selected_measurement()
+        if initial_selection is not None:
+            self._on_measurement_selected(initial_selection)
 
         self._measurements.dpi_value_submitted.connect(self._capture_control.submit_dpi_value)
         self._measurements.manual_calibration_started.connect(self._capture_control.request_manual_calibration)

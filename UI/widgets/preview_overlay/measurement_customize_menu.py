@@ -805,17 +805,27 @@ class MeasurementCustomizeMenu(QFrame):
         block_wheel(self._scalebar_unit_combo)
         self._scalebar_unit_combo.currentIndexChanged.connect(self._on_live_field_changed)
         length_row.addWidget(self._scalebar_unit_combo)
-        length_row.addWidget(_field_label("Decimals"))
-        self._scalebar_decimals_spin = QSpinBox()
-        self._scalebar_decimals_spin.setRange(0, 6)
-        block_wheel(self._scalebar_decimals_spin)
-        self._scalebar_decimals_spin.valueChanged.connect(self._on_live_field_changed)
-        length_row.addWidget(self._scalebar_decimals_spin)
         length_container = QWidget()
         length_container.setLayout(length_row)
         length_row.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(length_container)
         self._scalebar_widgets.append(length_container)
+
+        # Its own row rather than sharing Bar Length's (which is already
+        # Label + spin + Label + combo) — cramming a third field onto that
+        # row was forcing the whole sidebar wider than RIGHT_SIDEBAR_WIDTH.
+        decimals_row = QHBoxLayout()
+        decimals_row.addWidget(_field_label("Decimals"))
+        self._scalebar_decimals_spin = QSpinBox()
+        self._scalebar_decimals_spin.setRange(0, 6)
+        block_wheel(self._scalebar_decimals_spin)
+        self._scalebar_decimals_spin.valueChanged.connect(self._on_live_field_changed)
+        decimals_row.addWidget(self._scalebar_decimals_spin, 1)
+        decimals_container = QWidget()
+        decimals_container.setLayout(decimals_row)
+        decimals_row.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(decimals_container)
+        self._scalebar_widgets.append(decimals_container)
 
         self._scalebar_thickness_label = _field_label("Bar Thickness")
         layout.addWidget(self._scalebar_thickness_label)

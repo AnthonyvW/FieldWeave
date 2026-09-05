@@ -63,11 +63,17 @@ class CountMeasurement(MeasurementButton):
         font.setPixelSize(9)
         font.setBold(True)
         painter.setFont(font)
-        for i, point in enumerate(points):
+        # Each label sits on whichever side of its point stays inside the
+        # icon box — above-right worked for the bottom-left point alone;
+        # the top-center and right-edge points need their own directions
+        # (below, and left) or their numbers clipped straight out of the
+        # icon.
+        label_offsets = ((4, -10), (-7, 11), (-17, -10))
+        for i, (point, (dx, dy)) in enumerate(zip(points, label_offsets)):
             self._draw_point(painter, point, ENDPOINT_RADIUS, active)
             painter.setPen(LINE_COLOR)
             painter.drawText(
-                QRectF(point.x() + 4, point.y() - 10, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
+                QRectF(point.x() + dx, point.y() + dy, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
             )
 
 

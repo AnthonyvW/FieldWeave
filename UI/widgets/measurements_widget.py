@@ -464,7 +464,14 @@ class MeasurementsWidget(QWidget):
         if self._selected_button is None:
             return None, DEFAULT_META
         kind = self._selected_button.name
-        return kind, self._defaults_menu.default_meta_for(kind)
+        meta = self._defaults_menu.default_meta_for(kind)
+        # A kind never opened in the embedded panel yet still carries
+        # DEFAULT_META's own unit=None (meaning "use the overlay's own
+        # fallback") — MeasurementTab.set_unit needs a concrete unit here,
+        # not None, since this seeds that very fallback at startup.
+        if meta.unit is None:
+            meta = meta._replace(unit=MeasurementUnit.MM)
+        return kind, meta
 
     def _on_default_meta_edited(self, kind: str, meta: MeasurementMeta) -> None:
         self.default_meta_changed.emit(kind, meta)
