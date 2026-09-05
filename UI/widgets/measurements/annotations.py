@@ -54,26 +54,28 @@ class CountMeasurement(MeasurementButton):
     name = "Count"
 
     def _paint_icon(self, painter: QPainter, rect: QRect, active: bool) -> None:
+        # Stacked in a column (rather than scattered around the box) so
+        # each point's own number always lands in the clear space to its
+        # right, at a different height than the other two — no per-point
+        # direction juggling needed to dodge the icon's own edges or the
+        # other labels.
+        x = rect.left() + LINE_MARGIN
+        top = rect.top() + LINE_MARGIN
+        bottom = rect.bottom() - LINE_MARGIN
         points = (
-            QPoint(rect.left() + LINE_MARGIN, rect.bottom() - LINE_MARGIN),
-            QPoint(rect.center().x(), rect.top() + LINE_MARGIN),
-            QPoint(rect.right() - LINE_MARGIN, rect.center().y()),
+            QPoint(x, top),
+            QPoint(x, round((top + bottom) / 2)),
+            QPoint(x, bottom),
         )
         font = QFont(painter.font())
         font.setPixelSize(9)
         font.setBold(True)
         painter.setFont(font)
-        # Each label sits on whichever side of its point stays inside the
-        # icon box — above-right worked for the bottom-left point alone;
-        # the top-center and right-edge points need their own directions
-        # (below, and left) or their numbers clipped straight out of the
-        # icon.
-        label_offsets = ((4, -10), (-7, 11), (-17, -10))
-        for i, (point, (dx, dy)) in enumerate(zip(points, label_offsets)):
+        for i, point in enumerate(points):
             self._draw_point(painter, point, ENDPOINT_RADIUS, active)
             painter.setPen(LINE_COLOR)
             painter.drawText(
-                QRectF(point.x() + dx, point.y() + dy, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
+                QRectF(point.x() + 5, point.y() - 6, 14, 12), Qt.AlignmentFlag.AlignLeft, str(i + 1)
             )
 
 

@@ -577,6 +577,20 @@ class MeasurementsWidget(QWidget):
         self._show_calibration_panel(True)
 
     def _show_calibration_panel(self, visible: bool) -> None:
+        """
+        Remembers whichever measurement tile was selected right as the
+        panel opens (any way it opens — the "Calibrate DPI" button, or
+        expand_calibration_panel's own passive open) so _end_calibration
+        can resume it once the panel closes, however it closes (Finish,
+        Cancel, the DPI entry Set button, or toggling "Calibrate DPI"
+        shut again without ever touching manual placement at all) —
+        capturing this only at the actual hidden-to-visible transition
+        rather than in _start_manual_calibration means a direct-entry-only
+        visit to the panel restores the tile too, not just a manual
+        calibration line.
+        """
+        if visible and not self._calibration_panel.isVisible():
+            self._pre_calibration_button = self._selected_button
         self._calibration_panel.setVisible(visible)
         if not visible:
             self._calibration_button.setChecked(False)
@@ -587,19 +601,10 @@ class MeasurementsWidget(QWidget):
         the tile checked (orange) regardless of its native toggle state —
         every click here means "I want to be placing a line right now",
         never "turn calibration mode off" (Cancel/Finish handle that).
-
-        Remembers whichever measurement tile was selected beforehand (if
-        any) so finishing or cancelling calibration can resume it — see
-        _end_calibration — rather than leaving placement disarmed until
-        the user picks a tool again.
+        Which tile to resume once calibration ends is already captured by
+        _show_calibration_panel, from when the panel first opened.
         """
-        # A re-click while already placing (restarting the line) shouldn't
-        # overwrite the tile remembered from before calibration first
-        # started with None (clear_selection already dropped it by then).
-        already_active = self._calibration_button.isChecked()
         self._calibration_button.setChecked(True)
-        if not already_active:
-            self._pre_calibration_button = self._selected_button
         self.clear_selection()
         self.manual_calibration_started.emit()
 
