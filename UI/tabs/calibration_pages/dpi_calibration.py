@@ -887,7 +887,14 @@ class DpiCalibrationStepsWidget(QWidget):
                     self._set_status(activity)
                 if result is not None:
                     _ResultsDialog(result, parent=self).exec()
-                    self._handle_capture_failure()
+                    # Deferred rather than called straight after .exec()
+                    # returns — closing a modal dialog can still have
+                    # pending focus/activation events in the queue that
+                    # would otherwise land after this step's own
+                    # calibration-line arming and clobber it (click-to-
+                    # move ends up still active instead). Letting those
+                    # settle first, then arming, makes it stick.
+                    QTimer.singleShot(0, self._handle_capture_failure)
             return
 
         activity = self._routine.activity
