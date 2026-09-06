@@ -58,11 +58,11 @@ _STEP_INFO: dict[str, tuple[str, str]] = {
     ),
     "qc": (
         "Quality Control",
-        "Inspect the resulting mosaic and ensure all tick marks are present. Press view image to open the image. If the measured DPI doesn't look right, you can also place a manual calibration line below before finishing.",
+        "Inspect the resulting mosaic and ensure all tick marks are present. Press View Image to open it. The next step lets you optionally refine or verify the measured DPI with a manually-placed reference line before finishing.",
     ),
     "manual": (
         "Manual DPI Calibration",
-        "Click two points on the preview to place a reference line, enter the real-world length it represents, then press Calculate DPI. You can use the zoom tools on the left side of the camera view, or hold Ctrl and scroll the mouse wheel, to zoom in and out for a more precise placement. Press Finish Calibration once the DPI value looks correct.",
+        "This step is optional — if the DPI value below already looks correct, you can press Finish Calibration right away. Otherwise, click two points on the preview to place a reference line, enter the real-world length it represents, then press Calculate DPI. You can use the zoom tools on the left side of the camera view, or hold Ctrl and scroll the mouse wheel, to zoom in and out for a more precise placement.",
     ),
 }
 
@@ -145,11 +145,29 @@ class _ResultsDialog(QDialog):
             warn_line.setObjectName("SampleDivider")
             layout.addWidget(warn_line)
 
+            # More than a few warnings would otherwise grow this dialog
+            # past the screen — scroll them instead, capped to a
+            # reasonable height, once there's enough to actually need it.
+            warnings_host: QVBoxLayout
+            if len(qa_warnings) > 3:
+                warnings_container = QWidget()
+                warnings_host = QVBoxLayout(warnings_container)
+                warnings_host.setContentsMargins(0, 0, 0, 0)
+                warnings_host.setSpacing(4)
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QFrame.Shape.NoFrame)
+                scroll.setMaximumHeight(150)
+                scroll.setWidget(warnings_container)
+                layout.addWidget(scroll)
+            else:
+                warnings_host = layout
+
             for msg in qa_warnings:
                 warn_label = QLabel(f"Warning: {msg}")
                 warn_label.setObjectName("CalErrorLabel")
                 warn_label.setWordWrap(True)
-                layout.addWidget(warn_label)
+                warnings_host.addWidget(warn_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(self.accept)
@@ -411,29 +429,21 @@ class DpiCalibrationStepsWidget(QWidget):
         return widget
 
     def _build_qc_widget(self) -> QWidget:
+        """
+        Purely informational now — the measured DPI, and buttons to
+        inspect the capture itself. Whether to accept it or refine it
+        manually happens on the dedicated "manual" step right after this
+        one (see _build_manual_widget), rather than a calibration-line
+        row bolted onto this one alongside Finish.
+        """
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        dpi_row = QHBoxLayout()
-        dpi_row.setSpacing(6)
-
-        dpi_row.addWidget(QLabel("DPI:"))
-
-        self._dpi_spin = QDoubleSpinBox()
-        self._dpi_spin.setMinimum(1.0)
-        self._dpi_spin.setMaximum(100_000.0)
-        self._dpi_spin.setDecimals(2)
-        self._dpi_spin.setSingleStep(10.0)
-        self._dpi_spin.setFixedWidth(110)
-        self._dpi_spin.setToolTip("DPI value that will be saved when you press Finish Calibration.")
-        dpi_row.addWidget(self._dpi_spin)
-        dpi_row.addStretch()
-        layout.addLayout(dpi_row)
-
-        manual_row, self._calibration_line_btn, _, _ = self._build_manual_calibration_row(self._dpi_spin)
-        layout.addWidget(manual_row)
+        self._qc_dpi_label = QLabel()
+        self._qc_dpi_label.setObjectName("CalSavedPosLabel")
+        layout.addWidget(self._qc_dpi_label)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
@@ -458,13 +468,16 @@ class DpiCalibrationStepsWidget(QWidget):
 
     def _build_manual_widget(self) -> QWidget:
         """
-        The whole manual path's own final step — skips the automatic
-        routine (tick detection, capture, mosaic QC) entirely, going
-        straight from "Choose Calibration Method" to placing a single
-        reference line and finishing. Its own dpi spin (_manual_dpi_spin)
-        keeps this path's value independent of the automatic path's
-        _dpi_spin, since both can't be showing at once but nothing
-        should reset the other's value if the user goes back and forth.
+        The very last step of either path — for the manual-only path it
+        follows straight from "Choose Calibration Method", skipping the
+        automatic routine (tick detection, capture, mosaic QC) entirely;
+        for the automatic path it follows "qc", as an optional place to
+        refine or verify the just-measured DPI with a manually-placed
+        line instead of accepting it as-is. Its own dpi spin
+        (_manual_dpi_spin) is seeded from whatever's already on record
+        each time this step is shown — see _refresh_manual_dpi_display —
+        and is the one value Finish Calibration actually saves (see
+        _on_finish_clicked), regardless of which path got here.
         """
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -485,9 +498,7 @@ class DpiCalibrationStepsWidget(QWidget):
         # Calibration Line" toggle either — placement is armed by default
         # for this whole step (see _update_step_display), so there's
         # nothing left for the user to press.
-        manual_row, self._manual_calibration_line_btn, value_spin, unit_combo = self._build_manual_calibration_row(
-            self._manual_dpi_spin, include_apply=False, show_line_button=False
-        )
+        manual_row, self._manual_calibration_line_btn, value_spin, unit_combo = self._build_manual_calibration_row()
         layout.addWidget(manual_row)
 
         calc_row = QHBoxLayout()
@@ -495,10 +506,7 @@ class DpiCalibrationStepsWidget(QWidget):
         calculate_btn = QPushButton("Calculate DPI")
         calculate_btn.setObjectName("CalSecondaryButton")
         calculate_btn.clicked.connect(
-            lambda: self._on_calibration_apply_clicked(
-                self._manual_calibration_line_btn, value_spin, unit_combo, self._manual_dpi_spin,
-                uncheck_after=False,
-            )
+            lambda: self._on_calibration_apply_clicked(value_spin, unit_combo, self._manual_dpi_spin)
         )
         calc_row.addWidget(calculate_btn)
         calc_row.addWidget(QLabel("DPI:"))
@@ -560,14 +568,19 @@ class DpiCalibrationStepsWidget(QWidget):
         The ordered step keys for whichever path is active. "choose" is
         always the last of the base three until a method is actually
         picked there (see _on_choose_automatic_clicked/_on_choose_manual_clicked),
-        at which point its own tail is appended — "manual" skips the
-        automatic routine (tick detection, capture, mosaic QC) entirely.
+        at which point its own tail is appended. "manual" is always the
+        very last step of either path — the automatic path's own tail
+        ends with it too, as an optional refinement/verification step
+        after the measured DPI is already in hand (see
+        _refresh_manual_dpi_display), rather than a calibration-line row
+        bolted onto the QC step itself; skipping the whole automatic
+        routine is just the case where "manual" is the tail on its own.
         """
         steps = ["position", "align", "choose"]
         if self._method == "manual":
             steps.append("manual")
         elif self._method == "automatic":
-            steps += ["tick", "capture", "qc"]
+            steps += ["tick", "capture", "qc", "manual"]
         return steps
 
     def _update_step_display(self) -> None:
@@ -625,17 +638,24 @@ class DpiCalibrationStepsWidget(QWidget):
             self._refresh_qc_dpi_display()
 
         self._manual_widget.setVisible(key == "manual")
+        if key == "manual":
+            # Seeds from whatever DPI is already on record — after the
+            # automatic routine, that's the value it just measured (the
+            # routine itself writes settings.dpi), so this step starts
+            # from "does this already look right?" rather than blank;
+            # for the manual-only path it's just whatever was last saved.
+            self._refresh_manual_dpi_display()
 
         self._relayout_sidebar()
         self._apply_overlays_for_step(key)
         self._set_status("")
         if key == "manual" and not self._manual_calibration_line_btn.isChecked():
-            # Unlike the QC step's fallback row, this is the manual
-            # path's whole point — arm placement (and disable click-to-
-            # move) the moment the step appears rather than making the
-            # user press "Place Calibration Line" first. Done last so its
-            # own status message ("Click two points...") isn't immediately
-            # wiped by the blank _set_status("") reset above.
+            # This step's whole point is placing (or re-placing) a line —
+            # arm placement (and disable click-to-move) the moment it
+            # appears rather than making the user press "Place
+            # Calibration Line" first. Done last so its own status
+            # message ("Click two points...") isn't immediately wiped by
+            # the blank _set_status("") reset above.
             self._manual_calibration_line_btn.setChecked(True)
 
     def _next_step(self) -> None:
@@ -877,53 +897,48 @@ class DpiCalibrationStepsWidget(QWidget):
 
     def _refresh_qc_dpi_display(self) -> None:
         dpi = get_app_context().machine_vision.settings.dpi
-        self._dpi_spin.blockSignals(True)
-        self._dpi_spin.setValue(dpi if dpi is not None else self._dpi_spin.minimum())
-        self._dpi_spin.blockSignals(False)
+        self._qc_dpi_label.setText(f"Measured DPI: {dpi:.2f}" if dpi is not None else "Measured DPI: not set")
+
+    def _refresh_manual_dpi_display(self) -> None:
+        dpi = get_app_context().machine_vision.settings.dpi
+        self._manual_dpi_spin.blockSignals(True)
+        self._manual_dpi_spin.setValue(dpi if dpi is not None else self._manual_dpi_spin.minimum())
+        self._manual_dpi_spin.blockSignals(False)
 
     def _on_finish_clicked(self) -> None:
+        # "manual" is always the last step of either path now (see
+        # _active_steps), so its own DPI field is the one and only value
+        # actually saved here — whether that's a manually-placed line's
+        # result or just the automatic routine's own measurement carried
+        # over unedited (see _refresh_manual_dpi_display).
         self._cancel_calibration_line_if_active()
         mv = get_app_context().machine_vision
-        key = self._active_steps()[self._current_step]
-        dpi_spin = self._manual_dpi_spin if key == "manual" else self._dpi_spin
-        mv.settings.dpi = dpi_spin.value()
+        mv.settings.dpi = self._manual_dpi_spin.value()
         mv.save_settings()
         info(f"[DpiCalibration] DPI saved as {mv.settings.dpi:.2f}")
         self._restore_overlay_state()
         self.finished.emit()
 
     # ------------------------------------------------------------------
-    # Manual calibration — an alternative to the automated routine above:
-    # place a reference line of known length directly on the preview and
-    # derive DPI from its pixel length, the same way MeasurementTab's own
-    # "Calibrate DPI" panel does (see CaptureControlWidget). Applying it
-    # just fills in _dpi_spin, so it's saved through the normal Finish
-    # Calibration path rather than writing settings.dpi a second way.
+    # Manual calibration — an alternative (or a refinement/verification
+    # step after the automatic routine — see _build_manual_widget) to the
+    # automated routine above: place a reference line of known length
+    # directly on the preview and derive DPI from its pixel length, the
+    # same way MeasurementTab's own "Calibrate DPI" panel does (see
+    # CaptureControlWidget).
     # ------------------------------------------------------------------
 
-    def _build_manual_calibration_row(
-        self, target_dpi_spin: QDoubleSpinBox, *, include_apply: bool = True, show_line_button: bool = True
-    ) -> tuple[QWidget, QPushButton, QDoubleSpinBox, QComboBox]:
+    def _build_manual_calibration_row(self) -> tuple[QWidget, QPushButton, QDoubleSpinBox, QComboBox]:
         """
-        A "Place Calibration Line" toggle plus a real-world length/unit —
-        used both by the automatic path's Quality Control step (as a
-        fallback if the measured DPI looks wrong) and by the manual
-        path's own step, each with its own independent set of controls
-        (see _build_qc_widget/_build_manual_widget) since only one is
-        ever visible at a time but neither should reset the other's
-        state. *include_apply* adds an inline "Apply" button writing the
-        derived DPI into *target_dpi_spin" right on this row (the QC
-        fallback's own layout); the manual step instead builds its own
-        "Calculate DPI" button on a separate line and wires it using the
-        value_spin/unit_combo returned here. *show_line_button* hides the
-        toggle itself (the manual step's own placement is armed
-        automatically as soon as it appears — see _update_step_display —
-        so there's nothing left for the user to press) while still
-        building and returning it, since its checked state is still how
-        placement is tracked/armed/cancelled internally — see
-        _cancel_calibration_line_if_active. The row also always labels
-        the length field ("Distance:") so it doesn't just look like a
-        bare, purposeless number entry.
+        A hidden "Place Calibration Line" toggle (this step's placement is
+        armed automatically as soon as it appears — see
+        _update_step_display — so there's nothing for the user to press,
+        but its checked state is still how placement is tracked/armed/
+        cancelled internally — see _cancel_calibration_line_if_active)
+        plus a labeled real-world length/unit. "Calculate DPI" lives on
+        its own line below instead of inline here — see
+        _build_manual_widget, which wires it using the value_spin/
+        unit_combo returned here.
         """
         widget = QWidget()
         layout = QHBoxLayout(widget)
@@ -933,7 +948,7 @@ class DpiCalibrationStepsWidget(QWidget):
         line_btn = QPushButton("Place Calibration Line")
         line_btn.setObjectName("CalSecondaryButton")
         line_btn.setCheckable(True)
-        line_btn.setVisible(show_line_button)
+        line_btn.setVisible(False)
         line_btn.toggled.connect(self._on_calibration_line_toggled)
         layout.addWidget(line_btn)
 
@@ -952,21 +967,11 @@ class DpiCalibrationStepsWidget(QWidget):
         unit_combo.setCurrentIndex(unit_combo.findData(MeasurementUnit.MM))
         layout.addWidget(unit_combo)
 
-        if include_apply:
-            apply_btn = QPushButton("Apply")
-            apply_btn.setObjectName("CalSecondaryButton")
-            apply_btn.clicked.connect(
-                lambda: self._on_calibration_apply_clicked(line_btn, value_spin, unit_combo, target_dpi_spin)
-            )
-            layout.addWidget(apply_btn)
-
         layout.addStretch()
         return widget, line_btn, value_spin, unit_combo
 
     def _cancel_calibration_line_if_active(self) -> None:
-        """Tear down an in-progress manual-calibration placement — called whenever the wizard leaves the "qc"/"manual" step (Next/Previous/Finish) so the calibration-line mode token never outlives that step. Both rows' buttons are checked since either could be the one left active."""
-        if self._calibration_line_btn.isChecked():
-            self._calibration_line_btn.setChecked(False)
+        """Tear down an in-progress manual-calibration placement — called whenever the wizard leaves the "manual" step (Next/Previous/Finish) so the calibration-line mode token never outlives that step."""
         if self._manual_calibration_line_btn.isChecked():
             self._manual_calibration_line_btn.setChecked(False)
 
@@ -996,23 +1001,15 @@ class DpiCalibrationStepsWidget(QWidget):
             self._set_status("")
 
     def _on_calibration_apply_clicked(
-        self,
-        line_btn: QPushButton,
-        value_spin: QDoubleSpinBox,
-        unit_combo: QComboBox,
-        target_dpi_spin: QDoubleSpinBox,
-        *,
-        uncheck_after: bool = True,
+        self, value_spin: QDoubleSpinBox, unit_combo: QComboBox, target_dpi_spin: QDoubleSpinBox
     ) -> None:
         """
-        *uncheck_after* drops placement (and restores click-to-move) once
-        applied — right for the QC step's fallback row, which the user
-        explicitly turned on themselves. The manual step's own "Calculate
-        DPI" passes False: placement there is armed by default for the
+        Doesn't disarm placement afterward — placement is armed for this
         whole step (see _update_step_display), so a single calculation
-        shouldn't disarm it — the user may want to re-place a more
-        precise line and calculate again. It's only torn down when the
-        step is actually left (Finish, Previous, or hiding the page).
+        shouldn't stop the user from re-placing a more precise line and
+        calculating again. It's only torn down when the step is actually
+        left (Finish, Previous, or hiding the page) — see
+        _cancel_calibration_line_if_active.
         """
         preview = get_app_context().camera_preview
         if preview is None:
@@ -1027,8 +1024,6 @@ class DpiCalibrationStepsWidget(QWidget):
             self._set_status("Enter a positive measurement.")
             return
         target_dpi_spin.setValue(dpi)
-        if uncheck_after:
-            line_btn.setChecked(False)
         self._set_status(f"Calibration line applied — DPI set to {dpi:.2f}.")
 
     # ------------------------------------------------------------------
