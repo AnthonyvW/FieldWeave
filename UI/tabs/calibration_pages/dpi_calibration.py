@@ -272,13 +272,16 @@ class DpiCalibrationStepsWidget(QWidget):
         self._manual_widget = self._build_manual_widget()
         layout.addWidget(self._manual_widget)
 
-        self._back_to_selection_btn = QPushButton("Back to Calibration Selection")
-        self._back_to_selection_btn.setObjectName("CalSecondaryButton")
-        self._back_to_selection_btn.setMinimumHeight(34)
-        self._back_to_selection_btn.clicked.connect(self._on_back_to_selection_clicked)
-        layout.addWidget(self._back_to_selection_btn)
-
         nav_layout = QHBoxLayout()
+        # Shares this same slot with _prev_btn (mutually exclusive via
+        # visibility, the same way _next_btn/_finish_btn already share
+        # theirs) — the first step has nothing to go "Previous" from, so
+        # a disabled Previous button sat there uselessly; this replaces
+        # it with a real action instead.
+        self._cancel_calibration_btn = QPushButton("Cancel Calibration")
+        self._cancel_calibration_btn.clicked.connect(self._on_cancel_calibration_clicked)
+        nav_layout.addWidget(self._cancel_calibration_btn)
+
         self._prev_btn = QPushButton("Previous")
         self._prev_btn.clicked.connect(self._previous_step)
         self._next_btn = QPushButton("Next")
@@ -585,7 +588,8 @@ class DpiCalibrationStepsWidget(QWidget):
         width = self._step_body.width()
         if width > 0:
             self._step_body.setMinimumHeight(self._step_body.heightForWidth(width))
-        self._prev_btn.setEnabled(self._current_step > 0)
+        self._prev_btn.setVisible(self._current_step > 0)
+        self._cancel_calibration_btn.setVisible(self._current_step == 0)
 
         if self._on_title_changed is not None:
             self._on_title_changed(
@@ -596,9 +600,6 @@ class DpiCalibrationStepsWidget(QWidget):
         is_last = self._current_step == len(steps) - 1
         self._next_btn.setVisible(not is_choose and not is_last)
         self._finish_btn.setVisible(not is_choose and is_last)
-        # "position" is always the first step of every path, so this is
-        # only ever the wizard's very first screen.
-        self._back_to_selection_btn.setVisible(self._current_step == 0)
 
         self._position_widget.setVisible(key == "align")
         if key == "align":
@@ -682,7 +683,7 @@ class DpiCalibrationStepsWidget(QWidget):
                 break
             widget = widget.parentWidget()
 
-    def _on_back_to_selection_clicked(self) -> None:
+    def _on_cancel_calibration_clicked(self) -> None:
         """Bail out to the calibration selection list without saving anything — only offered on the very first step, so there's nothing in progress to lose."""
         self._cancel_calibration_line_if_active()
         self._restore_overlay_state()

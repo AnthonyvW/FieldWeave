@@ -191,6 +191,15 @@ class CameraSpaceStepsWidget(QWidget):
         layout.addWidget(self._capture_widget)
 
         nav_layout = QHBoxLayout()
+        # Shares this same slot with _prev_btn (mutually exclusive via
+        # visibility, the same way _next_btn/_finish_btn already share
+        # theirs) — the first step has nothing to go "Previous" from, so
+        # a disabled Previous button sat there uselessly; this replaces
+        # it with a real action instead.
+        self._cancel_calibration_btn = QPushButton("Cancel Calibration")
+        self._cancel_calibration_btn.clicked.connect(self._on_cancel_calibration_clicked)
+        nav_layout.addWidget(self._cancel_calibration_btn)
+
         self._prev_btn = QPushButton("Previous")
         self._prev_btn.clicked.connect(self._previous_step)
         self._next_btn = QPushButton("Next")
@@ -300,7 +309,8 @@ class CameraSpaceStepsWidget(QWidget):
         step_title, step_body = _STEPS[self._current_step]
         self._step_title.setText(step_title)
         self._step_body.setPlainText(step_body)
-        self._prev_btn.setEnabled(self._current_step > 0)
+        self._prev_btn.setVisible(self._current_step > 0)
+        self._cancel_calibration_btn.setVisible(self._current_step == 0)
 
         if self._on_title_changed is not None:
             self._on_title_changed(
@@ -364,6 +374,11 @@ class CameraSpaceStepsWidget(QWidget):
         if self._current_step > 0:
             self._current_step -= 1
             self._update_step_display()
+
+    def _on_cancel_calibration_clicked(self) -> None:
+        """Bail out to the calibration selection list without saving anything — only offered on the very first step, so there's nothing in progress to lose."""
+        self._restore_crosshair_state()
+        self.finished.emit()
 
     def reset(self) -> None:
         self._restore_crosshair_state()
