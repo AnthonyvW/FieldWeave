@@ -251,6 +251,12 @@ class DpiCalibrationStepsWidget(QWidget):
         self._output_folder: str | None = None
         self._routine = None
         self._last_result = None
+        # Whatever DPI was on record right before Start DPI Calculation —
+        # restored if the run fails or fails QA, since the routine itself
+        # writes settings.dpi as soon as it computes any number at all,
+        # trustworthy or not (see StitchAndMeasureRoutine) — see
+        # _handle_capture_failure.
+        self._dpi_before_capture: float | None = None
         self._on_title_changed = on_title_changed
         self._mode_token: ModeToken | None = None
         self._calibration_mode_token: ModeToken | None = None
@@ -720,6 +726,7 @@ class DpiCalibrationStepsWidget(QWidget):
         self._capture_complete = False
         self._output_folder = None
         self._last_result = None
+        self._dpi_before_capture = None
         self._update_step_display()
 
     # ------------------------------------------------------------------
@@ -840,6 +847,7 @@ class DpiCalibrationStepsWidget(QWidget):
         saved = self._get_saved_position()
         start_position = Position(x=saved[0], y=saved[1], z=saved[2]) if saved is not None else None
         output_path = str(Path("output") / datetime.now().strftime("%Y%m%d_%H%M%S"))
+        self._dpi_before_capture = ctx.machine_vision.settings.dpi
         self._routine = InspectionCalibrationScaleRoutine(
             motion=motion,
             output_path=output_path,
@@ -868,18 +876,18 @@ class DpiCalibrationStepsWidget(QWidget):
             self._stop_capture_btn.setVisible(False)
             self._prev_btn.setEnabled(self._current_step > 0)
             result = routine.result if routine is not None else None
-            if result is not None and result.success:
+            self._last_result = result
+            if result is not None and result.success and result.get("qa_pass", False):
                 self._capture_complete = True
-                self._last_result = result
                 _ResultsDialog(result, parent=self).exec()
                 self._next_step()
             else:
-                self._last_result = result
                 activity = routine.activity if routine is not None else ""
                 if activity:
                     self._set_status(activity)
                 if result is not None:
                     _ResultsDialog(result, parent=self).exec()
+                    self._handle_capture_failure()
             return
 
         activity = self._routine.activity
@@ -890,6 +898,25 @@ class DpiCalibrationStepsWidget(QWidget):
                 self._set_status(f"[{prog}/{total}]  {activity}")
             else:
                 self._set_status(activity)
+
+    def _handle_capture_failure(self) -> None:
+        """
+        A failed run, or one that finished but didn't pass QA, still may
+        have written a bogus DPI (StitchAndMeasureRoutine saves whatever
+        number it computed, trustworthy or not, as soon as it has one at
+        all) — restore whatever was on record before this attempt rather
+        than leaving that in place, and skip straight to the manual step
+        instead of a Quality Control step with nothing trustworthy to
+        show, so the user can place a reference line themselves right
+        away.
+        """
+        mv = get_app_context().machine_vision
+        mv.settings.dpi = self._dpi_before_capture
+        mv.save_settings()
+        steps = self._active_steps()
+        if "manual" in steps:
+            self._current_step = steps.index("manual")
+            self._update_step_display()
 
     # ------------------------------------------------------------------
     # Step 5 — DPI display / finish
