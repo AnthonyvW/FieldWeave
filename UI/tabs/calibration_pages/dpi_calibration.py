@@ -61,7 +61,7 @@ _STEP_INFO: dict[str, tuple[str, str]] = {
     ),
     "manual": (
         "Manual DPI Calibration",
-        "Click two points on the preview to place a reference line, enter the real-world length it represents, then press Apply. Press Finish Calibration once the DPI value looks correct.",
+        "Click two points on the preview to place a reference line, enter the real-world length it represents, then press Calculate DPI. You can use the zoom tools on the left side of the camera view, or hold Ctrl and scroll the mouse wheel, to zoom in and out for a more precise placement. Press Finish Calibration once the DPI value looks correct.",
     ),
 }
 
@@ -343,7 +343,7 @@ class DpiCalibrationStepsWidget(QWidget):
         layout.setSpacing(6)
 
         automatic_btn = QPushButton("Automatic DPI Calibration")
-        automatic_btn.setObjectName("CalStartCapture")
+        automatic_btn.setObjectName("CalSecondaryButton")
         automatic_btn.setMinimumHeight(34)
         automatic_btn.clicked.connect(self._on_choose_automatic_clicked)
         layout.addWidget(automatic_btn)
@@ -422,7 +422,7 @@ class DpiCalibrationStepsWidget(QWidget):
         dpi_row.addStretch()
         layout.addLayout(dpi_row)
 
-        manual_row, self._calibration_line_btn = self._build_manual_calibration_row(self._dpi_spin)
+        manual_row, self._calibration_line_btn, _, _ = self._build_manual_calibration_row(self._dpi_spin)
         layout.addWidget(manual_row)
 
         btn_row = QHBoxLayout()
@@ -461,9 +461,6 @@ class DpiCalibrationStepsWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        dpi_row = QHBoxLayout()
-        dpi_row.setSpacing(6)
-        dpi_row.addWidget(QLabel("DPI:"))
         self._manual_dpi_spin = QDoubleSpinBox()
         self._manual_dpi_spin.setMinimum(1.0)
         self._manual_dpi_spin.setMaximum(100_000.0)
@@ -471,12 +468,27 @@ class DpiCalibrationStepsWidget(QWidget):
         self._manual_dpi_spin.setSingleStep(10.0)
         self._manual_dpi_spin.setFixedWidth(110)
         self._manual_dpi_spin.setToolTip("DPI value that will be saved when you press Finish Calibration.")
-        dpi_row.addWidget(self._manual_dpi_spin)
-        dpi_row.addStretch()
-        layout.addLayout(dpi_row)
 
-        manual_row, self._manual_calibration_line_btn = self._build_manual_calibration_row(self._manual_dpi_spin)
+        # No inline Apply here — "Calculate DPI" sits on its own line
+        # below, next to the DPI field it fills in.
+        manual_row, self._manual_calibration_line_btn, value_spin, unit_combo = self._build_manual_calibration_row(
+            self._manual_dpi_spin, include_apply=False
+        )
         layout.addWidget(manual_row)
+
+        calc_row = QHBoxLayout()
+        calc_row.setSpacing(6)
+        calculate_btn = QPushButton("Calculate DPI")
+        calculate_btn.setObjectName("CalSecondaryButton")
+        calculate_btn.clicked.connect(
+            lambda: self._on_calibration_apply_clicked(
+                self._manual_calibration_line_btn, value_spin, unit_combo, self._manual_dpi_spin
+            )
+        )
+        calc_row.addWidget(calculate_btn)
+        calc_row.addWidget(self._manual_dpi_spin)
+        calc_row.addStretch()
+        layout.addLayout(calc_row)
 
         widget.hide()
         return widget
@@ -589,6 +601,14 @@ class DpiCalibrationStepsWidget(QWidget):
 
         self._apply_overlays_for_step(key)
         self._set_status("")
+        if key == "manual" and not self._manual_calibration_line_btn.isChecked():
+            # Unlike the QC step's fallback row, this is the manual
+            # path's whole point — arm placement (and disable click-to-
+            # move) the moment the step appears rather than making the
+            # user press "Place Calibration Line" first. Done last so its
+            # own status message ("Click two points...") isn't immediately
+            # wiped by the blank _set_status("") reset above.
+            self._manual_calibration_line_btn.setChecked(True)
 
     def _next_step(self) -> None:
         steps = self._active_steps()
@@ -826,18 +846,23 @@ class DpiCalibrationStepsWidget(QWidget):
     # Calibration path rather than writing settings.dpi a second way.
     # ------------------------------------------------------------------
 
-    def _build_manual_calibration_row(self, target_dpi_spin: QDoubleSpinBox) -> tuple[QWidget, QPushButton]:
+    def _build_manual_calibration_row(
+        self, target_dpi_spin: QDoubleSpinBox, *, include_apply: bool = True
+    ) -> tuple[QWidget, QPushButton, QDoubleSpinBox, QComboBox]:
         """
-        A "Place Calibration Line" toggle plus a real-world length/unit
-        and Apply button, writing the derived DPI into *target_dpi_spin*
-        — used both by the automatic path's Quality Control step (as a
+        A "Place Calibration Line" toggle plus a real-world length/unit —
+        used both by the automatic path's Quality Control step (as a
         fallback if the measured DPI looks wrong) and by the manual
         path's own step, each with its own independent set of controls
         (see _build_qc_widget/_build_manual_widget) since only one is
         ever visible at a time but neither should reset the other's
-        state. Returns the row widget and its own "Place Calibration
-        Line" button, the latter so callers can track/cancel it — see
-        _cancel_calibration_line_if_active.
+        state. *include_apply* adds an inline "Apply" button writing the
+        derived DPI into *target_dpi_spin" right on this row (the QC
+        fallback's own layout); the manual step instead builds its own
+        "Calculate DPI" button on a separate line and wires it using the
+        value_spin/unit_combo returned here. Also returns the "Place
+        Calibration Line" button itself so callers can track/cancel it —
+        see _cancel_calibration_line_if_active.
         """
         widget = QWidget()
         layout = QHBoxLayout(widget)
@@ -863,15 +888,16 @@ class DpiCalibrationStepsWidget(QWidget):
         unit_combo.setCurrentIndex(unit_combo.findData(MeasurementUnit.MM))
         layout.addWidget(unit_combo)
 
-        apply_btn = QPushButton("Apply")
-        apply_btn.setObjectName("CalSecondaryButton")
-        apply_btn.clicked.connect(
-            lambda: self._on_calibration_apply_clicked(line_btn, value_spin, unit_combo, target_dpi_spin)
-        )
-        layout.addWidget(apply_btn)
+        if include_apply:
+            apply_btn = QPushButton("Apply")
+            apply_btn.setObjectName("CalSecondaryButton")
+            apply_btn.clicked.connect(
+                lambda: self._on_calibration_apply_clicked(line_btn, value_spin, unit_combo, target_dpi_spin)
+            )
+            layout.addWidget(apply_btn)
 
         layout.addStretch()
-        return widget, line_btn
+        return widget, line_btn, value_spin, unit_combo
 
     def _cancel_calibration_line_if_active(self) -> None:
         """Tear down an in-progress manual-calibration placement — called whenever the wizard leaves the "qc"/"manual" step (Next/Previous/Finish) so the calibration-line mode token never outlives that step. Both rows' buttons are checked since either could be the one left active."""

@@ -61,9 +61,9 @@ class CountMeasurement(MeasurementButton):
         # it otherwise would to leave room for its own number above it
         # without clipping the icon's top edge.
         points = (
-            QPoint(rect.left() + 12, rect.bottom() - 10),   # bottom-left
+            QPoint(rect.left() + 8, rect.bottom() - 10),    # bottom-left
             QPoint(rect.left() + 18, rect.top() + 16),       # top-center
-            QPoint(rect.left() + 24, rect.bottom() - 10),   # bottom-right
+            QPoint(rect.left() + 28, rect.bottom() - 10),   # bottom-right
         )
         font = QFont(painter.font())
         font.setPixelSize(9)
