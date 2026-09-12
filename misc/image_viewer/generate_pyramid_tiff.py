@@ -48,23 +48,26 @@ class _ProgressReporter:
         self.start_time = time.monotonic()
         self.last_time = self.start_time
         self.last_percent = 0
-        self.seconds_remaining: float | None = None
 
     def __call__(self, image: pyvips.Image, progress: pyvips.VipsProgress) -> None:
-        now = time.monotonic()
         percent = progress.percent
+        # The same percent otherwise repeats across several callbacks --
+        # only report a new line once it actually advances, so each line
+        # shows how long that step took instead of overwriting the last one.
+        if percent <= self.last_percent:
+            return
+
+        now = time.monotonic()
+        step_duration = now - self.last_time
         elapsed = now - self.start_time
+        seconds_remaining = step_duration / (percent - self.last_percent) * (100 - percent)
+        self.last_time = now
+        self.last_percent = percent
 
-        # Reported percent otherwise repeats between callbacks, so only
-        # recompute the estimate on the callback where it actually advances.
-        if percent > self.last_percent:
-            seconds_per_percent = (now - self.last_time) / (percent - self.last_percent)
-            self.seconds_remaining = seconds_per_percent * (100 - percent)
-            self.last_time = now
-            self.last_percent = percent
-
-        eta = f", ~{self.seconds_remaining:.0f}s remaining" if self.seconds_remaining is not None else ""
-        print(f"\rGenerating pyramidal TIFF: {percent:3d}% (elapsed {elapsed:.0f}s{eta})", end="", flush=True)
+        print(
+            f"Generating pyramidal TIFF: {percent:3d}% "
+            f"(step {step_duration:.1f}s, elapsed {elapsed:.1f}s, ~{seconds_remaining:.0f}s remaining)"
+        )
 
 
 def write_pyramid_tiff(
@@ -83,7 +86,6 @@ def write_pyramid_tiff(
         Q=quality,
         bigtiff=True,
     )
-    print()
 
 
 def main() -> None:
