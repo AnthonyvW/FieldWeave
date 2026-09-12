@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from pathlib import Path
 
@@ -42,19 +43,29 @@ import pyvips
 DEFAULT_TILE_SIZE = 512
 DEFAULT_QUALITY = 90
 
-# The first percent point consistently completes far faster than the
-# steady-state rate (initial thread/buffer warm-up), which skews an
-# average built from only one or two samples. Withhold the estimate
-# until enough samples have diluted that outlier -- real runs show the
-# average-rate error dropping from ~40-60% at 1-2% to under 10% by here.
-MIN_PERCENT_FOR_ESTIMATE = 3
+BYTES_PER_GIB = 1024**3
+
+# Rough heuristic from observed runs: per-percent step time tracks input
+# file size at roughly (GiB rounded up) + 1 seconds. Used as a prior on
+# the per-percent rate, weighted as if it were this many percentage
+# points of real samples -- real runs show that weight correcting the
+# first percent point's misleadingly fast reading (thread/buffer
+# warm-up) at the start without still biasing the estimate once actual
+# samples dominate.
+PRIOR_WEIGHT_PERCENT = 2
+
+
+def estimate_seconds_per_percent(file_size_bytes: int) -> float:
+    size_gib = file_size_bytes / BYTES_PER_GIB
+    return math.ceil(size_gib) + 1
 
 
 class _ProgressReporter:
-    def __init__(self) -> None:
+    def __init__(self, prior_seconds_per_percent: float) -> None:
         self.start_time = time.monotonic()
         self.last_time = self.start_time
         self.last_percent = 0
+        self.prior_seconds = prior_seconds_per_percent * PRIOR_WEIGHT_PERCENT
 
     def __call__(self, image: pyvips.Image, progress: pyvips.VipsProgress) -> None:
         percent = progress.percent
@@ -70,25 +81,24 @@ class _ProgressReporter:
         self.last_time = now
         self.last_percent = percent
 
-        if percent < MIN_PERCENT_FOR_ESTIMATE:
-            eta = "estimating remaining time..."
-        else:
-            # Per-step timing is noisy enough that extrapolating from just
-            # the last step swings wildly once multiplied by (100 - percent).
-            # The average rate since start is far steadier while still
-            # tracking a process whose overall rate drifts over the run.
-            seconds_remaining = (elapsed / percent) * (100 - percent)
-            eta = f"~{seconds_remaining:.0f}s remaining"
+        seconds_per_percent = (self.prior_seconds + elapsed) / (PRIOR_WEIGHT_PERCENT + percent)
+        seconds_remaining = seconds_per_percent * (100 - percent)
 
-        print(f"Generating pyramidal TIFF: {percent:3d}% (step {step_duration:.1f}s, elapsed {elapsed:.1f}s, {eta})")
+        print(
+            f"Generating pyramidal TIFF: {percent:3d}% "
+            f"(step {step_duration:.1f}s, elapsed {elapsed:.1f}s, ~{seconds_remaining:.0f}s remaining)"
+        )
 
 
 def write_pyramid_tiff(
     input_path: Path, output_path: Path, tile_size: int, compression: str, quality: int,
 ) -> None:
+    prior_seconds_per_percent = estimate_seconds_per_percent(input_path.stat().st_size)
+    print(f"Rough estimate from input size: ~{prior_seconds_per_percent * 100:.0f}s total")
+
     image = pyvips.Image.new_from_file(str(input_path), access="sequential")
     image.set_progress(True)
-    image.signal_connect("eval", _ProgressReporter())
+    image.signal_connect("eval", _ProgressReporter(prior_seconds_per_percent))
     image.tiffsave(
         str(output_path),
         tile=True,
