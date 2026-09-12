@@ -60,7 +60,11 @@ class _ProgressReporter:
         now = time.monotonic()
         step_duration = now - self.last_time
         elapsed = now - self.start_time
-        seconds_remaining = step_duration / (percent - self.last_percent) * (100 - percent)
+        # Per-step timing is noisy enough that extrapolating from just the
+        # last step swings wildly once multiplied by (100 - percent). The
+        # average rate since start is far steadier while still tracking a
+        # process whose overall rate drifts over the run.
+        seconds_remaining = (elapsed / percent) * (100 - percent)
         self.last_time = now
         self.last_percent = percent
 
