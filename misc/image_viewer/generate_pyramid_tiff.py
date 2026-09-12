@@ -42,6 +42,13 @@ import pyvips
 DEFAULT_TILE_SIZE = 512
 DEFAULT_QUALITY = 90
 
+# The first percent point consistently completes far faster than the
+# steady-state rate (initial thread/buffer warm-up), which skews an
+# average built from only one or two samples. Withhold the estimate
+# until enough samples have diluted that outlier -- real runs show the
+# average-rate error dropping from ~40-60% at 1-2% to under 10% by here.
+MIN_PERCENT_FOR_ESTIMATE = 3
+
 
 class _ProgressReporter:
     def __init__(self) -> None:
@@ -60,18 +67,20 @@ class _ProgressReporter:
         now = time.monotonic()
         step_duration = now - self.last_time
         elapsed = now - self.start_time
-        # Per-step timing is noisy enough that extrapolating from just the
-        # last step swings wildly once multiplied by (100 - percent). The
-        # average rate since start is far steadier while still tracking a
-        # process whose overall rate drifts over the run.
-        seconds_remaining = (elapsed / percent) * (100 - percent)
         self.last_time = now
         self.last_percent = percent
 
-        print(
-            f"Generating pyramidal TIFF: {percent:3d}% "
-            f"(step {step_duration:.1f}s, elapsed {elapsed:.1f}s, ~{seconds_remaining:.0f}s remaining)"
-        )
+        if percent < MIN_PERCENT_FOR_ESTIMATE:
+            eta = "estimating remaining time..."
+        else:
+            # Per-step timing is noisy enough that extrapolating from just
+            # the last step swings wildly once multiplied by (100 - percent).
+            # The average rate since start is far steadier while still
+            # tracking a process whose overall rate drifts over the run.
+            seconds_remaining = (elapsed / percent) * (100 - percent)
+            eta = f"~{seconds_remaining:.0f}s remaining"
+
+        print(f"Generating pyramidal TIFF: {percent:3d}% (step {step_duration:.1f}s, elapsed {elapsed:.1f}s, {eta})")
 
 
 def write_pyramid_tiff(
