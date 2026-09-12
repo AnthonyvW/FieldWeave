@@ -54,6 +54,13 @@ BYTES_PER_GIB = 1024**3
 # samples dominate.
 PRIOR_WEIGHT_PERCENT = 2
 
+# Real multi-minute runs consistently run a bit longer than the average
+# rate predicts in the second half (final pyramid levels and file close
+# apparently cost more than the linear-in-percent model assumes), so the
+# estimate quietly underestimates there. Padding it out corrects that and
+# is a safer direction to be wrong in than promising an early finish.
+SAFETY_MARGIN = 1.15
+
 
 def estimate_seconds_per_percent(file_size_bytes: int) -> float:
     size_gib = file_size_bytes / BYTES_PER_GIB
@@ -82,7 +89,7 @@ class _ProgressReporter:
         self.last_percent = percent
 
         seconds_per_percent = (self.prior_seconds + elapsed) / (PRIOR_WEIGHT_PERCENT + percent)
-        seconds_remaining = seconds_per_percent * (100 - percent)
+        seconds_remaining = seconds_per_percent * (100 - percent) * SAFETY_MARGIN
 
         print(
             f"Generating pyramidal TIFF: {percent:3d}% "
