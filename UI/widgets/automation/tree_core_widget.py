@@ -456,11 +456,13 @@ class TreeCoreWidget(QWidget):
         self._cal_mode_stitched_radio: QRadioButton
         self._cal_per_slot_check: QCheckBox
         self._cal_stitched_pos_widget: QWidget
+        self._cal_pos_label: QLabel
         self._cal_set_btn: QPushButton
         self._cal_goto_btn: QPushButton
         self._cal_dpi_label: QLabel
         self._cal_last_label: QLabel
         self._cal_single_pos_widget: QWidget
+        self._cal_single_pos_label: QLabel
         self._cal_single_set_btn: QPushButton
         self._cal_single_goto_btn: QPushButton
 
@@ -973,9 +975,9 @@ class TreeCoreWidget(QWidget):
         stitched_pos_layout.setContentsMargins(0, 0, 0, 0)
         stitched_pos_layout.setSpacing(4)
 
-        stitched_pos_label = QLabel("Standard Position")
-        stitched_pos_label.setObjectName("CalScalePosLabel")
-        stitched_pos_layout.addWidget(stitched_pos_label)
+        self._cal_pos_label = QLabel("Standard Position: Not set")
+        self._cal_pos_label.setObjectName("CalScalePosLabel")
+        stitched_pos_layout.addWidget(self._cal_pos_label)
 
         stitched_btn_row = QHBoxLayout()
         stitched_btn_row.setSpacing(6)
@@ -1011,9 +1013,9 @@ class TreeCoreWidget(QWidget):
         single_pos_layout.setContentsMargins(0, 0, 0, 0)
         single_pos_layout.setSpacing(4)
 
-        single_pos_label = QLabel("Single Image Position")
-        single_pos_label.setObjectName("CalScalePosLabel")
-        single_pos_layout.addWidget(single_pos_label)
+        self._cal_single_pos_label = QLabel("Single Image Position: Not set")
+        self._cal_single_pos_label.setObjectName("CalScalePosLabel")
+        single_pos_layout.addWidget(self._cal_single_pos_label)
 
         single_btn_row = QHBoxLayout()
         single_btn_row.setSpacing(6)
@@ -1039,6 +1041,7 @@ class TreeCoreWidget(QWidget):
         outer_layout.addWidget(self._cal_scale_details)
 
         self._populate_calibration_scale_from_settings()
+        self._refresh_calibration_scale_info()
 
         return group
 
@@ -1166,11 +1169,24 @@ class TreeCoreWidget(QWidget):
     # Calibration scale helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _position_label_text(prefix: str, saved: tuple[int, int, int] | None) -> str:
+        if saved is None:
+            return f"{prefix}: Not set"
+        x_nm, y_nm, z_nm = saved
+        return (
+            f"{prefix}: X={x_nm / _NM_PER_MM:.3f}"
+            f"  Y={y_nm / _NM_PER_MM:.3f}"
+            f"  Z={z_nm / _NM_PER_MM:.3f} mm"
+        )
+
     def _refresh_calibration_scale_info(self) -> None:
         ctx = get_app_context()
         if ctx is None or ctx.machine_vision is None:
             self._cal_dpi_label.setText("DPI: —")
             self._cal_last_label.setText("Last calibrated: —")
+            self._cal_pos_label.setText(self._position_label_text("Standard Position", None))
+            self._cal_single_pos_label.setText(self._position_label_text("Single Image Position", None))
             self._cal_goto_btn.setEnabled(False)
             self._cal_single_goto_btn.setEnabled(False)
             return
@@ -1193,8 +1209,12 @@ class TreeCoreWidget(QWidget):
         else:
             self._cal_last_label.setText("Last calibrated: —")
 
-        self._cal_goto_btn.setEnabled(self._get_saved_scale_position() is not None)
-        self._cal_single_goto_btn.setEnabled(self._get_saved_single_position() is not None)
+        saved_scale = self._get_saved_scale_position()
+        saved_single = self._get_saved_single_position()
+        self._cal_pos_label.setText(self._position_label_text("Standard Position", saved_scale))
+        self._cal_single_pos_label.setText(self._position_label_text("Single Image Position", saved_single))
+        self._cal_goto_btn.setEnabled(saved_scale is not None)
+        self._cal_single_goto_btn.setEnabled(saved_single is not None)
 
     # ------------------------------------------------------------------
     # Slots
