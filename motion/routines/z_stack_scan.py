@@ -158,7 +158,8 @@ class ZStackScan(AutomationRoutine):
         post_processing = ctx.post_processing
 
         motion_settings = ctx.motion.settings
-        capture_timeout_ms = motion_settings.automation.capture_timeout_ms
+        automation = motion_settings.automation
+        capture_timeout_ms = automation.capture_timeout_ms
         approach_distance_nm = motion_settings.z_stack_scan.approach_distance_nm
 
         self._set_activity("Initialising")
@@ -221,10 +222,20 @@ class ZStackScan(AutomationRoutine):
 
         self._set_progress(0, total)
 
+        # Per-resolution capture-time tracking and per-slice Z move+settle
+        # overhead tracking, shared with AreaScan via the same settings
+        # objects - the configured settle_z_ms value is a lower-bound fallback
+        # until real move time is measured, since actual stage move time
+        # depends on distance and hardware and can't be known ahead of a scan.
+        resolution_key = camera.settings.get_resolution_key(0)
+        baseline_avg_capture_s = camera.settings.get_average_capture_time_s(resolution_key)
+        baseline_z_overhead_s = automation.get_z_overhead_time_s(automation.settle_z_ms / 1000.0)
+
         total_start_time = time.monotonic()
         scan_start_time = time.monotonic()
         capture_times: list[float] = []
         captured_positions: list[int] = []
+        step_durations: list[float] = []
 
         pending_saves: list[tuple[int, Path, threading.Event, list[bool]]] = []
 
@@ -243,9 +254,21 @@ class ZStackScan(AutomationRoutine):
                 z=target_z_nm,
             )
 
-            self._set_status(f"Step {idx + 1}/{total}  —  Z={target_z_mm:.3f} mm", idx, total)
+            steps_done_so_far = len(step_durations)
+            if steps_done_so_far > 0:
+                mean_step_s = sum(step_durations) / steps_done_so_far
+                steps_remaining = total - idx
+                eta = round(steps_remaining * mean_step_s)
+            else:
+                eta = 0
+
+            self._set_status(f"Step {idx + 1}/{total}  —  Z={target_z_mm:.3f} mm", idx, total, eta)
             info(f"[ZStackScan] Step {idx + 1}/{total}: moving to Z={target_z_mm:.6f} mm")
+            step_start = time.monotonic()
+            z_move_start = time.monotonic()
             self.motion.move_to_position(target_pos, wait=True)
+            z_move_s = time.monotonic() - z_move_start
+            automation.record_z_overhead_time_s(z_move_s)
 
             yield  # pause/stop point: after move
 
@@ -299,10 +322,16 @@ class ZStackScan(AutomationRoutine):
                 wait=True,
             )
 
-            capture_times.append(time.monotonic() - capture_start)
+            capture_s = time.monotonic() - capture_start
+            camera.settings.record_capture_time_s(resolution_key, capture_s)
+            capture_times.append(capture_s)
             captured_positions.append(actual_pos.z)
             pending_saves.append((actual_pos.z, filepath, save_done, success_cell))
-            self._set_progress(idx + 1, total)
+            step_durations.append(time.monotonic() - step_start)
+
+            steps_left = total - (idx + 1)
+            mean_step_s = sum(step_durations) / len(step_durations)
+            self._set_progress(idx + 1, total, round(steps_left * mean_step_s) if steps_left > 0 else 0)
 
             if use_live:
                 save_done.wait(timeout=capture_timeout_ms / 1000.0)
@@ -356,6 +385,26 @@ class ZStackScan(AutomationRoutine):
                 f"max={max(capture_times):.3f}  "
                 f"avg={sum(capture_times) / len(capture_times):.3f}"
             )
+
+        # ------------------------------------------------------------------
+        # Persist the tracked capture time / Z overhead averages if they moved
+        # enough to matter, so later scans (and pre-scan estimates) benefit.
+        # ------------------------------------------------------------------
+        final_avg_capture_s = camera.settings.get_average_capture_time_s(resolution_key)
+        if abs(final_avg_capture_s - baseline_avg_capture_s) > 0.1:
+            if camera.save_settings():
+                info(
+                    f"[ZStackScan] Updated average capture time for {resolution_key}:"
+                    f" {baseline_avg_capture_s:.3f}s -> {final_avg_capture_s:.3f}s"
+                )
+
+        final_z_overhead_s = automation.get_z_overhead_time_s(baseline_z_overhead_s)
+        if abs(final_z_overhead_s - baseline_z_overhead_s) > 0.1:
+            if self.motion.save_settings():
+                info(
+                    f"[ZStackScan] Updated Z overhead estimate:"
+                    f" {baseline_z_overhead_s:.3f}s -> {final_z_overhead_s:.3f}s/slice"
+                )
 
         if use_live and streaming_routine is not None:
             if self._check_stop():

@@ -105,6 +105,7 @@ Usage::
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Generator
@@ -338,10 +339,30 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             pct = _slot_pct(slot_iter, phase / n_phases)
             self._set_status(activity, pct, 100)
 
-        def _capture_and_save(slot_folder: Path, pos: Position) -> None:
+        def _capture_and_save(slot_folder: Path, pos: Position) -> tuple[threading.Event, list[bool]]:
+            """Capture and save an image, returning trackers for the background save.
+
+            ``capture_and_save_still``'s ``wait=True`` only blocks until the
+            frame has been captured - the file write happens on a background
+            thread and finishes after this call returns. Callers that need to
+            know the file is actually on disk (e.g. before handing the folder
+            to focus stacking) must wait on the returned event.
+            """
             filename = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
             filepath = slot_folder / f"{filename}.{fformat}"
             info(f"[TreeCoreImaging] Capturing image: {filepath}")
+
+            save_done = threading.Event()
+            success_cell: list[bool] = [False]
+
+            def _on_complete(success: bool, _done=save_done, _cell=success_cell) -> None:
+                _cell[0] = success
+                _done.set()
+                if success:
+                    info(f"[TreeCoreImaging] Saved {filepath}")
+                else:
+                    warning(f"[TreeCoreImaging] Save failed: {filepath}")
+
             camera.capture_and_save_still(
                 filepath=filepath,
                 resolution_index=0,
@@ -356,14 +377,19 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     "source": "tree_core_imaging",
                 },
                 timeout_ms=int(capture_timeout_s * 1000),
+                on_complete=_on_complete,
                 wait=True,
             )
-            info(f"[TreeCoreImaging] Saved {filepath}")
+            return save_done, success_cell
 
         def _capture_z_stack(xy_pos: Position, stack_folder: Path) -> int:
             """Capture a Z-stack at the given XY position into stack_folder.
 
-            Returns the number of images successfully captured.
+            Blocks until every frame's background save has completed before
+            returning, so the folder is safe to hand off to focus stacking
+            immediately afterwards.
+
+            Returns the number of images successfully captured and saved.
             """
             z_near = tca.z_near_plane_nm
             z_far = tca.z_far_plane_nm
@@ -382,15 +408,23 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 z_positions.append(z)
                 z += z_direction * z_step
 
-            captured = 0
+            pending_saves: list[tuple[int, threading.Event, list[bool]]] = []
             for z_nm in z_positions:
                 if self._check_stop():
                     break
                 target = Position(x=xy_pos.x, y=xy_pos.y, z=z_nm)
                 self.motion.move_to_position(target, wait=True)
                 actual_pos = self.motion.get_position()
-                _capture_and_save(stack_folder, actual_pos)
-                captured += 1
+                save_done, success_cell = _capture_and_save(stack_folder, actual_pos)
+                pending_saves.append((z_nm, save_done, success_cell))
+
+            captured = 0
+            for z_nm, save_done, success_cell in pending_saves:
+                save_done.wait(timeout=capture_timeout_s)
+                if success_cell[0]:
+                    captured += 1
+                else:
+                    warning(f"[TreeCoreImaging] Save failed at Z={z_nm} nm")
 
             return captured
 
