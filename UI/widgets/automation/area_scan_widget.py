@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -108,6 +109,15 @@ def _format_duration(total_seconds: int) -> str:
     return f"{seconds}s"
 
 
+def _format_completion_time(total_seconds: int) -> str:
+    """Wall-clock time *total_seconds* from now, for display as "done by"."""
+    now = datetime.now()
+    finish = now + timedelta(seconds=total_seconds)
+    if finish.date() == now.date():
+        return finish.strftime("%H:%M")
+    return finish.strftime("%Y-%m-%d %H:%M")
+
+
 class _ConfirmAreaScanDialog(QDialog):
     """Modal dialog summarising the area scan parameters before starting."""
 
@@ -166,9 +176,11 @@ class _ConfirmAreaScanDialog(QDialog):
             single_stack_focus_s = n_z * focus_stack_time_per_image_s
             waves = math.ceil(total_stacks / focus_stack_concurrency) if total_stacks > 0 else 0
             focus_stack_seconds = waves * single_stack_focus_s
-            total_time_str = _format_duration(
-                math.ceil(max(imaging_seconds + single_stack_focus_s, focus_stack_seconds))
-            )
+            finish_seconds = math.ceil(max(imaging_seconds + single_stack_focus_s, focus_stack_seconds))
+            total_time_str = _format_duration(finish_seconds)
+            done_by_str = _format_completion_time(finish_seconds)
+        else:
+            done_by_str = _format_completion_time(imaging_seconds)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -202,6 +214,7 @@ class _ConfirmAreaScanDialog(QDialog):
             rows.append(("Total time (with stacking)", total_time_str))
         else:
             rows.append(("Estimated time", imaging_time_str))
+        rows.append(("Done by", done_by_str))
         rows.append(("Output folder", output_folder))
 
         for label_text, value_text in rows:
@@ -825,12 +838,16 @@ class AreaScanWidget(QWidget):
             concurrency = _get_focus_stack_concurrency()
             waves = math.ceil(total_stacks / concurrency) if total_stacks > 0 else 0
             focus_stack_seconds = waves * single_stack_focus_s
-            total_time_str = _format_duration(
-                math.ceil(max(imaging_seconds + single_stack_focus_s, focus_stack_seconds))
+            finish_seconds = math.ceil(max(imaging_seconds + single_stack_focus_s, focus_stack_seconds))
+            total_time_str = _format_duration(finish_seconds)
+            done_by_str = _format_completion_time(finish_seconds)
+            time_summary = (
+                f"Imaging: {imaging_time_str}  |  Total incl. stacking: {total_time_str}"
+                f"  |  Done by {done_by_str}"
             )
-            time_summary = f"Imaging: {imaging_time_str}  |  Total incl. stacking: {total_time_str}"
         else:
-            time_summary = f"Est. time: {imaging_time_str}"
+            done_by_str = _format_completion_time(imaging_seconds)
+            time_summary = f"Est. time: {imaging_time_str}  |  Done by {done_by_str}"
 
         self._summary_label.setText(
             f"Grid: {n_x} × {n_y} positions  |  {n_z} Z slices each  |  "

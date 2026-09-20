@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from common.app_context import get_app_context
-from common.logger import error, warning
+from common.logger import error, info, warning
 from motion.models import Position
 from motion.routines.tree_core_imaging_routine import TreeCoreImagingRoutine
 from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
@@ -140,6 +140,8 @@ class _ConfirmDialog(QDialog):
         output_path: str,
         slot_count: int,
         image_calibration_scale: bool,
+        calibration_scale_mode: str = "stitched",
+        calibration_scale_per_slot: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -167,8 +169,17 @@ class _ConfirmDialog(QDialog):
         rows: list[tuple[str, str]] = [
             ("Slots to image", str(slot_count)),
             ("Image calibration scale", "Yes" if image_calibration_scale else "No"),
-            ("Output path", output_path),
         ]
+        if image_calibration_scale:
+            rows.append((
+                "Calibration mode",
+                "Single photo" if calibration_scale_mode == "single" else "Stitched (measure DPI)",
+            ))
+            rows.append((
+                "Calibration timing",
+                "Before every slot" if calibration_scale_per_slot else "Once, after all slots",
+            ))
+        rows.append(("Output path", output_path))
         for label_text, value_text in rows:
             lbl = QLabel(label_text + ":")
             lbl.setObjectName("CalScaleRowLabel")
@@ -441,9 +452,17 @@ class TreeCoreWidget(QWidget):
         self._inspect_cal_warning: QLabel
         self._cal_scale_toggle: QCheckBox
         self._cal_scale_details: QWidget
+        self._cal_mode_single_radio: QRadioButton
+        self._cal_mode_stitched_radio: QRadioButton
+        self._cal_per_slot_check: QCheckBox
+        self._cal_stitched_pos_widget: QWidget
+        self._cal_set_btn: QPushButton
+        self._cal_goto_btn: QPushButton
         self._cal_dpi_label: QLabel
         self._cal_last_label: QLabel
-        self._cal_goto_btn: QPushButton
+        self._cal_single_pos_widget: QWidget
+        self._cal_single_set_btn: QPushButton
+        self._cal_single_goto_btn: QPushButton
 
         # Sample list group
         self._sample_list_layout: QVBoxLayout
@@ -910,6 +929,74 @@ class TreeCoreWidget(QWidget):
         divider.setObjectName("SampleDivider")
         details_layout.addWidget(divider)
 
+        # ---- Mode: single photo vs stitched (measures DPI) ----------------
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(12)
+
+        self._cal_mode_single_radio = QRadioButton("Single Photo")
+        self._cal_mode_single_radio.setToolTip(
+            "Move to the single-image position, autofocus, and capture one "
+            "photo. No DPI is measured."
+        )
+        mode_row.addWidget(self._cal_mode_single_radio)
+
+        self._cal_mode_stitched_radio = QRadioButton("Stitched (measure DPI)")
+        self._cal_mode_stitched_radio.setChecked(True)
+        self._cal_mode_stitched_radio.setToolTip(
+            "Walk the scale bar, stitch the images, and measure DPI."
+        )
+        self._cal_mode_stitched_radio.toggled.connect(self._on_cal_mode_changed)
+        mode_row.addWidget(self._cal_mode_stitched_radio)
+        mode_row.addStretch(1)
+
+        details_layout.addLayout(mode_row)
+
+        self._cal_per_slot_check = QCheckBox("Capture before every slot")
+        self._cal_per_slot_check.setToolTip(
+            "Image the calibration slide before each slot instead of once "
+            "after all slots are complete. Saved per slot alongside that "
+            "slot's images."
+        )
+        self._cal_per_slot_check.stateChanged.connect(
+            lambda v: self._write_tca_check("calibration_scale_per_slot", v)
+        )
+        details_layout.addWidget(self._cal_per_slot_check)
+
+        pos_divider = QFrame()
+        pos_divider.setFrameShape(QFrame.Shape.HLine)
+        pos_divider.setObjectName("SampleDivider")
+        details_layout.addWidget(pos_divider)
+
+        # ---- Stitched (standard) position controls -------------------------
+        self._cal_stitched_pos_widget = QWidget()
+        stitched_pos_layout = QVBoxLayout(self._cal_stitched_pos_widget)
+        stitched_pos_layout.setContentsMargins(0, 0, 0, 0)
+        stitched_pos_layout.setSpacing(4)
+
+        stitched_pos_label = QLabel("Standard Position")
+        stitched_pos_label.setObjectName("CalScalePosLabel")
+        stitched_pos_layout.addWidget(stitched_pos_label)
+
+        stitched_btn_row = QHBoxLayout()
+        stitched_btn_row.setSpacing(6)
+        self._cal_set_btn = QPushButton("Set Position")
+        self._cal_set_btn.setFixedHeight(28)
+        self._cal_set_btn.setObjectName("CalSecondaryButton")
+        self._cal_set_btn.setToolTip("Save the current stage XYZ as the scale bar start position")
+        self._cal_set_btn.clicked.connect(self._on_set_scale_position_clicked)
+        stitched_btn_row.addWidget(self._cal_set_btn)
+
+        self._cal_goto_btn = QPushButton("Go to Position")
+        self._cal_goto_btn.setFixedHeight(28)
+        self._cal_goto_btn.setObjectName("CalSecondaryButton")
+        self._cal_goto_btn.setToolTip("Move the stage to the saved scale bar start position")
+        self._cal_goto_btn.clicked.connect(self._on_goto_scale_position_clicked)
+        stitched_btn_row.addWidget(self._cal_goto_btn)
+        stitched_btn_row.addStretch(1)
+        stitched_pos_layout.addLayout(stitched_btn_row)
+
+        details_layout.addWidget(self._cal_stitched_pos_widget)
+
         self._cal_dpi_label = QLabel("DPI: —")
         self._cal_dpi_label.setObjectName("CalScalePosLabel")
         details_layout.addWidget(self._cal_dpi_label)
@@ -918,14 +1005,40 @@ class TreeCoreWidget(QWidget):
         self._cal_last_label.setObjectName("CalScalePosLabel")
         details_layout.addWidget(self._cal_last_label)
 
-        self._cal_goto_btn = QPushButton("Go to Scale Bar Position")
-        self._cal_goto_btn.setFixedHeight(28)
-        self._cal_goto_btn.setObjectName("CalSecondaryButton")
-        self._cal_goto_btn.clicked.connect(self._on_goto_scale_position_clicked)
-        details_layout.addWidget(self._cal_goto_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        # ---- Single-image position controls --------------------------------
+        self._cal_single_pos_widget = QWidget()
+        single_pos_layout = QVBoxLayout(self._cal_single_pos_widget)
+        single_pos_layout.setContentsMargins(0, 0, 0, 0)
+        single_pos_layout.setSpacing(4)
+
+        single_pos_label = QLabel("Single Image Position")
+        single_pos_label.setObjectName("CalScalePosLabel")
+        single_pos_layout.addWidget(single_pos_label)
+
+        single_btn_row = QHBoxLayout()
+        single_btn_row.setSpacing(6)
+        self._cal_single_set_btn = QPushButton("Set Position")
+        self._cal_single_set_btn.setFixedHeight(28)
+        self._cal_single_set_btn.setObjectName("CalSecondaryButton")
+        self._cal_single_set_btn.setToolTip("Save the current stage XYZ as the single-image position")
+        self._cal_single_set_btn.clicked.connect(self._on_set_single_position_clicked)
+        single_btn_row.addWidget(self._cal_single_set_btn)
+
+        self._cal_single_goto_btn = QPushButton("Go to Position")
+        self._cal_single_goto_btn.setFixedHeight(28)
+        self._cal_single_goto_btn.setObjectName("CalSecondaryButton")
+        self._cal_single_goto_btn.setToolTip("Move the stage to the saved single-image position")
+        self._cal_single_goto_btn.clicked.connect(self._on_goto_single_position_clicked)
+        single_btn_row.addWidget(self._cal_single_goto_btn)
+        single_btn_row.addStretch(1)
+        single_pos_layout.addLayout(single_btn_row)
+
+        details_layout.addWidget(self._cal_single_pos_widget)
 
         self._cal_scale_details.setVisible(False)
         outer_layout.addWidget(self._cal_scale_details)
+
+        self._populate_calibration_scale_from_settings()
 
         return group
 
@@ -1059,6 +1172,7 @@ class TreeCoreWidget(QWidget):
             self._cal_dpi_label.setText("DPI: —")
             self._cal_last_label.setText("Last calibrated: —")
             self._cal_goto_btn.setEnabled(False)
+            self._cal_single_goto_btn.setEnabled(False)
             return
 
         s = ctx.machine_vision.settings
@@ -1079,8 +1193,8 @@ class TreeCoreWidget(QWidget):
         else:
             self._cal_last_label.setText("Last calibrated: —")
 
-        icp = s.inspection_calibration_position
-        self._cal_goto_btn.setEnabled(getattr(icp, "is_set", False))
+        self._cal_goto_btn.setEnabled(self._get_saved_scale_position() is not None)
+        self._cal_single_goto_btn.setEnabled(self._get_saved_single_position() is not None)
 
     # ------------------------------------------------------------------
     # Slots
@@ -1164,22 +1278,114 @@ class TreeCoreWidget(QWidget):
         if checked:
             self._refresh_calibration_scale_info()
 
+    def _on_cal_mode_changed(self, stitched_checked: bool) -> None:
+        self._cal_stitched_pos_widget.setVisible(stitched_checked)
+        self._cal_dpi_label.setVisible(stitched_checked)
+        self._cal_last_label.setVisible(stitched_checked)
+        self._cal_single_pos_widget.setVisible(not stitched_checked)
+        tca = _get_tca()
+        if tca is not None:
+            tca.calibration_scale_mode = "stitched" if stitched_checked else "single"
+
+    def _populate_calibration_scale_from_settings(self) -> None:
+        tca = _get_tca()
+        stitched = tca is None or tca.calibration_scale_mode != "single"
+        self._cal_mode_stitched_radio.setChecked(stitched)
+        self._cal_mode_single_radio.setChecked(not stitched)
+        self._cal_stitched_pos_widget.setVisible(stitched)
+        self._cal_dpi_label.setVisible(stitched)
+        self._cal_last_label.setVisible(stitched)
+        self._cal_single_pos_widget.setVisible(not stitched)
+
+        self._cal_per_slot_check.blockSignals(True)
+        self._cal_per_slot_check.setChecked(tca.calibration_scale_per_slot if tca is not None else False)
+        self._cal_per_slot_check.blockSignals(False)
+
+    def _get_saved_scale_position(self) -> tuple[int, int, int] | None:
+        ctx = get_app_context()
+        if ctx is None or ctx.machine_vision is None:
+            return None
+        icp = ctx.machine_vision.settings.inspection_calibration_position
+        if not getattr(icp, "is_set", False):
+            return None
+        return icp.x_nm, icp.y_nm, icp.z_nm
+
+    def _get_saved_single_position(self) -> tuple[int, int, int] | None:
+        ctx = get_app_context()
+        if ctx is None or ctx.machine_vision is None:
+            return None
+        sicp = ctx.machine_vision.settings.single_image_calibration_position
+        if not getattr(sicp, "is_set", False):
+            return None
+        return sicp.x_nm, sicp.y_nm, sicp.z_nm
+
+    def _on_set_scale_position_clicked(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.motion is None or not ctx.motion.is_ready():
+            warning("TreeCoreWidget: motion controller not ready for scale bar position save")
+            return
+        if ctx.machine_vision is None:
+            return
+
+        pos = ctx.motion.get_position()
+        icp = ctx.machine_vision.settings.inspection_calibration_position
+        icp.x_nm, icp.y_nm, icp.z_nm = pos.x, pos.y, pos.z
+        icp.is_set = True
+        ctx.machine_vision.save_settings()
+        info(
+            f"[TreeCoreWidget] Scale bar position saved:"
+            f" X={pos.x / _NM_PER_MM:.3f} mm"
+            f" Y={pos.y / _NM_PER_MM:.3f} mm"
+            f" Z={pos.z / _NM_PER_MM:.3f} mm"
+        )
+        self._refresh_calibration_scale_info()
+
     def _on_goto_scale_position_clicked(self) -> None:
         ctx = get_app_context()
         if ctx is None or ctx.motion is None or not ctx.motion.is_ready():
             warning("TreeCoreWidget: motion controller not ready for scale bar move")
             return
-        if ctx.machine_vision is None:
-            return
-        icp = ctx.machine_vision.settings.inspection_calibration_position
-        if not getattr(icp, "is_set", False):
+        saved = self._get_saved_scale_position()
+        if saved is None:
             warning("TreeCoreWidget: no scale bar position saved")
             return
+        x_nm, y_nm, z_nm = saved
 
-        ctx.motion.move_to_position(
-            Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm),
-            wait=False,
+        ctx.motion.move_to_position(Position(x=x_nm, y=y_nm, z=z_nm), wait=False)
+
+    def _on_set_single_position_clicked(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.motion is None or not ctx.motion.is_ready():
+            warning("TreeCoreWidget: motion controller not ready for single-image position save")
+            return
+        if ctx.machine_vision is None:
+            return
+
+        pos = ctx.motion.get_position()
+        sicp = ctx.machine_vision.settings.single_image_calibration_position
+        sicp.x_nm, sicp.y_nm, sicp.z_nm = pos.x, pos.y, pos.z
+        sicp.is_set = True
+        ctx.machine_vision.save_settings()
+        info(
+            f"[TreeCoreWidget] Single-image position saved:"
+            f" X={pos.x / _NM_PER_MM:.3f} mm"
+            f" Y={pos.y / _NM_PER_MM:.3f} mm"
+            f" Z={pos.z / _NM_PER_MM:.3f} mm"
         )
+        self._refresh_calibration_scale_info()
+
+    def _on_goto_single_position_clicked(self) -> None:
+        ctx = get_app_context()
+        if ctx is None or ctx.motion is None or not ctx.motion.is_ready():
+            warning("TreeCoreWidget: motion controller not ready for single-image position move")
+            return
+        saved = self._get_saved_single_position()
+        if saved is None:
+            warning("TreeCoreWidget: no single-image position saved")
+            return
+        x_nm, y_nm, z_nm = saved
+
+        ctx.motion.move_to_position(Position(x=x_nm, y=y_nm, z=z_nm), wait=False)
 
     def _on_go_to_slot_clicked(self) -> None:
         slot_number = self._slot_spin.value()
@@ -1255,11 +1461,15 @@ class TreeCoreWidget(QWidget):
 
         slots = [(r.sample_number - 1, r.name or f"slot_{r.sample_number:02d}") for r in active_samples]
         image_calibration_scale = self._cal_scale_toggle.isChecked()
+        calibration_scale_mode = "single" if self._cal_mode_single_radio.isChecked() else "stitched"
+        calibration_scale_per_slot = self._cal_per_slot_check.isChecked()
 
         dlg = _ConfirmDialog(
             output_path=output_path,
             slot_count=len(slots),
             image_calibration_scale=image_calibration_scale,
+            calibration_scale_mode=calibration_scale_mode,
+            calibration_scale_per_slot=calibration_scale_per_slot,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1275,6 +1485,8 @@ class TreeCoreWidget(QWidget):
             output_folder=output_path,
             slots=slots,
             image_calibration_scale=image_calibration_scale,
+            calibration_scale_mode=calibration_scale_mode,
+            calibration_scale_per_slot=calibration_scale_per_slot,
             focus_stack_config=focus_stack_config,
         )
         ctx.motion.start_routine(self._routine)
@@ -1387,7 +1599,13 @@ class TreeCoreWidget(QWidget):
         self._start_btn.setVisible(False)
         self._output_folder.setEnabled(False)
         self._cal_scale_toggle.setEnabled(False)
+        self._cal_mode_single_radio.setEnabled(False)
+        self._cal_mode_stitched_radio.setEnabled(False)
+        self._cal_per_slot_check.setEnabled(False)
+        self._cal_set_btn.setEnabled(False)
         self._cal_goto_btn.setEnabled(False)
+        self._cal_single_set_btn.setEnabled(False)
+        self._cal_single_goto_btn.setEnabled(False)
         self._optimal_focus_radio.setEnabled(False)
         self._focus_stack_radio.setEnabled(False)
         self._focus_stack_settings.setEnabled(False)
@@ -1403,6 +1621,11 @@ class TreeCoreWidget(QWidget):
         self._start_btn.setVisible(True)
         self._output_folder.setEnabled(True)
         self._cal_scale_toggle.setEnabled(True)
+        self._cal_mode_single_radio.setEnabled(True)
+        self._cal_mode_stitched_radio.setEnabled(True)
+        self._cal_per_slot_check.setEnabled(True)
+        self._cal_set_btn.setEnabled(True)
+        self._cal_single_set_btn.setEnabled(True)
         self._optimal_focus_radio.setEnabled(True)
         self._focus_stack_radio.setEnabled(True)
         self._focus_stack_settings.setEnabled(True)

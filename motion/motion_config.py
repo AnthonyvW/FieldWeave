@@ -80,6 +80,14 @@ class TreeCoreAutomationSettings:
     # "focus_stack" captures a Z-stack and stacks the result.
     focus_mode: str = "optimal_focus"
 
+    # Calibration slide imaging: "single" captures one photo (no DPI
+    # measurement); "stitched" walks the scale bar and measures DPI.
+    calibration_scale_mode: str = "stitched"
+
+    # When True the calibration slide is imaged before every slot instead of
+    # once after all slots are complete.
+    calibration_scale_per_slot: bool = False
+
     # Focus stack parameters (used when focus_mode == "focus_stack").
     z_step_nm: int = 200_000
     z_near_plane_nm: int = 0
@@ -393,6 +401,8 @@ class MotionSystemSettings:
             raise ValueError("z_stack_scan.workers must be between 1 and 16")
         if self.tree_core_automation.focus_mode not in ("optimal_focus", "focus_stack"):
             raise ValueError("tree_core_automation.focus_mode must be 'optimal_focus' or 'focus_stack'")
+        if self.tree_core_automation.calibration_scale_mode not in ("single", "stitched"):
+            raise ValueError("tree_core_automation.calibration_scale_mode must be 'single' or 'stitched'")
         if self.tree_core_automation.z_step_nm <= 0:
             raise ValueError("tree_core_automation.z_step_nm must be positive")
         if not (1.0 <= self.tree_core_automation.sharpness <= 8.0):

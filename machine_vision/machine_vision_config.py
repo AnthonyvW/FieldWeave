@@ -531,6 +531,10 @@ class MachineVisionSettings:
         default_factory=InspectionCalibrationPosition
     )
     """Saved stage position used as the starting point for inspection calibration."""
+    single_image_calibration_position: InspectionCalibrationPosition = field(
+        default_factory=InspectionCalibrationPosition
+    )
+    """Saved stage position used for the single-photo calibration slide capture."""
     red_mark: RedMarkDetectionSettings = field(default_factory=RedMarkDetectionSettings)
     """Parameters for the red registration-mark detection algorithm."""
 
@@ -747,6 +751,14 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             z_nm=icp_data.get("z_nm", 0),
         )
 
+        sicp_data: dict[str, Any] = data.get("single_image_calibration_position", {})
+        single_image_calibration_position = InspectionCalibrationPosition(
+            is_set=sicp_data.get("is_set", False),
+            x_nm=sicp_data.get("x_nm", 0),
+            y_nm=sicp_data.get("y_nm", 0),
+            z_nm=sicp_data.get("z_nm", 0),
+        )
+
         raw_focus_stack_time_samples = data.get("focus_stack_time_samples_s", {})
         focus_stack_time_samples_s = (
             raw_focus_stack_time_samples if isinstance(raw_focus_stack_time_samples, dict) else {}
@@ -758,6 +770,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             camera_calibration=camera_calibration,
             inspect_calibration=inspect_calibration,
             inspection_calibration_position=inspection_calibration_position,
+            single_image_calibration_position=single_image_calibration_position,
             red_mark=_load_red_mark(data.get("red_mark", {})),
             background=_load_background(data.get("background", {})),
             focus_stack_time_samples_s=focus_stack_time_samples_s,
@@ -771,6 +784,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         cc = settings.camera_calibration
         ic = settings.inspect_calibration
         icp = settings.inspection_calibration_position
+        sicp = settings.single_image_calibration_position
         rm = settings.red_mark
         bg = settings.background
         return {
@@ -824,6 +838,12 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 "x_nm": icp.x_nm,
                 "y_nm": icp.y_nm,
                 "z_nm": icp.z_nm,
+            },
+            "single_image_calibration_position": {
+                "is_set": sicp.is_set,
+                "x_nm": sicp.x_nm,
+                "y_nm": sicp.y_nm,
+                "z_nm": sicp.z_nm,
             },
             "red_mark": {
                 "scale": rm.scale,

@@ -56,11 +56,27 @@ Procedure (per slot)
     current Z before capturing.  In focus_stack mode a Z-stack is captured
     directly.
 
-If ``image_calibration_scale`` is True, the calibration scale bar is imaged
-after all slots are complete.  The routine moves to the saved scale bar
-start position (from ``machine_vision.settings.inspection_calibration_position``)
-and runs :class:`~motion.routines.inspection_calibration_scale_routine.InspectionCalibrationScaleRoutine`,
-saving its output into ``<output_folder>/calibration_slide/``.
+If ``image_calibration_scale`` is True, the calibration slide is imaged
+using one of two modes selected via ``calibration_scale_mode``:
+
+``"stitched"`` (default)
+    The routine moves to the saved scale bar start position (from
+    ``machine_vision.settings.inspection_calibration_position``) and runs
+    :class:`~motion.routines.inspection_calibration_scale_routine.InspectionCalibrationScaleRoutine`,
+    which walks the bar, stitches the images, and measures DPI.
+
+``"single"``
+    The routine moves to the saved single-image position (from
+    ``machine_vision.settings.single_image_calibration_position``), autofocuses,
+    and captures one photo via
+    :class:`~motion.routines.inspection_calibration_scale_routine.InspectionCalibrationSinglePhotoRoutine`.
+    No DPI measurement is attempted — there is currently no algorithm to
+    derive DPI from a single frame.
+
+By default the calibration slide is imaged once, after all slots are
+complete, saving into ``<output_folder>/calibration_slide/``.  When
+``calibration_scale_per_slot`` is True it is instead imaged before every
+slot, saving into ``<output_folder>/<slot_name>/calibration_slide/``.
 
 The step size is derived from the live sensor dimensions (one frame captured
 per slot after arriving at the start position) combined with the camera
@@ -102,7 +118,10 @@ from motion.routines.red_mark_centering_routine import RedMarkCenteringRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
 from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
-from motion.routines.inspection_calibration_scale_routine import InspectionCalibrationScaleRoutine
+from motion.routines.inspection_calibration_scale_routine import (
+    InspectionCalibrationScaleRoutine,
+    InspectionCalibrationSinglePhotoRoutine,
+)
 from machine_vision.algorithms.background_detection import is_background_frame
 from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
 
@@ -205,9 +224,17 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         Fractional overlap between consecutive frames in the sweep direction,
         in the range [0, 1).  Defaults to 0.4 (40 % overlap).
     image_calibration_scale:
-        When True the calibration scale bar is imaged after all slots are
-        processed.  Output is saved to ``<output_folder>/calibration_slide/``.
-        Requires a saved scale bar position in the machine vision settings.
+        When True the calibration slide is imaged (see ``calibration_scale_mode``
+        and ``calibration_scale_per_slot``).  Requires a saved position in the
+        machine vision settings for the selected mode.
+    calibration_scale_mode:
+        ``"stitched"`` (default) walks the scale bar, stitches the images, and
+        measures DPI.  ``"single"`` moves to the single-image position,
+        autofocuses, and captures one photo — no DPI is measured.
+    calibration_scale_per_slot:
+        When True the calibration slide is imaged before every slot (saved
+        under each slot's own sub-folder) instead of once after all slots
+        are complete.
     focus_stack_config:
         When supplied and the imaging mode is ``"focus_stack"``, a
         :class:`QueuedFocusStackRoutine` is queued for each XY position after
@@ -241,6 +268,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         slots: list[tuple[int, str]],
         image_overlap: float = 0.4,
         image_calibration_scale: bool = False,
+        calibration_scale_mode: str = "stitched",
+        calibration_scale_per_slot: bool = False,
         focus_stack_config: FocusStackRoutineConfig | None = None,
     ) -> None:
         super().__init__(motion)
@@ -248,6 +277,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         self._slots = list(slots)
         self._image_overlap = image_overlap
         self._image_calibration_scale = image_calibration_scale
+        self._calibration_scale_mode = calibration_scale_mode
+        self._calibration_scale_per_slot = calibration_scale_per_slot
         self._focus_stack_config = focus_stack_config
 
     def steps(self) -> Generator[None, None, None]:
@@ -374,33 +405,41 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             axis_max_nm = motion_settings.max_x * _NM_PER_MM
 
         # ------------------------------------------------------------------
-        # Optional calibration scale imaging — run first so it is captured
-        # even if the slot run is interrupted partway through.
+        # Calibration slide capture helper — shared between the once-per-run
+        # and once-per-slot placements below.
         # ------------------------------------------------------------------
 
-        if self._image_calibration_scale:
-            self._set_status("Imaging calibration scale", 0, 100)
-            info("[TreeCoreImaging] Starting calibration scale imaging")
+        def _run_calibration_slide_capture(cal_folder: Path, status_prefix: str) -> bool:
+            """Run the configured calibration slide capture into cal_folder.
 
-            icp = ctx.machine_vision.settings.inspection_calibration_position
+            Returns False if a stop was requested mid-capture, True otherwise.
+            """
+            if self._calibration_scale_mode == "single":
+                position = ctx.machine_vision.settings.single_image_calibration_position
+                routine_cls = InspectionCalibrationSinglePhotoRoutine
+                position_label = "single-image"
+            else:
+                position = ctx.machine_vision.settings.inspection_calibration_position
+                routine_cls = InspectionCalibrationScaleRoutine
+                position_label = "scale bar"
+
             start_position: Position | None = None
-            if getattr(icp, "is_set", False):
-                start_position = Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm)
+            if getattr(position, "is_set", False):
+                start_position = Position(x=position.x_nm, y=position.y_nm, z=position.z_nm)
                 info(
-                    f"[TreeCoreImaging] Moving to scale bar position"
-                    f" X={icp.x_nm / _NM_PER_MM:.3f} mm"
-                    f" Y={icp.y_nm / _NM_PER_MM:.3f} mm"
-                    f" Z={icp.z_nm / _NM_PER_MM:.3f} mm"
+                    f"[TreeCoreImaging] Moving to {position_label} position"
+                    f" X={position.x_nm / _NM_PER_MM:.3f} mm"
+                    f" Y={position.y_nm / _NM_PER_MM:.3f} mm"
+                    f" Z={position.z_nm / _NM_PER_MM:.3f} mm"
                 )
             else:
-                warning("[TreeCoreImaging] No saved scale bar position — starting calibration scale routine from current position")
+                warning(f"[TreeCoreImaging] No saved {position_label} position — starting calibration capture from current position")
 
-            cal_slide_folder = self._output_folder / "calibration_slide"
-            cal_slide_folder.mkdir(parents=True, exist_ok=True)
+            cal_folder.mkdir(parents=True, exist_ok=True)
 
-            cal_routine = InspectionCalibrationScaleRoutine(
+            cal_routine = routine_cls(
                 motion=self.motion,
-                output_path=str(cal_slide_folder),
+                output_path=str(cal_folder),
                 start_position=start_position,
                 capture_timeout_s=capture_timeout_s,
             )
@@ -409,16 +448,28 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             while cal_routine.is_running:
                 if self._check_stop():
                     cal_routine.stop()
-                    return
-                self._set_status(
-                    f"Calibration scale — {cal_routine.activity}",
-                    0,
-                    100,
-                )
+                    return False
+                self._set_status(f"{status_prefix} — {cal_routine.activity}", 0, 100)
                 time.sleep(0.25)
 
             cal_routine.wait()
-            info("[TreeCoreImaging] Calibration scale imaging complete")
+            info(f"[TreeCoreImaging] Calibration slide capture complete: {cal_folder}")
+            return True
+
+        # ------------------------------------------------------------------
+        # Once-per-run calibration slide imaging — run first so it is
+        # captured even if the slot run is interrupted partway through.
+        # Skipped when calibration_scale_per_slot is True, in which case it
+        # is captured before each slot instead (see the slot loop below).
+        # ------------------------------------------------------------------
+
+        if self._image_calibration_scale and not self._calibration_scale_per_slot:
+            self._set_status("Imaging calibration scale", 0, 100)
+            info("[TreeCoreImaging] Starting calibration slide imaging")
+
+            cal_slide_folder = self._output_folder / "calibration_slide"
+            if not _run_calibration_slide_capture(cal_slide_folder, "Calibration scale"):
+                return
 
             yield
             if self._check_stop():
@@ -447,6 +498,23 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             slot_folder = self._output_folder / slot_name
             slot_folder.mkdir(parents=True, exist_ok=True)
             info(f"[TreeCoreImaging] Output folder: {slot_folder}")
+
+            # ------------------------------------------------------------------
+            # Per-slot calibration slide imaging (only when configured to run
+            # before every slot rather than once for the whole run).
+            # ------------------------------------------------------------------
+
+            if self._image_calibration_scale and self._calibration_scale_per_slot:
+                self._set_status(f"Imaging calibration scale — {slot_label}", 0, 100)
+                info(f"[TreeCoreImaging] Starting calibration slide imaging for {slot_label}")
+
+                cal_slide_folder = slot_folder / "calibration_slide"
+                if not _run_calibration_slide_capture(cal_slide_folder, f"Calibration scale — {slot_label}"):
+                    return
+
+                yield
+                if self._check_stop():
+                    return
 
             # ------------------------------------------------------------------
             # Move to the slot's mark position and centre

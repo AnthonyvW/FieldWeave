@@ -518,3 +518,127 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
             f"[CalibrationScale] Done — {step} steps taken,"
             f" {len(list(save_dir.glob(f'*.{img_ext}')))} images saved in {save_dir}"
         )
+
+
+class InspectionCalibrationSinglePhotoRoutine(AutomationRoutine):
+    """
+    Move to the calibration slide position, autofocus, and capture one image.
+
+    Unlike :class:`InspectionCalibrationScaleRoutine`, this does not walk the
+    scale bar or stitch/measure DPI — there is currently no algorithm to
+    derive DPI from a single frame. Intended for a quick record photo of the
+    calibration slide rather than for measuring optical resolution.
+
+    The captured image is saved as ``<output_path>/calibration_slide.<ext>``.
+
+    Parameters
+    ----------
+    motion:
+        Active :class:`MotionControllerManager`.
+    output_path:
+        Directory the image is saved into. Created if it does not exist.
+    start_position:
+        Stage position to move to before autofocusing. If None, the routine
+        autofocuses and captures at the current position.
+    capture_timeout_s:
+        Seconds to wait for the still capture before giving up.
+    """
+
+    job_name = "Calibration Slide Photo"
+
+    def __init__(
+        self,
+        motion: MotionControllerManager,
+        output_path: str | Path,
+        *,
+        start_position: Position | None = None,
+        capture_timeout_s: float = 10.0,
+    ) -> None:
+        super().__init__(motion)
+        self._output_path = Path(output_path)
+        self._start_position = start_position
+        self._capture_timeout_s = capture_timeout_s
+
+    def _set_percent(self, activity: str, percent: float) -> None:
+        clamped = max(0, min(100, int(round(percent))))
+        self._set_status(activity, clamped, 100)
+
+    def steps(self) -> Generator[None, None, None]:
+        ctx = get_app_context()
+
+        self._set_percent("Initialising", 0)
+
+        if not ctx.has_camera:
+            error("[CalibrationSlidePhoto] No camera available — aborting")
+            self._set_result(success=False)
+            return
+
+        try:
+            self._output_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            error(f"[CalibrationSlidePhoto] Could not create output directory: {exc}")
+            self._set_result(success=False)
+            return
+
+        if self._start_position is not None:
+            self._set_percent("Moving to position", 10)
+            info(
+                f"[CalibrationSlidePhoto] Moving to position"
+                f" X={self._start_position.x / _NM_PER_MM:.3f} mm"
+                f" Y={self._start_position.y / _NM_PER_MM:.3f} mm"
+                f" Z={self._start_position.z / _NM_PER_MM:.3f} mm"
+            )
+            self.motion.move_to_position(self._start_position, wait=True)
+
+            if self._check_stop():
+                return
+
+            yield
+
+        self._set_percent("Autofocusing", 30)
+        info("[CalibrationSlidePhoto] Starting autofocus")
+
+        autofocus = Autofocus(motion=self.motion)
+        autofocus.start()
+        while autofocus.is_running:
+            if self._check_stop():
+                autofocus.stop()
+                autofocus.wait()
+                return
+            time.sleep(0.1)
+        autofocus.wait()
+
+        if self._check_stop():
+            return
+
+        yield
+
+        self._set_percent("Capturing image", 70)
+        img_ext = ctx.camera.underlying_camera.settings.fformat.value
+        filepath = self._output_path / f"calibration_slide.{img_ext}"
+
+        pos = self.motion.get_position()
+        success, _ = ctx.camera.capture_and_save_still(
+            filepath=filepath,
+            resolution_index=0,
+            additional_metadata={
+                "x_position_nm": pos.x,
+                "y_position_nm": pos.y,
+                "z_position_nm": pos.z,
+                "source": "inspection_calibration_single_photo",
+            },
+            timeout_ms=int(self._capture_timeout_s * 1000),
+            wait=True,
+        )
+
+        if not success:
+            error(f"[CalibrationSlidePhoto] Capture failed: {filepath}")
+            self._set_result(success=False)
+            return
+
+        info(f"[CalibrationSlidePhoto] Saved {filepath}")
+
+        yield
+
+        self._set_percent("Complete", 100)
+        self._set_result(success=True, output_path=str(filepath))
