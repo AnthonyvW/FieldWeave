@@ -80,6 +80,9 @@ class TreeCoreAutomationSettings:
     # "focus_stack" captures a Z-stack and stacks the result.
     focus_mode: str = "optimal_focus"
 
+    # When True the calibration slide is imaged during the run.
+    calibration_scale_enabled: bool = False
+
     # Calibration slide imaging: "single" captures one photo (no DPI
     # measurement); "stitched" walks the scale bar and measures DPI.
     calibration_scale_mode: str = "stitched"

@@ -916,6 +916,9 @@ class TreeCoreWidget(QWidget):
         self._cal_scale_toggle = QCheckBox("Image calibration scale during run")
         self._cal_scale_toggle.setChecked(False)
         self._cal_scale_toggle.toggled.connect(self._on_cal_scale_toggled)
+        self._cal_scale_toggle.stateChanged.connect(
+            lambda v: self._write_tca_check("calibration_scale_enabled", v)
+        )
         toggle_row.addWidget(self._cal_scale_toggle)
         toggle_row.addStretch(1)
 
@@ -1309,6 +1312,12 @@ class TreeCoreWidget(QWidget):
 
     def _populate_calibration_scale_from_settings(self) -> None:
         tca = _get_tca()
+
+        self._cal_scale_toggle.blockSignals(True)
+        self._cal_scale_toggle.setChecked(tca.calibration_scale_enabled if tca is not None else False)
+        self._cal_scale_toggle.blockSignals(False)
+        self._cal_scale_details.setVisible(self._cal_scale_toggle.isChecked())
+
         stitched = tca is None or tca.calibration_scale_mode != "single"
         self._cal_mode_stitched_radio.setChecked(stitched)
         self._cal_mode_single_radio.setChecked(not stitched)
