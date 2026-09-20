@@ -16,6 +16,10 @@ DEFAULT_CONFIG = {
 
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
 
+STACKED_DIRNAME = 'focus_stacked'
+CALIBRATION_DIRNAME = 'calibration_slide'
+CALIBRATION_STEM = 'calibration_slide'
+
 
 def natural_sort_key(path):
     """Sort '...img2.jpg' before '...img10.jpg' by splitting off numeric runs."""
@@ -50,6 +54,60 @@ def collect_images(inputs, no_sort=False):
         return deduped
 
     return sorted(set(paths), key=natural_sort_key)
+
+
+def resolve_tree_core(inputs):
+    """Return (tree_core_folder, image_inputs) when a single tree core folder
+    was passed, else (None, inputs) so files/globs keep working as before."""
+    if len(inputs) != 1 or not os.path.isdir(inputs[0]):
+        return None, inputs
+
+    root = os.path.abspath(inputs[0])
+    stacked = os.path.join(root, STACKED_DIRNAME)
+    if not os.path.isdir(stacked):
+        return None, inputs
+
+    return root, [stacked]
+
+
+def find_calibration_slide(tree_core_folder):
+    """Return (slide_path, already_horizontal) for the tree core's calibration
+    slide, or (None, False) when the folder or the image is absent."""
+    cal_dir = os.path.join(tree_core_folder, CALIBRATION_DIRNAME)
+    if not os.path.isdir(cal_dir):
+        return None, False
+
+    entries = sorted(os.listdir(cal_dir))
+    slide_path = None
+    for entry in entries:
+        stem, ext = os.path.splitext(entry)
+        if stem.lower() == CALIBRATION_STEM and ext.lower() in IMAGE_EXTENSIONS:
+            slide_path = os.path.join(cal_dir, entry)
+            break
+
+    if slide_path is None:
+        return None, False
+
+    # DPI.txt is only written once the slide has been measured, a pass that
+    # leaves the image horizontal regardless of how the core was scanned.
+    already_horizontal = any(e.lower() == 'dpi.txt' for e in entries)
+    return slide_path, already_horizontal
+
+
+def prepend_calibration_slide(composite, slide):
+    """Butt the calibration slide against the left edge of the stitched core,
+    vertically centred, without overlapping it."""
+    height = max(composite.shape[0], slide.shape[0])
+    width = slide.shape[1] + composite.shape[1]
+    canvas = np.zeros((height, width, 3), np.uint8)
+
+    slide_y = (height - slide.shape[0]) // 2
+    canvas[slide_y:slide_y + slide.shape[0], 0:slide.shape[1]] = slide
+
+    comp_y = (height - composite.shape[0]) // 2
+    canvas[comp_y:comp_y + composite.shape[0], slide.shape[1]:width] = composite
+
+    return canvas
 
 
 class Stitcher:
@@ -215,11 +273,17 @@ def main():
         description='Stitch a sequence of overlapping images using '
                     'SIFT + FLANN alignment and hard-seam compositing.')
     parser.add_argument('inputs', nargs='+',
-                        help='A directory of images, or an explicit list of image '
-                             'files/globs, in left-to-right scan order.')
+                        help='A tree core folder containing a "focus_stacked" '
+                             'subfolder, a directory of images, or an explicit list '
+                             'of image files/globs, in left-to-right scan order.')
     parser.add_argument('-o', '--output',
                         help='Path to write the stitched image to (default: '
-                             '"output.jpg" inside the input folder).')
+                             '"<tree core name>.tiff" inside the tree core folder, '
+                             'or "output.jpg" inside a plain input folder).')
+    parser.add_argument('--calibration-slide', action='store_true',
+                        help='Prepend the calibration slide image found in the tree '
+                             'core folder\'s "calibration_slide" subfolder to the '
+                             'left edge of the stitched core.')
     parser.add_argument('--overlap', type=float, default=0.35,
                         help='Expected overlap between adjacent images, as a fraction '
                              'of image width (default: 0.35).')
@@ -251,7 +315,14 @@ def main():
                         help='Suppress per-pair progress logging.')
     args = parser.parse_args()
 
-    image_paths = collect_images(args.inputs, no_sort=args.no_sort)
+    tree_core_folder, image_inputs = resolve_tree_core(args.inputs)
+    if tree_core_folder is not None:
+        print('Tree core folder: {}'.format(tree_core_folder))
+    elif args.calibration_slide:
+        parser.error('--calibration-slide requires a tree core folder containing a '
+                     '"{}" subfolder.'.format(STACKED_DIRNAME))
+
+    image_paths = collect_images(image_inputs, no_sort=args.no_sort)
     if len(image_paths) < 2:
         parser.error('Need at least 2 images to stitch, found {}.'.format(len(image_paths)))
 
@@ -260,6 +331,9 @@ def main():
 
     if args.output:
         output_path = args.output
+    elif tree_core_folder is not None:
+        output_path = os.path.join(
+            tree_core_folder, '{}.tiff'.format(os.path.basename(tree_core_folder)))
     else:
         first_input = os.path.abspath(args.inputs[0])
         input_dir = first_input if os.path.isdir(first_input) else os.path.dirname(first_input)
@@ -284,6 +358,22 @@ def main():
     except Exception as e:
         print('Stitching failed: {}'.format(e), file=sys.stderr)
         return 1
+
+    if args.calibration_slide:
+        slide_path, already_horizontal = find_calibration_slide(tree_core_folder)
+        if slide_path is None:
+            print('No calibration slide found in {}; skipping.'.format(
+                os.path.join(tree_core_folder, CALIBRATION_DIRNAME)), file=sys.stderr)
+        else:
+            slide = cv2.imread(slide_path)
+            if slide is None:
+                print('Could not read calibration slide: {}'.format(slide_path),
+                      file=sys.stderr)
+                return 1
+            if args.vertical_core and not already_horizontal:
+                slide = cv2.rotate(slide, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            composite = prepend_calibration_slide(composite, slide)
+            print('Prepended calibration slide from {}'.format(slide_path))
 
     out_dir = os.path.dirname(os.path.abspath(output_path))
     if out_dir:
