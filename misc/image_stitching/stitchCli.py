@@ -124,8 +124,8 @@ class Stitcher:
         self.config = config or DEFAULT_CONFIG
         self.maxOffset = 0
         self.verbose = verbose
-        self.skipped_leading = []
-        self.skipped_trailing = []
+        self.runs = []
+        self.stitched_range = None
 
     def log(self, message):
         if self.verbose:
@@ -170,14 +170,20 @@ class Stitcher:
         sift = cv2.SIFT_create(nfeatures=cfg['max_features'])
         self.log('\t- Finding keypoints and descriptors for image 1')
         kp1, des1 = sift.detectAndCompute(i1, mask)
+        self.log('\t- Image 1 overlap: {} keypoints, {} descriptors'.format(
+            len(kp1), 0 if des1 is None else len(des1)))
         self.log('\t- Finding keypoints and descriptors for image 2')
         kp2, des2 = sift.detectAndCompute(i2, mask)
+        self.log('\t- Image 2 overlap: {} keypoints, {} descriptors'.format(
+            len(kp2), 0 if des2 is None else len(des2)))
 
         if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
             raise RegistrationError(
-                'Not enough SIFT keypoints found in the overlap region to '
-                'align this pair. Try a larger --overlap, disable --mask, '
-                'or increase --max-features.')
+                'not enough SIFT keypoints in the overlap region ({} and {} '
+                'descriptors). Try a larger --overlap, disable --mask, or '
+                'increase --max-features'.format(
+                    0 if des1 is None else len(des1),
+                    0 if des2 is None else len(des2)))
 
         # Use FLANN to determine matches
         self.log('\t- Finding matches')
@@ -189,7 +195,8 @@ class Stitcher:
         good_matches = [m for m, n in matches if m.distance < 0.7 * n.distance]
         if not good_matches:
             raise RegistrationError(
-                'No good SIFT matches survived the ratio test for this pair.')
+                'no SIFT match survived the ratio test ({} and {} descriptors, '
+                '{} raw matches)'.format(len(des1), len(des2), len(matches)))
 
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
         dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
@@ -248,86 +255,101 @@ class Stitcher:
 
         return comp_img
 
-    def any_pair_aligns(self, image_paths, enable_mask, vertical_core):
-        """Whether any adjacent pair in *image_paths* still registers.  Used to
-        tell a featureless run at the end of a core, which is skippable, from a
-        dropout mid-core, which is not."""
-        verbose = self.verbose
-        self.verbose = False
-        try:
-            for i in range(len(image_paths) - 1):
-                img1 = self.load_image(image_paths[i], vertical_core)
-                img2 = self.load_image(image_paths[i + 1], vertical_core)
-                try:
-                    self.calculate_offset(img1, img2, enable_mask)
-                    return True
-                except RegistrationError:
-                    continue
-        finally:
-            self.verbose = verbose
-        return False
+    def keep_longest_run(self, best, composite, first, last):
+        """Close off the run of images just stitched and keep whichever of it
+        and *best* covers more images.  Only the winner's composite is retained,
+        since a full-core composite runs to hundreds of megabytes."""
+        if composite is None:
+            return best
+
+        self.runs.append((first, last))
+        run = {'first': first, 'last': last,
+               'offset': self.maxOffset, 'composite': composite}
+        if best is None or last - first > best['last'] - best['first']:
+            return run
+        return best
 
     def stitch_sequence(self, image_paths, enable_mask, vertical_core, crop):
-        self.skipped_leading = []
-        self.skipped_trailing = []
-        total = len(image_paths) - 1
+        """Stitch the longest run of consecutive images that align with each
+        other.  Pairs that cannot be registered -- the out-of-focus tray past
+        either end of the core, or a dropout mid-core -- end the current run and
+        start a new one, and the longest run wins."""
+        self.runs = []
+        names = [os.path.basename(p) for p in image_paths]
 
-        # Seed the composite.  Anything that will not register before the first
-        # successful pair is tray rather than core, so drop it and move on.
+        best = None
         composite = None
+        first = 0
         index = 0
-        while composite is None and index + 1 < len(image_paths):
-            img1 = self.load_image(image_paths[index], vertical_core)
-            img2 = self.load_image(image_paths[index + 1], vertical_core)
-            self.log('Stitching image {}/{}: {} + {}'.format(
-                index + 1, total, image_paths[index], image_paths[index + 1]))
-            try:
-                composite = self.stitch_images(img1, img2, enable_mask)
-            except RegistrationError as e:
-                self.warn('Skipping {} at the start of the core: {}'.format(
-                    image_paths[index], e))
-                self.skipped_leading.append(image_paths[index])
-                index += 1
-                continue
-            self.log('  Composite size so far: {}'.format(composite.shape))
-            index += 1
-
-        if composite is None:
-            raise RuntimeError(
-                'No pair of images could be aligned -- every overlap region was '
-                'too featureless to register.')
+        self.maxOffset = 0
 
         while index + 1 < len(image_paths):
-            img2 = self.load_image(image_paths[index + 1], vertical_core)
-            self.log('Stitching image {}/{}: {} + {}'.format(
-                index + 1, total, image_paths[index], image_paths[index + 1]))
+            left = composite
+            if left is None:
+                left = self.load_image(image_paths[index], vertical_core)
+            right = self.load_image(image_paths[index + 1], vertical_core)
+
+            self.log('Stitching images {} and {} of {}: {} + {}'.format(
+                index + 1, index + 2, len(image_paths),
+                image_paths[index], image_paths[index + 1]))
             try:
-                composite = self.stitch_images(composite, img2, enable_mask)
+                stitched = self.stitch_images(left, right, enable_mask)
             except RegistrationError as e:
-                remaining = image_paths[index + 1:]
-                self.log('  Alignment failed; checking whether any later pair aligns')
-                if self.any_pair_aligns(remaining, enable_mask, vertical_core):
-                    raise RuntimeError(
-                        '{} could not be aligned, but a later pair still aligns, so '
-                        'this is a gap in the middle of the core rather than '
-                        'out-of-focus tray at the end. Nothing was skipped. '
-                        'Original failure: {}'.format(image_paths[index + 1], e))
-                self.warn('Skipping the final {} image(s) at the end of the core, '
-                          'which carry too little detail to align: {}'.format(
-                              len(remaining), ', '.join(remaining)))
-                self.skipped_trailing = remaining
-                break
+                self.warn('Could not align image {} ({}) with image {} ({}): {}.'.format(
+                    index + 1, names[index], index + 2, names[index + 1], e))
+                best = self.keep_longest_run(best, composite, first, index)
+                if composite is not None:
+                    self.log('  Run of images {}-{} ends here; starting a new run '
+                             'at image {}'.format(first + 1, index + 1, index + 2))
+                composite = None
+                self.maxOffset = 0
+                first = index + 1
+                index += 1
+                continue
             except Exception as e:
                 self.log('  Error stitching {} and {}: {}'.format(
                     image_paths[index], image_paths[index + 1], e))
                 raise
-            self.log('  Composite size so far: {}'.format(composite.shape))
-            index += 1
 
-        skipped = len(self.skipped_leading) + len(self.skipped_trailing)
-        if skipped:
-            print('Stitched {} of {} images ({} skipped at the ends)'.format(
-                len(image_paths) - skipped, len(image_paths), skipped))
+            composite = stitched
+            index += 1
+            self.log('  Composite size so far: {}'.format(composite.shape))
+
+        best = self.keep_longest_run(best, composite, first, index)
+        if best is None:
+            raise RuntimeError(
+                'No pair of images could be aligned -- every overlap region was '
+                'too featureless to register.')
+
+        composite = best['composite']
+        self.maxOffset = best['offset']
+        self.stitched_range = (best['first'], best['last'])
+
+        kept = best['last'] - best['first'] + 1
+        if kept < len(image_paths):
+            print('Aligned runs found:')
+            for run_first, run_last in self.runs:
+                print('  images {}-{} ({}-{}), {} image(s){}'.format(
+                    run_first + 1, run_last + 1, names[run_first], names[run_last],
+                    run_last - run_first + 1,
+                    '  <- stitched' if (run_first, run_last) == self.stitched_range else ''))
+
+            unaligned = [names[i] for i in range(len(image_paths))
+                         if not any(f <= i <= l for f, l in self.runs)]
+            if unaligned:
+                self.warn('Dropped {} image(s) that aligned with nothing: {}.'.format(
+                    len(unaligned), ', '.join(unaligned)))
+
+            others = [r for r in self.runs if r != self.stitched_range]
+            if others:
+                self.warn('Dropped {} shorter run(s) that did align, so a section of '
+                          'the core is missing from the output: {}.'.format(
+                              len(others),
+                              '; '.join('images {}-{}'.format(f + 1, l + 1)
+                                        for f, l in others)))
+
+            print('Stitched images {}-{} ({} of {} images)'.format(
+                best['first'] + 1, best['last'] + 1, kept, len(image_paths)))
 
         if crop and self.maxOffset:
             self.log('Cropping composite by max Y drift ({} px)'.format(self.maxOffset))
