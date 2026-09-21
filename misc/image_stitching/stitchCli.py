@@ -110,6 +110,11 @@ def prepend_calibration_slide(composite, slide):
     return canvas
 
 
+class RegistrationError(RuntimeError):
+    """A pair carries too little detail in its overlap to align. Past either
+    end of a core that means the out-of-focus tray, not a stitching fault."""
+
+
 class Stitcher:
     """Direct port of stitcher.py's Stitcher class: SIFT + FLANN registration
     in the overlap region, then a hard-seam (no blend, no warp) composite."""
@@ -119,10 +124,23 @@ class Stitcher:
         self.config = config or DEFAULT_CONFIG
         self.maxOffset = 0
         self.verbose = verbose
+        self.skipped_leading = []
+        self.skipped_trailing = []
 
     def log(self, message):
         if self.verbose:
             print(message)
+
+    def warn(self, message):
+        print('  Warning: {}'.format(message), file=sys.stderr)
+
+    def load_image(self, path, vertical_core):
+        img = cv2.imread(path)
+        if img is None:
+            raise RuntimeError('Could not read image: {}'.format(path))
+        if vertical_core:
+            img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return img
 
     def calculate_offset(self, img1, img2, enable_mask):
         cfg = self.config
@@ -156,7 +174,7 @@ class Stitcher:
         kp2, des2 = sift.detectAndCompute(i2, mask)
 
         if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
-            raise RuntimeError(
+            raise RegistrationError(
                 'Not enough SIFT keypoints found in the overlap region to '
                 'align this pair. Try a larger --overlap, disable --mask, '
                 'or increase --max-features.')
@@ -170,7 +188,7 @@ class Stitcher:
         # Limit to reasonable matches
         good_matches = [m for m, n in matches if m.distance < 0.7 * n.distance]
         if not good_matches:
-            raise RuntimeError(
+            raise RegistrationError(
                 'No good SIFT matches survived the ratio test for this pair.')
 
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
@@ -230,35 +248,86 @@ class Stitcher:
 
         return comp_img
 
+    def any_pair_aligns(self, image_paths, enable_mask, vertical_core):
+        """Whether any adjacent pair in *image_paths* still registers.  Used to
+        tell a featureless run at the end of a core, which is skippable, from a
+        dropout mid-core, which is not."""
+        verbose = self.verbose
+        self.verbose = False
+        try:
+            for i in range(len(image_paths) - 1):
+                img1 = self.load_image(image_paths[i], vertical_core)
+                img2 = self.load_image(image_paths[i + 1], vertical_core)
+                try:
+                    self.calculate_offset(img1, img2, enable_mask)
+                    return True
+                except RegistrationError:
+                    continue
+        finally:
+            self.verbose = verbose
+        return False
+
     def stitch_sequence(self, image_paths, enable_mask, vertical_core, crop):
+        self.skipped_leading = []
+        self.skipped_trailing = []
+        total = len(image_paths) - 1
+
+        # Seed the composite.  Anything that will not register before the first
+        # successful pair is tray rather than core, so drop it and move on.
         composite = None
-        for i in range(len(image_paths) - 1):
-            if i == 0:
-                img1 = cv2.imread(image_paths[i])
-                img2 = cv2.imread(image_paths[i + 1])
-                if img1 is None:
-                    raise RuntimeError('Could not read image: {}'.format(image_paths[i]))
-                if vertical_core:
-                    img1 = cv2.rotate(img1, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                    img2 = cv2.rotate(img2, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            else:
-                img1 = composite
-                img2 = cv2.imread(image_paths[i + 1])
-                if vertical_core:
-                    img2 = cv2.rotate(img2, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-            if img2 is None:
-                raise RuntimeError('Could not read image: {}'.format(image_paths[i + 1]))
-
+        index = 0
+        while composite is None and index + 1 < len(image_paths):
+            img1 = self.load_image(image_paths[index], vertical_core)
+            img2 = self.load_image(image_paths[index + 1], vertical_core)
             self.log('Stitching image {}/{}: {} + {}'.format(
-                i + 1, len(image_paths) - 1, image_paths[i], image_paths[i + 1]))
+                index + 1, total, image_paths[index], image_paths[index + 1]))
             try:
                 composite = self.stitch_images(img1, img2, enable_mask)
+            except RegistrationError as e:
+                self.warn('Skipping {} at the start of the core: {}'.format(
+                    image_paths[index], e))
+                self.skipped_leading.append(image_paths[index])
+                index += 1
+                continue
+            self.log('  Composite size so far: {}'.format(composite.shape))
+            index += 1
+
+        if composite is None:
+            raise RuntimeError(
+                'No pair of images could be aligned -- every overlap region was '
+                'too featureless to register.')
+
+        while index + 1 < len(image_paths):
+            img2 = self.load_image(image_paths[index + 1], vertical_core)
+            self.log('Stitching image {}/{}: {} + {}'.format(
+                index + 1, total, image_paths[index], image_paths[index + 1]))
+            try:
+                composite = self.stitch_images(composite, img2, enable_mask)
+            except RegistrationError as e:
+                remaining = image_paths[index + 1:]
+                self.log('  Alignment failed; checking whether any later pair aligns')
+                if self.any_pair_aligns(remaining, enable_mask, vertical_core):
+                    raise RuntimeError(
+                        '{} could not be aligned, but a later pair still aligns, so '
+                        'this is a gap in the middle of the core rather than '
+                        'out-of-focus tray at the end. Nothing was skipped. '
+                        'Original failure: {}'.format(image_paths[index + 1], e))
+                self.warn('Skipping the final {} image(s) at the end of the core, '
+                          'which carry too little detail to align: {}'.format(
+                              len(remaining), ', '.join(remaining)))
+                self.skipped_trailing = remaining
+                break
             except Exception as e:
                 self.log('  Error stitching {} and {}: {}'.format(
-                    image_paths[i], image_paths[i + 1], e))
+                    image_paths[index], image_paths[index + 1], e))
                 raise
             self.log('  Composite size so far: {}'.format(composite.shape))
+            index += 1
+
+        skipped = len(self.skipped_leading) + len(self.skipped_trailing)
+        if skipped:
+            print('Stitched {} of {} images ({} skipped at the ends)'.format(
+                len(image_paths) - skipped, len(image_paths), skipped))
 
         if crop and self.maxOffset:
             self.log('Cropping composite by max Y drift ({} px)'.format(self.maxOffset))
