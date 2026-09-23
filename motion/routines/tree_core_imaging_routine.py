@@ -276,8 +276,8 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         Z step between slices (used when focus_mode == "focus_stack").
     ``ctx.settings.motion.tree_core_automation.stitch_enabled``:
         Stitch each slot's frames once they are captured and stacked.
-    ``ctx.settings.motion.tree_core_automation.stitch_overlap_auto`` / ``stitch_overlap``:
-        Derive the stitching overlap automatically, or use the given fraction.
+    ``ctx.settings.motion.tree_core_automation.stitch_overlap_override`` / ``stitch_overlap``:
+        Override the automatically derived stitching overlap with the given fraction.
     """
 
     job_name = "Tree Core Imaging"
@@ -468,7 +468,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         info(f"[TreeCoreImaging] Step distance {step_nm / _NM_PER_MM:.3f} mm")
 
         stitch_enabled = tca.stitch_enabled
-        stitch_overlap = None if tca.stitch_overlap_auto else tca.stitch_overlap
+        stitch_overlap = tca.stitch_overlap if tca.stitch_overlap_override else None
 
         # ------------------------------------------------------------------
         # Calibration slide capture helper — shared between the once-per-run
@@ -1002,9 +1002,9 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             error(f"[TreeCoreImaging] Overlap {overlap} is outside [0, 1) — aborting")
             return None
 
-        fov_nm = mv.calibration.stage_axis_imaging(axis).fov_nm
-        step_nm = int(round(fov_nm * (1.0 - overlap)))
-        info(f"[TreeCoreImaging] FOV={fov_nm:.0f} nm  overlap={overlap:.0%}  step={step_nm} nm")
+        geometry = mv.calibration.stage_axis_imaging(axis)
+        step_nm = geometry.step_for_overlap(overlap)
+        info(f"[TreeCoreImaging] FOV={geometry.fov_nm:.0f} nm  overlap={overlap:.0%}  step={step_nm} nm")
         return step_nm
 
     # ------------------------------------------------------------------

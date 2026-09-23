@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -19,6 +20,9 @@ from PySide6.QtWidgets import (
 from common.app_context import get_app_context
 from motion.motion_config import MotionSystemSettings, TreeCoreSlot
 from UI.settings.pages.shared import LabelTrackerMixin, NM_PER_MM, NoScrollDoubleSpinBox, NoScrollSpinBox, SettingsGroupBase
+
+if TYPE_CHECKING:
+    from machine_vision.algorithms.camera_calibration import StageAxisImaging
 
 FS_NM_KEYS = {"z_near_plane_nm", "z_far_plane_nm", "z_step_nm"}
 FS_PERCENT_KEYS = {"image_overlap", "stitch_overlap"}
@@ -171,6 +175,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         self._saved: dict[str, object] = {}
         self._slots_layout: QVBoxLayout | None = None
         self._remove_slot_btn: QPushButton | None = None
+        self._syncing_step = False
         self._build()
 
     def _get_axis(self) -> str:
@@ -254,32 +259,51 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
                 target = Position(x=current.x, y=value_nm, z=current.z)
         motion.move_to_position(target, wait=False)
 
-    def _fov_nm(self) -> float | None:
-        """Field of view along the automation axis, or None without a camera calibration."""
+    def _axis_imaging(self) -> StageAxisImaging | None:
+        """How the automation axis maps onto the image, or None without a camera calibration."""
         mv = get_app_context().machine_vision
         if mv is None or not mv.is_calibrated:
             return None
-        return mv.calibration.stage_axis_imaging(self._get_axis()).fov_nm
+        return mv.calibration.stage_axis_imaging(self._get_axis())
 
     def _refresh_overlap_state(self) -> None:
-        calibrated = self._fov_nm() is not None
+        calibrated = self._axis_imaging() is not None
         overlap = self._w_fs_float["image_overlap"]
         overlap.setEnabled(calibrated)
         overlap.setToolTip(
-            "Overlap between neighbouring frames. Entering a value sets the step distance from the "
-            "camera calibration's field of view."
+            "Overlap between neighbouring frames. Kept in step with the step distance "
+            "through the camera calibration's field of view."
             if calibrated else
             "Requires a camera calibration (Machine Vision settings)."
         )
-        self._w_fs_float["stitch_overlap"].setEnabled(not self._w_fs_check["stitch_overlap_auto"].isChecked())
+        self._w_fs_float["stitch_overlap"].setEnabled(self._w_fs_check["stitch_overlap_override"].isChecked())
+
+    def _sync_step_overlap_display(self, step_nm: int, overlap: float) -> tuple[int, float]:
+        """The step and overlap pair to show: whichever is set drives the other.
+        Only called with signals blocked, so nothing is written back."""
+        geometry = self._axis_imaging()
+        if geometry is None:
+            return step_nm, overlap
+        if step_nm > 0:
+            return step_nm, geometry.overlap_for_step(step_nm)
+        return geometry.step_for_overlap(overlap, round(self._get_printer_step_mm() * NM_PER_MM)), overlap
+
+    def _on_step_distance_changed(self, value_mm: float) -> None:
+        geometry = self._axis_imaging()
+        if self._syncing_step or geometry is None or value_mm <= 0:
+            return
+        self._syncing_step = True
+        self._w_fs_float["image_overlap"].setValue(geometry.overlap_for_step(value_mm * NM_PER_MM) * 100.0)
+        self._syncing_step = False
 
     def _on_image_overlap_changed(self, value_pct: float) -> None:
-        fov_nm = self._fov_nm()
-        if fov_nm is None:
+        geometry = self._axis_imaging()
+        if self._syncing_step or geometry is None:
             return
-        step_nm = self._get_printer_step_mm() * NM_PER_MM
-        distance_nm = round(fov_nm * (1.0 - value_pct / 100.0) / step_nm) * step_nm
-        self._w_run["step_distance_nm"].setValue(distance_nm / NM_PER_MM)
+        step_nm = geometry.step_for_overlap(value_pct / 100.0, round(self._get_printer_step_mm() * NM_PER_MM))
+        self._syncing_step = True
+        self._w_run["step_distance_nm"].setValue(step_nm / NM_PER_MM)
+        self._syncing_step = False
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -360,11 +384,11 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         step_distance.setSingleStep(self._get_printer_step_mm())
         step_distance.setDecimals(3)
         step_distance.setFixedWidth(130)
-        step_distance.setSpecialValueText("Auto")
         step_distance.setToolTip(
             "Distance the stage moves between frames (mm).\n"
-            "Auto derives it from the image overlap and the camera calibration."
+            "Kept in step with the image overlap once the camera is calibrated."
         )
+        step_distance.valueChanged.connect(self._on_step_distance_changed)
         self._w_run["step_distance_nm"] = step_distance
         run_form.addRow(self._register_label("step_distance_nm", QLabel("Step distance (mm):")), step_distance)
 
@@ -522,14 +546,14 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         stitch_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         for key, label_text, tooltip in (
-            ("stitch_enabled",      "Stitch each core:", "Stitch each core's frames into <core>/<core>.tiff once they are captured and focus stacked."),
-            ("stitch_overlap_auto", "Auto overlap:",     "Derive the stitching overlap from the camera calibration and stage positions, or measure it from the images."),
+            ("stitch_enabled",          "Stitch each core:", "Stitch each core's frames into <core>/<core>.tiff once they are captured and focus stacked."),
+            ("stitch_overlap_override", "Override overlap:", "Stitch with the overlap below instead of the one that follows from the step distance and camera calibration (or is measured from the images)."),
         ):
             check = QCheckBox()
             check.setToolTip(tooltip)
             self._w_fs_check[key] = check
             stitch_form.addRow(self._register_label(key, QLabel(label_text)), check)
-        self._w_fs_check["stitch_overlap_auto"].toggled.connect(lambda _: self._refresh_overlap_state())
+        self._w_fs_check["stitch_overlap_override"].toggled.connect(lambda _: self._refresh_overlap_state())
 
         stitch_overlap = NoScrollDoubleSpinBox()
         stitch_overlap.setMinimum(1.0)
@@ -537,7 +561,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         stitch_overlap.setSingleStep(1.0)
         stitch_overlap.setDecimals(1)
         stitch_overlap.setFixedWidth(130)
-        stitch_overlap.setToolTip("Overlap between neighbouring frames assumed when stitching.")
+        stitch_overlap.setToolTip("Overlap between neighbouring frames to stitch with when overriding.")
         self._w_fs_float["stitch_overlap"] = stitch_overlap
         stitch_form.addRow(self._register_label("stitch_overlap", QLabel("Overlap (%):")), stitch_overlap)
 
@@ -612,7 +636,8 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         self._w_run["starting_height_nm"].setValue(tca.starting_height_nm / NM_PER_MM)
         self._w_run["starting_offset_nm"].setValue(tca.starting_offset_nm / NM_PER_MM)
         self._w_run["slot_separation_nm"].setValue(tca.slot_separation_nm / NM_PER_MM)
-        self._w_run["step_distance_nm"].setValue(tca.step_distance_nm / NM_PER_MM)
+        step_nm, overlap = self._sync_step_overlap_display(tca.step_distance_nm, tca.image_overlap)
+        self._w_run["step_distance_nm"].setValue(step_nm / NM_PER_MM)
         self._w_line["image_name_template"].setText(tca.image_name_template)
 
         self._w_fs_float["z_near_plane_nm"].setValue(tca.z_near_plane_nm / NM_PER_MM)
@@ -620,7 +645,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         self._w_fs_float["z_step_nm"].setValue(tca.z_step_nm / NM_PER_MM)
         self._w_fs_float["sharpness"].setValue(tca.sharpness)
         self._w_fs_float["cull_threshold"].setValue(tca.cull_threshold)
-        self._w_fs_float["image_overlap"].setValue(tca.image_overlap * 100.0)
+        self._w_fs_float["image_overlap"].setValue(overlap * 100.0)
         self._w_fs_float["stitch_overlap"].setValue(tca.stitch_overlap * 100.0)
         self._w_fs_int["slab_size"].setValue(tca.slab_size)
         self._w_fs_int["slab_overlap"].setValue(tca.slab_overlap)
@@ -631,7 +656,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         self._w_fs_check["cull_enabled"].setChecked(tca.cull_enabled)
         self._w_fs_check["slab_enabled"].setChecked(tca.slab_enabled)
         self._w_fs_check["stitch_enabled"].setChecked(tca.stitch_enabled)
-        self._w_fs_check["stitch_overlap_auto"].setChecked(tca.stitch_overlap_auto)
+        self._w_fs_check["stitch_overlap_override"].setChecked(tca.stitch_overlap_override)
 
         idx = self._w_fs_combo["focus_mode"].findData(tca.focus_mode)
         if idx >= 0:

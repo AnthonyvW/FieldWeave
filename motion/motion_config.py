@@ -82,18 +82,19 @@ class TreeCoreAutomationSettings:
     # image_overlap and the camera calibration.
     step_distance_nm: int = 0
 
-    # Fractional overlap between neighbouring frames, used to derive the step
-    # distance.  Only meaningful once the camera has been calibrated.
+    # Fractional overlap between neighbouring frames.  Kept in step with
+    # step_distance_nm through the camera calibration's field of view, so it
+    # is only meaningful once the camera has been calibrated.
     image_overlap: float = 0.4
 
     # Stitch each core's frames into one image once they are all captured
     # (and focus stacked, in focus stack mode).
     stitch_enabled: bool = True
 
-    # When True the stitching overlap is derived from the camera calibration
-    # and stage positions (or measured from the images); otherwise
-    # stitch_overlap is used.
-    stitch_overlap_auto: bool = True
+    # The stitching overlap normally follows from the step distance and the
+    # camera calibration (or is measured from the images).  When True,
+    # stitch_overlap is used instead.
+    stitch_overlap_override: bool = False
     stitch_overlap: float = 0.4
 
     # Imaging mode: "optimal_focus" uses autofocus at each position;

@@ -100,6 +100,16 @@ class StageAxisImaging:
     fov_nm: float
     content_moves_forward: bool
 
+    def step_for_overlap(self, overlap: float, round_to_nm: int = 1) -> int:
+        """Stage step giving *overlap* (fraction) between neighbouring frames,
+        rounded to a multiple of *round_to_nm*."""
+        return round(self.fov_nm * (1.0 - overlap) / round_to_nm) * round_to_nm
+
+    def overlap_for_step(self, step_nm: float) -> float:
+        """Fractional overlap between neighbouring frames a *step_nm* apart,
+        0 when the frames do not overlap at all."""
+        return max(0.0, 1.0 - step_nm / self.fov_nm)
+
 
 # ---------------------------------------------------------------------------
 # Calibration state
