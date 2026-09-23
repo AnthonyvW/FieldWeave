@@ -602,7 +602,14 @@ class OverlayController:
         overlay = self._preview._measurement_overlay
         if overlay.has_loaded_measurements and not self._confirm_discard_measurements():
             return
-        overlay.clear_loaded()
+        self._replace_loaded_image(source)
+
+    def close_loaded_image(self) -> None:
+        """Close the loaded image and drop its measurements without confirming — for a caller that has already offered to save them."""
+        self._replace_loaded_image(None)
+
+    def _replace_loaded_image(self, source: LargeImageSource | None) -> None:
+        self._preview._measurement_overlay.clear_loaded()
         self._preview._loaded_image_overlay.set_source(source)
         self._preview._zoom_preview_overlay.reset_loaded()
         self._sync_content_dims()

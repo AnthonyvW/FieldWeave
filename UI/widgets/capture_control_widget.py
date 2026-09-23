@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -24,8 +25,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from common import pyramid_tiff
 from common.app_context import AppContext, get_app_context
 from common.logger import info, error, warning
+from common.pyramid_tiff import PyramidConversion, PyramidJob
 from common.read_metadata import extract_dpi, read_metadata
 from common.setting_types import FileFormat
 from UI.widgets.measurements.units import MeasurementUnit, dpi_from_measurement
@@ -46,6 +49,10 @@ _MIN_PLAUSIBLE_METADATA_DPI = 1.0
 # source is a pyramid (see LargeImageSource.is_pyramid), since decoding one
 # fully can mean a multi-gigapixel image in memory.
 _PYRAMID_UNSAFE_EXPORT_KINDS = frozenset({"full_res", "full_res_sidecar"})
+
+class _PyramidDeclined(Enum):
+    OPEN_ORIGINAL = "open_original"
+    CANCEL = "cancel"
 
 
 class CaptureMode(Enum):
@@ -91,6 +98,10 @@ class CaptureControlWidget(QWidget):
 
         self._default_folder = Path("./output/measurements")
         self._current_folder = self._default_folder
+        # Images to measure rarely live in the measurements output folder,
+        # so the Load Image dialog remembers where the last one came from
+        # instead, starting at the OS default until then.
+        self._last_image_folder: Path | None = None
         self._ensure_output_folder()
 
         self._mode = CaptureMode.LIVE
@@ -133,6 +144,10 @@ class CaptureControlWidget(QWidget):
         self._load_switching_in = False
         self._load_toast_id: int | None = None
 
+        # Runs on its own background thread; only _poll_pyramid_state reads it.
+        self._pyramid_conversion: PyramidConversion | None = None
+        self._pyramid_toast_id: int | None = None
+
         self._drag_active = False
         self._window_drag_filter_installed = False
         self._overlay: QWidget | None = None
@@ -149,6 +164,10 @@ class CaptureControlWidget(QWidget):
         self._load_poll_timer = QTimer(self)
         self._load_poll_timer.setInterval(100)
         self._load_poll_timer.timeout.connect(self._poll_load_state)
+
+        self._pyramid_poll_timer = QTimer(self)
+        self._pyramid_poll_timer.setInterval(200)
+        self._pyramid_poll_timer.timeout.connect(self._poll_pyramid_state)
 
         self._camera_poll_timer = QTimer(self)
         self._camera_poll_timer.setInterval(500)
@@ -316,13 +335,13 @@ class CaptureControlWidget(QWidget):
         if obj is self.window():
             event_type = event.type()
             if event_type in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
-                if not self._load_pending and self._image_path_from_mime(event.mimeData()) is not None:
+                if not self._busy() and self._image_path_from_mime(event.mimeData()) is not None:
                     event.acceptProposedAction()
                     if not self._drag_active:
                         self._drag_active = True
                         self._show_overlay("Drop image here", drag_hint=True)
             elif event_type == QEvent.Type.DragLeave:
-                if self._drag_active and not self._load_pending:
+                if self._drag_active and not self._busy():
                     self._drag_active = False
                     self._hide_overlay()
             elif event_type == QEvent.Type.Drop:
@@ -343,8 +362,11 @@ class CaptureControlWidget(QWidget):
                 return path
         return None
 
+    def _busy(self) -> bool:
+        return self._load_pending or self._pyramid_conversion is not None
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if self._load_pending:
+        if self._busy():
             event.ignore()
             return
         if self._image_path_from_mime(event.mimeData()) is None:
@@ -355,20 +377,20 @@ class CaptureControlWidget(QWidget):
         self._show_overlay("Drop image here", drag_hint=True)
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
-        if self._load_pending or self._image_path_from_mime(event.mimeData()) is None:
+        if self._busy() or self._image_path_from_mime(event.mimeData()) is None:
             event.ignore()
             return
         event.acceptProposedAction()
 
     def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
         self._drag_active = False
-        if not self._load_pending:
+        if not self._busy():
             self._hide_overlay()
 
     def dropEvent(self, event: QDropEvent) -> None:
         self._drag_active = False
         path = self._image_path_from_mime(event.mimeData())
-        if path is None or self._load_pending:
+        if path is None or self._busy():
             event.ignore()
             return
         event.acceptProposedAction()
@@ -515,7 +537,7 @@ class CaptureControlWidget(QWidget):
         so the mode switch is finished asynchronously by _poll_load_state
         once the image has actually decoded.
         """
-        if self._load_pending:
+        if self._busy():
             return
 
         switching_in = self._mode != CaptureMode.LOADED_IMAGE
@@ -558,7 +580,7 @@ class CaptureControlWidget(QWidget):
         filepath, _ = QFileDialog.getOpenFileName(
             self,
             "Load Image",
-            str(self._current_folder),
+            str(self._last_image_folder) if self._last_image_folder is not None else "",
             "Images (*.png *.jpg *.jpeg *.tif *.tiff)",
         )
         if not filepath:
@@ -568,6 +590,20 @@ class CaptureControlWidget(QWidget):
         return True
 
     def _start_loading(self, path: Path, switching_in: bool) -> None:
+        self._last_image_folder = path.parent
+        job = self._offer_pyramids(path)
+        # Re-read rather than trusting the caller's value: preparing the
+        # job may have closed the loaded image and dropped back to live.
+        switching_in = self._mode != CaptureMode.LOADED_IMAGE
+        if job is _PyramidDeclined.CANCEL:
+            if switching_in:
+                self._live_mode_btn.setChecked(True)
+        elif job is _PyramidDeclined.OPEN_ORIGINAL:
+            self._begin_load(path, switching_in)
+        else:
+            self._start_pyramid_generation(job)
+
+    def _begin_load(self, path: Path, switching_in: bool) -> None:
         self._load_switching_in = switching_in
         self._load_pending = False
         self._load_success = None
@@ -678,6 +714,269 @@ class CaptureControlWidget(QWidget):
             self.loaded_dpi_missing.emit()
 
         self._maybe_load_measurement_sidecar(path)
+
+    # ------------------------------------------------------------------
+    # Pyramid generation
+    # ------------------------------------------------------------------
+
+    def _offer_pyramids(self, path: Path) -> PyramidJob | _PyramidDeclined:
+        """For a large flat image, ask whether to write a pyramidal TIFF before opening it."""
+        size = pyramid_tiff.offer_size(path)
+        if size is None:
+            return _PyramidDeclined.OPEN_ORIGINAL
+
+        estimate = pyramid_tiff.format_duration(pyramid_tiff.estimate_total_seconds(size))
+        reply = QMessageBox.question(
+            self,
+            "Add Pyramids?",
+            f"\"{path.name}\" is {size / (1024 * 1024):,.0f} MB. Adding pyramids (stored "
+            "lower-resolution copies) makes a large image like this open and pan much faster "
+            f"in the future.\n\nEstimated time: about {estimate}.\n\nAdd pyramids now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return _PyramidDeclined.CANCEL
+        if reply != QMessageBox.StandardButton.Yes:
+            return _PyramidDeclined.OPEN_ORIGINAL
+
+        job = self._choose_pyramid_target(path)
+        if job is None or not self._prepare_to_replace(job.files_to_replace()):
+            return _PyramidDeclined.CANCEL
+        job.copy_measurements_from = self._ask_copy_measurements(job)
+        return job
+
+    def _choose_pyramid_target(self, path: Path) -> PyramidJob | None:
+        overwrite_job = PyramidJob.overwrite(path)
+        overwrite_target = overwrite_job.target
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Save Pyramid Image")
+        box.setText("Overwrite the original image, or save the pyramid image as a new file?")
+        overwrite_button = None
+        if overwrite_job.delete_source and overwrite_target.exists():
+            box.setInformativeText(
+                f"Overwriting is unavailable because \"{overwrite_target.name}\" already exists."
+            )
+        else:
+            if overwrite_job.delete_source:
+                box.setInformativeText(
+                    f"Overwriting replaces \"{path.name}\" with the TIFF \"{overwrite_target.name}\"."
+                )
+            overwrite_button = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
+        new_button = box.addButton("Save As New...", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(new_button)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if overwrite_button is not None and clicked is overwrite_button:
+            return overwrite_job
+        if clicked is not new_button:
+            return None
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Pyramid Image",
+            str(pyramid_tiff.default_new_target(path)),
+            "TIFF Images (*.tif *.tiff)",
+        )
+        if not filepath:
+            return None
+        return PyramidJob(path, pyramid_tiff.with_tiff_suffix(Path(filepath)), delete_source=False)
+
+    def _prepare_to_replace(self, paths: list[Path]) -> bool:
+        """
+        Release every file about to be overwritten or deleted: close it
+        here if FieldWeave has it loaded, and wait for the user to close
+        it if another program has it locked. Checked up front so a long
+        generation isn't wasted on a file that can't be replaced at the
+        end. Returns False if the user gave up.
+        """
+        loaded = self._loaded_image_path
+        if loaded is not None and any(pyramid_tiff.same_file(loaded, p) for p in paths):
+            self._close_loaded_image_for_overwrite()
+        for p in paths:
+            while pyramid_tiff.is_locked(p):
+                if not self._ask_to_close_external(p):
+                    return False
+        return True
+
+    def _close_loaded_image_for_overwrite(self) -> None:
+        path = self._loaded_image_path
+        if path is None:
+            return
+        ctx = get_app_context()
+        preview = ctx.camera_preview
+
+        if preview is not None and preview.overlays.measurement.has_loaded_measurements:
+            sidecar = pyramid_tiff.measurements_sidecar(path)
+            replace_note = f" This replaces the existing \"{sidecar.name}\"." if sidecar.exists() else ""
+            reply = QMessageBox.question(
+                self,
+                "Save Measurements?",
+                f"\"{path.name}\" is open in FieldWeave and will be closed so it can be overwritten.\n\n"
+                f"Save the measurements placed on it to \"{sidecar.name}\"?{replace_note}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    preview.overlays.measurement.export_loaded_measurements_to_file(str(sidecar))
+                except OSError as exc:
+                    warning(f"CaptureControlWidget: failed to save measurements to {sidecar}: {exc}")
+                    if ctx.toast:
+                        ctx.toast.error(f"Could not save {sidecar.name}", title="Save Measurements Failed")
+
+        self._set_mode(CaptureMode.LIVE)
+        self._live_mode_btn.setChecked(True)
+        if preview is not None:
+            preview.overlays.close_loaded_image()
+        elif self._loaded_source is not None:
+            self._loaded_source.close()
+        self._loaded_source = None
+        self._loaded_image_path = None
+        self._loaded_image_label.setText("No image loaded")
+        self._update_pyramid_export_availability()
+        info(f"CaptureControlWidget: closed {path} so it can be overwritten")
+
+    def _ask_to_close_external(self, path: Path) -> bool:
+        reply = QMessageBox.warning(
+            self,
+            "File In Use",
+            f"\"{path.name}\" is open in another program. It must be closed before it can be "
+            "overwritten.\n\nClose it, then click Retry.",
+            QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Retry,
+        )
+        return reply == QMessageBox.StandardButton.Retry
+
+    def _retry_while_locked(self, path: Path, action: Callable[[], None]) -> bool:
+        """Run *action*, prompting to close *path* and retry if it's locked by another program. Returns False if the user gave up."""
+        while True:
+            try:
+                action()
+                return True
+            except PermissionError:
+                if not self._ask_to_close_external(path):
+                    return False
+
+    def _ask_copy_measurements(self, job: PyramidJob) -> Path | None:
+        source_sidecar = job.carryable_measurements()
+        if source_sidecar is None:
+            return None
+        target_sidecar = job.target_sidecar
+        replace_note = f" This replaces the existing \"{target_sidecar.name}\"." if target_sidecar.exists() else ""
+        reply = QMessageBox.question(
+            self,
+            "Keep Measurements?",
+            f"A measurements file \"{source_sidecar.name}\" belongs to this image. Copy it to "
+            f"\"{target_sidecar.name}\" so the measurements carry over to the pyramid image?{replace_note}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        return source_sidecar if reply == QMessageBox.StandardButton.Yes else None
+
+    def _start_pyramid_generation(self, job: PyramidJob) -> None:
+        self._live_mode_btn.setEnabled(False)
+        self._loaded_mode_btn.setEnabled(False)
+        self._show_overlay(f"Adding pyramids to {job.source.name}...")
+
+        ctx = get_app_context()
+        if ctx.toast:
+            self._pyramid_toast_id = ctx.toast.info(
+                f"Adding pyramids to {job.source.name}...", title="Adding Pyramids",
+            )
+
+        self._pyramid_conversion = PyramidConversion(job)
+        self._pyramid_conversion.start()
+        self._pyramid_poll_timer.start()
+
+    def _poll_pyramid_state(self) -> None:
+        conversion = self._pyramid_conversion
+        if conversion is None:
+            return
+
+        if not conversion.done:
+            text = f"Adding pyramids to {conversion.job.source.name}... {conversion.percent}%"
+            if conversion.remaining is not None:
+                text += f"\nAbout {pyramid_tiff.format_duration(conversion.remaining)} remaining"
+            self._show_overlay(text)
+            return
+
+        self._pyramid_poll_timer.stop()
+        load_path = self._finish_pyramid_job(conversion)
+        self._pyramid_conversion = None
+        self._pyramid_toast_id = None
+        switching_in = self._mode != CaptureMode.LOADED_IMAGE
+        if load_path is not None:
+            self._begin_load(load_path, switching_in)
+            return
+        self._hide_overlay()
+        self._live_mode_btn.setEnabled(True)
+        self._loaded_mode_btn.setEnabled(True)
+        if switching_in:
+            self._live_mode_btn.setChecked(True)
+
+    def _finish_pyramid_job(self, conversion: PyramidConversion) -> Path | None:
+        """
+        Move the finished pyramid into place and return the path to open —
+        the original instead if generation failed, or None if the user
+        cancelled while the target was in use.
+        """
+        ctx = get_app_context()
+        job = conversion.job
+
+        failure = conversion.error
+        if failure is None:
+            try:
+                if not self._retry_while_locked(job.target, job.install):
+                    info(f"CaptureControlWidget: cancelled adding pyramids to {job.source} while {job.target} was in use")
+                    job.discard_partial()
+                    if ctx.toast:
+                        ctx.toast.info(
+                            "The pyramid image was discarded.", title="Adding Pyramids Cancelled",
+                            dismiss_id=self._pyramid_toast_id,
+                        )
+                    return None
+            except OSError as exc:
+                failure = f"{type(exc).__name__}: {exc}"
+                job.discard_partial()
+
+        if failure is not None:
+            warning(f"CaptureControlWidget: failed to add pyramids to {job.source} -> {job.target}: {failure}")
+            if ctx.toast:
+                ctx.toast.error(
+                    f"Could not add pyramids to {job.source.name}. Opening the original instead.",
+                    title="Add Pyramids Failed",
+                    dismiss_id=self._pyramid_toast_id,
+                )
+            return job.source
+
+        info(f"CaptureControlWidget: wrote pyramid image {job.target}")
+        if ctx.toast:
+            ctx.toast.success(job.target.name, title="Pyramids Added", dismiss_id=self._pyramid_toast_id)
+
+        if job.delete_source:
+            try:
+                removed = self._retry_while_locked(job.source, job.remove_source)
+            except OSError as exc:
+                warning(f"CaptureControlWidget: failed to remove {job.source}: {exc}")
+                removed = False
+            if not removed and ctx.toast:
+                ctx.toast.warning(f"The original {job.source.name} was kept.", title="Original Not Removed")
+
+        try:
+            job.copy_measurements()
+        except OSError as exc:
+            warning(f"CaptureControlWidget: failed to copy measurements to {job.target_sidecar}: {exc}")
+            if ctx.toast:
+                ctx.toast.error(
+                    f"Could not copy measurements to {job.target_sidecar.name}", title="Copy Measurements Failed",
+                )
+
+        return job.target
 
     def _maybe_load_measurement_sidecar(self, path: Path) -> None:
         """

@@ -284,6 +284,11 @@ class MeasurementOverlay(Overlay):
         """Whether the loaded-image source specifically has any placed measurements, regardless of which source is active right now."""
         return bool(self._loaded_measurements)
 
+    @property
+    def loaded_measurements(self) -> list[Measurement]:
+        """Placed measurements for the loaded-image source specifically, regardless of which source is active right now."""
+        return self._loaded_measurements
+
     def clear_loaded(self) -> None:
         """Remove every placed measurement for the loaded-image source specifically."""
         self._loaded_measurements.clear()
@@ -3748,6 +3753,14 @@ class MeasurementOverlayController:
 
     def export_measurements_to_file(self, path: str) -> None:
         save_measurements_to_file(path, self._overlay.measurements)
+
+    @property
+    def has_loaded_measurements(self) -> bool:
+        return self._overlay.has_loaded_measurements
+
+    def export_loaded_measurements_to_file(self, path: str) -> None:
+        """Like export_measurements_to_file, but always the loaded image's measurements, even while live view is active."""
+        save_measurements_to_file(path, self._overlay.loaded_measurements)
 
     def import_measurements_from_file(self, path: str, *, replace: bool = True) -> DeserializeResult:
         result = load_measurements_from_file(path, DEFAULT_REGISTRY)
