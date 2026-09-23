@@ -49,8 +49,10 @@ class ControllerSettingsWidget(SettingsGroupBase):
         self._port_combo.setToolTip(
             "Serial port of the motion controller.\n"
             "Auto-detect probes every port, starting with the last one that worked.\n"
-            "Saving a new port reconnects the controller."
+            "Connect uses the selected port immediately and remembers it."
         )
+        self._connect_btn = QPushButton("Connect")
+        self._connect_btn.setToolTip("Reconnect the motion controller using the selected port.")
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setToolTip("Rescan for available serial ports.")
         refresh_btn.clicked.connect(self._refresh_ports)
@@ -59,6 +61,7 @@ class ControllerSettingsWidget(SettingsGroupBase):
         port_layout = QHBoxLayout(port_row)
         port_layout.setContentsMargins(0, 0, 0, 0)
         port_layout.addWidget(self._port_combo)
+        port_layout.addWidget(self._connect_btn)
         port_layout.addWidget(refresh_btn)
         port_layout.addStretch()
         form.addRow(self._register_label("com_port", QLabel("Serial port:")), port_row)
@@ -143,7 +146,15 @@ class ControllerSettingsWidget(SettingsGroupBase):
     def _refresh_ports(self) -> None:
         self._fill_port_combo(self._current_port())
 
-    def connect_signals(self, on_change) -> None:
+    def selected_port(self) -> str:
+        return self._current_port()
+
+    def mark_port_saved(self, port: str) -> None:
+        self._saved["com_port"] = port
+        self.mark_label("com_port", False)
+
+    def connect_signals(self, on_change, on_connect) -> None:
+        self._connect_btn.clicked.connect(on_connect)
         self._port_combo.currentIndexChanged.connect(
             lambda _i: on_change("com_port", self._current_port())
         )

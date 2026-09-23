@@ -76,6 +76,7 @@ class MotionControllerManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._restart_lock = threading.Lock()
         self._controller: MotionController | None = None
         self._active_routine: AutomationRoutine | None = None
         self._last_routine_result: RoutineResult | None = None
@@ -140,9 +141,10 @@ class MotionControllerManager:
         """
         # Carry the live settings over so unsaved edits from other settings
         # pages are not replaced by the on-disk copy.
-        config = self.settings
-        self.shutdown()
-        self._start(config)
+        with self._restart_lock:
+            config = self.settings
+            self.shutdown()
+            self._start(config)
 
     # ------------------------------------------------------------------
     # State-change listeners
@@ -218,11 +220,17 @@ class MotionControllerManager:
 
     def _poll_state_loop(self) -> None:
         """Poll the controller state every 250 ms and fire listeners on change."""
+        polled_ctrl: MotionController | None = None
         while True:
             time.sleep(0.25)
             ctrl = self._controller
             new_state = ctrl.get_state() if ctrl is not None else MotionState.FAILED
-            if new_state != self._last_known_state:
+            # A restarted controller can fail within one poll interval, so its
+            # first state is always emitted even if it matches the previous one.
+            is_new_ctrl = ctrl is not None and ctrl is not polled_ctrl
+            if ctrl is not None:
+                polled_ctrl = ctrl
+            if new_state != self._last_known_state or is_new_ctrl:
                 self._last_known_state = new_state
                 self._emit_state(new_state)
 
@@ -378,6 +386,12 @@ class MotionControllerManager:
         if ctrl is None:
             return MotionState.FAILED
         return ctrl.get_state()
+
+    @property
+    def connection_error(self) -> str | None:
+        """Why the current controller failed to connect, or None."""
+        ctrl = self._controller
+        return ctrl.connection_error if ctrl is not None else None
 
     @property
     def settings(self) -> MotionSystemSettings | None:

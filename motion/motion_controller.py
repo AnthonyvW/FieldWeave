@@ -175,6 +175,13 @@ class MotionController:
             return MotionState.HOMING if self._homing else MotionState.CONNECTING
         return MotionState.READY
 
+    @property
+    def connection_error(self) -> str | None:
+        """Why connecting failed, or None if it has not failed (or was cancelled by shutdown)."""
+        if self._init_error is None or self._stop_event.is_set():
+            return None
+        return str(self._init_error)
+
     def is_ready(self) -> bool:
         """Return True once the printer has been found and homed."""
         return self.get_state() == MotionState.READY

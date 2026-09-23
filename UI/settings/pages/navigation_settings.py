@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from common.app_context import get_app_context
-from common.logger import info
+from common.logger import error, info
 from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
 
 from UI.settings.pages.navigation.controller_settings import ControllerSettingsWidget
@@ -81,7 +81,7 @@ class NavigationSettingsWidget(QWidget):
         cl.addWidget(title)
 
         self._controller = ControllerSettingsWidget()
-        self._controller.connect_signals(self._on_controller_changed)
+        self._controller.connect_signals(self._on_controller_changed, self._on_connect_port)
         cl.addWidget(self._controller)
 
         self._navigation = NavigationGroupSettingsWidget()
@@ -175,6 +175,35 @@ class NavigationSettingsWidget(QWidget):
         if reconnect:
             self._reconnect_motion()
 
+    @Slot()
+    def _on_connect_port(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        s = self._live_settings()
+        if motion is None or s is None:
+            return
+        if motion.routine_running:
+            ctx.toast.warning("Stop the running routine before changing the motion controller port.")
+            return
+
+        port = self._controller.selected_port()
+        s.com_port = port
+        # Persist only the port so other unsaved edits on this page stay pending.
+        try:
+            on_disk = self._settings_manager.load()
+            on_disk.com_port = port
+            saved = self._settings_manager.save(on_disk)
+        except Exception as exc:
+            error(f"Failed to save motion controller port: {exc}")
+            saved = False
+        if saved:
+            self._controller.mark_port_saved(port)
+        else:
+            ctx.toast.warning("Could not save the selected port; it will only be used until FieldWeave restarts.")
+        self._recheck_unsaved()
+
+        self._reconnect_motion()
+
     def _reconnect_motion(self) -> None:
         ctx = get_app_context()
         motion = ctx.motion
@@ -185,7 +214,8 @@ class NavigationSettingsWidget(QWidget):
                 "A routine is running. The new connection settings will be used after FieldWeave restarts.",
             )
             return
-        ctx.toast.info("Reconnecting to the motion controller...", duration=2000)
+        port = motion.settings.com_port if motion.settings is not None else ""
+        ctx.toast.info(f"Connecting to {port or 'motion controller (auto-detect)'}...", duration=2000)
         info("Connection settings changed, restarting motion controller")
         threading.Thread(target=motion.restart, daemon=True, name="MotionRestart").start()
 

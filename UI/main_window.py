@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self._state = State()
 
         self._pending_machine_state: str = MachineState.DISCONNECTED
+        self._pending_connection_error: str | None = None
         self._pending_job_name: str = "-"
         self._pending_activity: str = "-"
         self._pending_progress_current: int = 0
@@ -132,14 +133,17 @@ class MainWindow(QMainWindow):
         motion.add_routine_state_listener(self._on_routine_state_changed)
         motion.add_interaction_listener(self._on_motion_interaction)
 
-        self._pending_machine_state = _MOTION_TO_MACHINE_STATE.get(
-            motion.get_state(), MachineState.DISCONNECTED
-        )
+        self._on_motion_state_changed(motion.get_state())
 
     def _on_motion_state_changed(self, new_state: str) -> None:
         self._pending_machine_state = _MOTION_TO_MACHINE_STATE.get(
             new_state, MachineState.DISCONNECTED
         )
+        if new_state == MotionState.FAILED:
+            motion = self.app_context.motion
+            error_text = motion.connection_error if motion is not None else None
+            if error_text:
+                self._pending_connection_error = error_text
 
     def _on_routine_state_changed(
         self, job_name: str, activity: str, progress_current: int, progress_total: int, eta_seconds: int
@@ -169,6 +173,11 @@ class MainWindow(QMainWindow):
     def _flush_state(self) -> None:
         """Rebuild State from pending fields and repaint the status bar if changed."""
         motion = self.app_context.motion
+
+        toast = self.app_context.toast
+        if self._pending_connection_error and toast is not None:
+            toast.error(self._pending_connection_error, duration=8000, title="Motion controller not connected")
+            self._pending_connection_error = None
 
         if motion is not None and motion.routine_running:
             automation_state = (
