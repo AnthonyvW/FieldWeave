@@ -78,6 +78,24 @@ class TreeCoreAutomationSettings:
 
     image_name_template: str = "Y{y}_X{x}_Z{z}"
 
+    # Distance the stage moves between frames.  0 derives it from
+    # image_overlap and the camera calibration.
+    step_distance_nm: int = 0
+
+    # Fractional overlap between neighbouring frames, used to derive the step
+    # distance.  Only meaningful once the camera has been calibrated.
+    image_overlap: float = 0.4
+
+    # Stitch each core's frames into one image once they are all captured
+    # (and focus stacked, in focus stack mode).
+    stitch_enabled: bool = True
+
+    # When True the stitching overlap is derived from the camera calibration
+    # and stage positions (or measured from the images); otherwise
+    # stitch_overlap is used.
+    stitch_overlap_auto: bool = True
+    stitch_overlap: float = 0.4
+
     # Imaging mode: "optimal_focus" uses autofocus at each position;
     # "focus_stack" captures a Z-stack and stacks the result.
     focus_mode: str = "optimal_focus"
@@ -434,6 +452,12 @@ class MotionSystemSettings:
             raise ValueError("tree_core_automation.focus_mode must be 'optimal_focus' or 'focus_stack'")
         if self.tree_core_automation.calibration_scale_mode not in ("single", "stitched"):
             raise ValueError("tree_core_automation.calibration_scale_mode must be 'single' or 'stitched'")
+        if self.tree_core_automation.step_distance_nm < 0:
+            raise ValueError("tree_core_automation.step_distance_nm must not be negative")
+        if not (0.0 <= self.tree_core_automation.image_overlap < 1.0):
+            raise ValueError("tree_core_automation.image_overlap must be in [0, 1)")
+        if not (0.0 < self.tree_core_automation.stitch_overlap < 1.0):
+            raise ValueError("tree_core_automation.stitch_overlap must be in (0, 1)")
         if self.tree_core_automation.z_step_nm <= 0:
             raise ValueError("tree_core_automation.z_step_nm must be positive")
         if not (1.0 <= self.tree_core_automation.sharpness <= 8.0):

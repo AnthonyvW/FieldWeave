@@ -20,6 +20,18 @@ from common.app_context import get_app_context
 from motion.motion_config import MotionSystemSettings, TreeCoreSlot
 from UI.settings.pages.shared import LabelTrackerMixin, NM_PER_MM, NoScrollDoubleSpinBox, NoScrollSpinBox, SettingsGroupBase
 
+FS_NM_KEYS = {"z_near_plane_nm", "z_far_plane_nm", "z_step_nm"}
+FS_PERCENT_KEYS = {"image_overlap", "stitch_overlap"}
+
+
+def fs_float_stored(key: str, value: float) -> float | int:
+    """Convert a displayed float field value to the unit it is stored in."""
+    if key in FS_NM_KEYS:
+        return round(value * NM_PER_MM)
+    if key in FS_PERCENT_KEYS:
+        return round(value / 100.0, 4)
+    return value
+
 
 class _SlotRow(LabelTrackerMixin, QWidget):
     """A single row in the slots list showing position and offset spinboxes."""
@@ -242,6 +254,37 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
                 target = Position(x=current.x, y=value_nm, z=current.z)
         motion.move_to_position(target, wait=False)
 
+    def _fov_nm(self) -> float | None:
+        """Field of view along the automation axis, or None without a camera calibration."""
+        mv = get_app_context().machine_vision
+        if mv is None or not mv.is_calibrated:
+            return None
+        return mv.calibration.stage_axis_imaging(self._get_axis()).fov_nm
+
+    def _refresh_overlap_state(self) -> None:
+        calibrated = self._fov_nm() is not None
+        overlap = self._w_fs_float["image_overlap"]
+        overlap.setEnabled(calibrated)
+        overlap.setToolTip(
+            "Overlap between neighbouring frames. Entering a value sets the step distance from the "
+            "camera calibration's field of view."
+            if calibrated else
+            "Requires a camera calibration (Machine Vision settings)."
+        )
+        self._w_fs_float["stitch_overlap"].setEnabled(not self._w_fs_check["stitch_overlap_auto"].isChecked())
+
+    def _on_image_overlap_changed(self, value_pct: float) -> None:
+        fov_nm = self._fov_nm()
+        if fov_nm is None:
+            return
+        step_nm = self._get_printer_step_mm() * NM_PER_MM
+        distance_nm = round(fov_nm * (1.0 - value_pct / 100.0) / step_nm) * step_nm
+        self._w_run["step_distance_nm"].setValue(distance_nm / NM_PER_MM)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._refresh_overlap_state()
+
     def _get_printer_step_mm(self) -> float:
         motion = get_app_context().motion
         if motion is not None and motion.settings is not None:
@@ -310,6 +353,30 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
                 run_form.addRow(row_label, container)
             else:
                 run_form.addRow(row_label, spin)
+
+        step_distance = NoScrollDoubleSpinBox()
+        step_distance.setMinimum(0.0)
+        step_distance.setMaximum(self._axis_max_mm(axis))
+        step_distance.setSingleStep(self._get_printer_step_mm())
+        step_distance.setDecimals(3)
+        step_distance.setFixedWidth(130)
+        step_distance.setSpecialValueText("Auto")
+        step_distance.setToolTip(
+            "Distance the stage moves between frames (mm).\n"
+            "Auto derives it from the image overlap and the camera calibration."
+        )
+        self._w_run["step_distance_nm"] = step_distance
+        run_form.addRow(self._register_label("step_distance_nm", QLabel("Step distance (mm):")), step_distance)
+
+        image_overlap = NoScrollDoubleSpinBox()
+        image_overlap.setMinimum(0.0)
+        image_overlap.setMaximum(95.0)
+        image_overlap.setSingleStep(1.0)
+        image_overlap.setDecimals(1)
+        image_overlap.setFixedWidth(130)
+        image_overlap.valueChanged.connect(self._on_image_overlap_changed)
+        self._w_fs_float["image_overlap"] = image_overlap
+        run_form.addRow(self._register_label("image_overlap", QLabel("Image overlap (%):")), image_overlap)
 
         vbox.addWidget(run_box)
 
@@ -447,6 +514,35 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
 
         vbox.addWidget(fs_box)
 
+        # ------------------------------------------------------------------
+        # Image Stitching sub-group
+        # ------------------------------------------------------------------
+        stitch_box = QGroupBox("Image Stitching")
+        stitch_form = QFormLayout(stitch_box)
+        stitch_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        for key, label_text, tooltip in (
+            ("stitch_enabled",      "Stitch each core:", "Stitch each core's frames into <core>/<core>.tiff once they are captured and focus stacked."),
+            ("stitch_overlap_auto", "Auto overlap:",     "Derive the stitching overlap from the camera calibration and stage positions, or measure it from the images."),
+        ):
+            check = QCheckBox()
+            check.setToolTip(tooltip)
+            self._w_fs_check[key] = check
+            stitch_form.addRow(self._register_label(key, QLabel(label_text)), check)
+        self._w_fs_check["stitch_overlap_auto"].toggled.connect(lambda _: self._refresh_overlap_state())
+
+        stitch_overlap = NoScrollDoubleSpinBox()
+        stitch_overlap.setMinimum(1.0)
+        stitch_overlap.setMaximum(95.0)
+        stitch_overlap.setSingleStep(1.0)
+        stitch_overlap.setDecimals(1)
+        stitch_overlap.setFixedWidth(130)
+        stitch_overlap.setToolTip("Overlap between neighbouring frames assumed when stitching.")
+        self._w_fs_float["stitch_overlap"] = stitch_overlap
+        stitch_form.addRow(self._register_label("stitch_overlap", QLabel("Overlap (%):")), stitch_overlap)
+
+        vbox.addWidget(stitch_box)
+
         slots_box = QGroupBox("Slots")
         slots_vbox = QVBoxLayout(slots_box)
 
@@ -516,6 +612,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         self._w_run["starting_height_nm"].setValue(tca.starting_height_nm / NM_PER_MM)
         self._w_run["starting_offset_nm"].setValue(tca.starting_offset_nm / NM_PER_MM)
         self._w_run["slot_separation_nm"].setValue(tca.slot_separation_nm / NM_PER_MM)
+        self._w_run["step_distance_nm"].setValue(tca.step_distance_nm / NM_PER_MM)
         self._w_line["image_name_template"].setText(tca.image_name_template)
 
         self._w_fs_float["z_near_plane_nm"].setValue(tca.z_near_plane_nm / NM_PER_MM)
@@ -523,6 +620,8 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         self._w_fs_float["z_step_nm"].setValue(tca.z_step_nm / NM_PER_MM)
         self._w_fs_float["sharpness"].setValue(tca.sharpness)
         self._w_fs_float["cull_threshold"].setValue(tca.cull_threshold)
+        self._w_fs_float["image_overlap"].setValue(tca.image_overlap * 100.0)
+        self._w_fs_float["stitch_overlap"].setValue(tca.stitch_overlap * 100.0)
         self._w_fs_int["slab_size"].setValue(tca.slab_size)
         self._w_fs_int["slab_overlap"].setValue(tca.slab_overlap)
         self._w_fs_int["workers"].setValue(tca.workers)
@@ -531,6 +630,8 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         self._w_fs_check["crop"].setChecked(tca.crop)
         self._w_fs_check["cull_enabled"].setChecked(tca.cull_enabled)
         self._w_fs_check["slab_enabled"].setChecked(tca.slab_enabled)
+        self._w_fs_check["stitch_enabled"].setChecked(tca.stitch_enabled)
+        self._w_fs_check["stitch_overlap_auto"].setChecked(tca.stitch_overlap_auto)
 
         idx = self._w_fs_combo["focus_mode"].findData(tca.focus_mode)
         if idx >= 0:
@@ -548,6 +649,8 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
             w.blockSignals(False)
         for w in self._w_fs_combo.values():
             w.blockSignals(False)
+
+        self._refresh_overlap_state()
 
         axis_upper = tca.axis.upper()
         if "mark_reference_nm" in self._axis_labels:
@@ -567,23 +670,18 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
             "starting_height_nm": round(self._w_run["starting_height_nm"].value() * NM_PER_MM),
             "starting_offset_nm": round(self._w_run["starting_offset_nm"].value() * NM_PER_MM),
             "slot_separation_nm": round(self._w_run["slot_separation_nm"].value() * NM_PER_MM),
+            "step_distance_nm":   round(self._w_run["step_distance_nm"].value() * NM_PER_MM),
             "num_slots":          len(self._slot_rows),
             "image_name_template": self._w_line["image_name_template"].text(),
-            "fs.z_near_plane_nm": round(self._w_fs_float["z_near_plane_nm"].value() * NM_PER_MM),
-            "fs.z_far_plane_nm":  round(self._w_fs_float["z_far_plane_nm"].value() * NM_PER_MM),
-            "fs.z_step_nm":       round(self._w_fs_float["z_step_nm"].value() * NM_PER_MM),
-            "fs.sharpness":       self._w_fs_float["sharpness"].value(),
-            "fs.cull_threshold":  self._w_fs_float["cull_threshold"].value(),
             "fs.slab_size":       self._w_fs_int["slab_size"].value(),
             "fs.slab_overlap":    self._w_fs_int["slab_overlap"].value(),
             "fs.workers":         self._w_fs_int["workers"].value(),
-            "fs.keep_size":       self._w_fs_check["keep_size"].isChecked(),
-            "fs.no_align":        self._w_fs_check["no_align"].isChecked(),
-            "fs.crop":            self._w_fs_check["crop"].isChecked(),
-            "fs.cull_enabled":    self._w_fs_check["cull_enabled"].isChecked(),
-            "fs.slab_enabled":    self._w_fs_check["slab_enabled"].isChecked(),
             "fs.focus_mode":      self._w_fs_combo["focus_mode"].currentData(),
         }
+        for key, spin in self._w_fs_float.items():
+            self._saved[f"fs.{key}"] = fs_float_stored(key, spin.value())
+        for key, check in self._w_fs_check.items():
+            self._saved[f"fs.{key}"] = check.isChecked()
         for i, row in enumerate(self._slot_rows):
             self._saved[f"slot.{i}.position_nm"] = round(row.widgets["position_nm"].value() * NM_PER_MM)
             self._saved[f"slot.{i}.offset_nm"]   = round(row.widgets["offset_nm"].value() * NM_PER_MM)
@@ -612,9 +710,7 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         motion = get_app_context().motion
         if motion is None or motion.settings is None:
             return
-        nm_keys = {"z_near_plane_nm", "z_far_plane_nm", "z_step_nm"}
-        stored = round(value * NM_PER_MM) if key in nm_keys else value
-        setattr(motion.settings.tree_core_automation, key, stored)
+        setattr(motion.settings.tree_core_automation, key, fs_float_stored(key, value))
 
     def apply_fs_int_to_live(self, key: str, value: int) -> None:
         motion = get_app_context().motion
@@ -684,15 +780,9 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
                     return True
         if self._saved.get("image_name_template") != self._w_line["image_name_template"].text():
             return True
-        nm_keys = {"z_near_plane_nm", "z_far_plane_nm", "z_step_nm"}
         if any(
-            self._saved.get(f"fs.{k}") != round(self._w_fs_float[k].value() * NM_PER_MM)
-            for k in nm_keys
-        ):
-            return True
-        if any(
-            self._saved.get(f"fs.{k}") != self._w_fs_float[k].value()
-            for k in ("sharpness", "cull_threshold")
+            self._saved.get(f"fs.{k}") != fs_float_stored(k, spin.value())
+            for k, spin in self._w_fs_float.items()
         ):
             return True
         if any(
@@ -701,8 +791,8 @@ class TreeCoreSettingsWidget(SettingsGroupBase):
         ):
             return True
         if any(
-            self._saved.get(f"fs.{k}") != self._w_fs_check[k].isChecked()
-            for k in ("keep_size", "no_align", "crop", "cull_enabled", "slab_enabled")
+            self._saved.get(f"fs.{k}") != check.isChecked()
+            for k, check in self._w_fs_check.items()
         ):
             return True
         if self._saved.get("fs.focus_mode") != self._w_fs_combo["focus_mode"].currentData():

@@ -77,6 +77,30 @@ def derive_y_axis_orientation(M_est: np.ndarray) -> CameraYAxisOrientation:
     return "horizontal" if dpx > dpy else "vertical"
 
 
+@dataclass(frozen=True)
+class StageAxisImaging:
+    """
+    How travel along one stage axis appears in the camera image.
+
+    Attributes
+    ----------
+    image_axis:
+        ``"horizontal"`` if moving the stage along the axis shifts the image
+        mostly left/right, ``"vertical"`` if mostly up/down.
+    fov_nm:
+        Stage travel (in nm) that shifts the image by one full frame along
+        ``image_axis``.
+    content_moves_forward:
+        True if increasing the stage coordinate moves image content towards
+        +``image_axis`` (right or down), so a frame taken further along the
+        axis sees the scene that lay left of / above the previous frame.
+    """
+
+    image_axis: CameraYAxisOrientation
+    fov_nm: float
+    content_moves_forward: bool
+
+
 # ---------------------------------------------------------------------------
 # Calibration state
 # ---------------------------------------------------------------------------
@@ -184,6 +208,18 @@ class CameraCalibration:
         dx_nm = -float(world_delta[0, 0])
         dy_nm = -float(world_delta[1, 0])
         return dx_nm, dy_nm
+
+    def stage_axis_imaging(self, axis: str) -> StageAxisImaging:
+        """
+        Describe how travel along stage *axis* (``"x"`` or ``"y"``) maps onto
+        the image, using the image resolution recorded at calibration time.
+        """
+        column = 0 if axis.lower() == "x" else 1
+        px = float(self.M_est[0, column])
+        py = float(self.M_est[1, column])
+        if abs(px) > abs(py):
+            return StageAxisImaging("horizontal", self.image_width / abs(px), px > 0)
+        return StageAxisImaging("vertical", self.image_height / abs(py), py > 0)
 
 
 # ---------------------------------------------------------------------------
