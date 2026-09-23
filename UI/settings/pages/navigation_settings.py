@@ -5,8 +5,9 @@ Settings page for motion controller / navigation configuration.
 
 Design
 ------
-- Two QGroupBoxes: "Controller" (hardware parameters) and "Navigation"
-  (axis inversion toggles and jog-step presets for the navigation widget).
+- Three QGroupBoxes: "Controller" (hardware parameters), "Axes" (enable,
+  homing and inversion per axis) and "Navigation" (jog-step presets and
+  starting height for the navigation widget).
 - Modified fields turn orange exactly like AutomationSettingsWidget does.
 - get_group_names() returns the top-level group names so SettingsDialog can
   add them as sidebar sub-items.
@@ -92,7 +93,6 @@ class NavigationSettingsWidget(QWidget):
         self._navigation = NavigationGroupSettingsWidget()
         self._navigation.connect_signals(
             self._on_nav_float,
-            self._on_nav_check,
             self._on_set_current_height,
             self._on_reset_height,
         )
@@ -145,13 +145,6 @@ class NavigationSettingsWidget(QWidget):
         if s is not None:
             self._navigation.apply_float_to_live(key, value, s)
         self._navigation.mark_float_field(key, value)
-        self._recheck_unsaved()
-
-    def _on_nav_check(self, key: str, value: bool) -> None:
-        s = self._live_settings()
-        if s is not None:
-            self._navigation.apply_check_to_live(key, value, s)
-        self._navigation.mark_check_field(key, value)
         self._recheck_unsaved()
 
     @Slot()

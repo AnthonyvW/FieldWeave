@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QVBoxLayout,
     QWidget,
@@ -13,8 +14,35 @@ from motion.motion_config import AXES, MotionSystemSettings
 from UI.settings.pages.shared import SettingsGroupBase
 
 
+class _CheckCell(QWidget):
+    """Grid cell that toggles its checkbox when clicked anywhere inside it.
+
+    A checkbox without text only reacts to its 14 px box, so clicks that land
+    elsewhere in the column were silently ignored.
+    """
+
+    def __init__(self, check: QCheckBox) -> None:
+        super().__init__()
+        self._check = check
+        self.setMinimumSize(56, 24)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(check, 0, Qt.AlignmentFlag.AlignCenter)
+
+    def mousePressEvent(self, event) -> None:
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._check.isEnabled()
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self._check.click()
+
+
 class AxesSettingsWidget(SettingsGroupBase):
-    """Axes group: which axes exist, which are homed, and whether to home on startup."""
+    """Axes group: which axes exist, which are homed, their jog direction, and startup homing."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Axes", parent)
@@ -34,10 +62,11 @@ class AxesSettingsWidget(SettingsGroupBase):
         vbox.addWidget(desc)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(0)
+        grid.setVerticalSpacing(0)
         grid.addWidget(QLabel("<b>Enabled</b>"), 0, 1, Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(QLabel("<b>Home</b>"), 0, 2, Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(QLabel("<b>Invert</b>"), 0, 3, Qt.AlignmentFlag.AlignCenter)
 
         for row, axis in enumerate(AXES, start=1):
             label = self._register_label(axis, QLabel(f"{axis.upper()} axis:"))
@@ -46,14 +75,22 @@ class AxesSettingsWidget(SettingsGroupBase):
             enabled = QCheckBox()
             enabled.setToolTip(f"Allow the {axis.upper()} axis to be moved.")
             self._checks[f"{axis}_enabled"] = enabled
-            grid.addWidget(enabled, row, 1, Qt.AlignmentFlag.AlignCenter)
+            grid.addWidget(_CheckCell(enabled), row, 1)
 
             home = QCheckBox()
             home.setToolTip(f"Include the {axis.upper()} axis when homing.")
             self._checks[f"home_{axis}"] = home
-            grid.addWidget(home, row, 2, Qt.AlignmentFlag.AlignCenter)
+            grid.addWidget(_CheckCell(home), row, 2)
 
-        grid.setColumnStretch(3, 1)
+            invert = QCheckBox()
+            invert.setToolTip(
+                f"Invert the {axis.upper()} axis direction in the navigation widget.\n"
+                "Enable if the on-screen arrow moves the stage in the wrong direction."
+            )
+            self._checks[f"invert_{axis}"] = invert
+            grid.addWidget(_CheckCell(invert), row, 3)
+
+        grid.setColumnStretch(4, 1)
         vbox.addLayout(grid)
         # Matches the machine vision menu so Home boxes of disabled axes read as inactive.
         self.setStyleSheet(
@@ -98,10 +135,10 @@ class AxesSettingsWidget(SettingsGroupBase):
             self.mark_label(key, self._saved.get(key) != value)
             return
         axis = key[0] if key.endswith("_enabled") else key[-1]
-        # Enabled and Home share the axis row label, so it is orange if either differs.
+        # Every checkbox in a row shares the axis label, so it is orange if any differs.
         changed = any(
             self._saved.get(k) != self._checks[k].isChecked()
-            for k in (f"{axis}_enabled", f"home_{axis}")
+            for k in (f"{axis}_enabled", f"home_{axis}", f"invert_{axis}")
         )
         self.mark_label(axis, changed)
 
