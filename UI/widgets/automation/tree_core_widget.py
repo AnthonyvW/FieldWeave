@@ -142,6 +142,8 @@ class _ConfirmDialog(QDialog):
         image_calibration_scale: bool,
         calibration_scale_mode: str = "stitched",
         calibration_scale_per_slot: bool = False,
+        step_text: str = "",
+        stitch_text: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -168,6 +170,8 @@ class _ConfirmDialog(QDialog):
 
         rows: list[tuple[str, str]] = [
             ("Slots to image", str(slot_count)),
+            ("Step distance", step_text),
+            ("Stitching", stitch_text),
             ("Image calibration scale", "Yes" if image_calibration_scale else "No"),
         ]
         if image_calibration_scale:
@@ -449,6 +453,15 @@ class TreeCoreWidget(QWidget):
         self._fs_slab_overlap_spin: QSpinBox
         self._fs_workers_spin: QSpinBox
 
+        # Stepping and stitching group
+        self._step_distance_spin: QDoubleSpinBox
+        self._image_overlap_spin: QDoubleSpinBox
+        self._fov_label: QLabel
+        self._stitch_check: QCheckBox
+        self._stitch_details: QWidget
+        self._stitch_auto_overlap_check: QCheckBox
+        self._stitch_overlap_spin: QDoubleSpinBox
+
         # Calibration scale group
         self._inspect_cal_warning: QLabel
         self._cal_scale_toggle: QCheckBox
@@ -507,6 +520,7 @@ class TreeCoreWidget(QWidget):
         main_layout.addWidget(self._output_folder)
 
         main_layout.addWidget(self._build_focus_mode_group())
+        main_layout.addWidget(self._build_step_stitch_group())
         main_layout.addWidget(self._build_calibration_scale_group())
 
         main_layout.addWidget(self._build_sample_list_group())
@@ -895,6 +909,166 @@ class TreeCoreWidget(QWidget):
 
         self._on_fs_slab_enabled_changed()
 
+    def _build_step_stitch_group(self) -> QGroupBox:
+        group = QGroupBox("Stepping && Stitching")
+
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self._step_distance_spin = QDoubleSpinBox()
+        self._step_distance_spin.setFixedHeight(28)
+        self._step_distance_spin.setDecimals(3)
+        self._step_distance_spin.setSuffix(" mm")
+        self._step_distance_spin.setMinimum(0.0)
+        self._step_distance_spin.setMaximum(100.0)
+        self._step_distance_spin.setSingleStep(self._get_printer_step_mm())
+        self._step_distance_spin.setSpecialValueText("Auto")
+        self._step_distance_spin.setToolTip(
+            "Distance the stage moves between frames.\n"
+            "Auto derives it from the image overlap and the camera calibration."
+        )
+        self._step_distance_spin.valueChanged.connect(self._on_step_distance_changed)
+        form.addRow("Step distance:", self._step_distance_spin)
+
+        self._image_overlap_spin = QDoubleSpinBox()
+        self._image_overlap_spin.setFixedHeight(28)
+        self._image_overlap_spin.setDecimals(1)
+        self._image_overlap_spin.setSuffix(" %")
+        self._image_overlap_spin.setMinimum(0.0)
+        self._image_overlap_spin.setMaximum(95.0)
+        self._image_overlap_spin.setSingleStep(1.0)
+        self._image_overlap_spin.valueChanged.connect(self._on_image_overlap_changed)
+        form.addRow("Image overlap:", self._image_overlap_spin)
+
+        layout.addLayout(form)
+
+        self._fov_label = QLabel()
+        self._fov_label.setObjectName("CalScalePosLabel")
+        self._fov_label.setWordWrap(True)
+        layout.addWidget(self._fov_label)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setObjectName("SampleDivider")
+        layout.addWidget(divider)
+
+        self._stitch_check = QCheckBox("Stitch each core after imaging")
+        self._stitch_check.setToolTip(
+            "Stitch each core's frames into <core>/<core>.tiff once they are captured "
+            "and focus stacked. The calibration slide is prepended when it is imaged."
+        )
+        self._stitch_check.toggled.connect(self._on_stitch_toggled)
+        layout.addWidget(self._stitch_check)
+
+        self._stitch_details = QWidget()
+        details_layout = QHBoxLayout(self._stitch_details)
+        details_layout.setContentsMargins(16, 0, 0, 0)
+        details_layout.setSpacing(8)
+
+        self._stitch_auto_overlap_check = QCheckBox("Auto overlap")
+        self._stitch_auto_overlap_check.setToolTip(
+            "Derive the stitching overlap from the camera calibration and stage "
+            "positions, or measure it from the images."
+        )
+        self._stitch_auto_overlap_check.toggled.connect(self._on_stitch_auto_overlap_toggled)
+        details_layout.addWidget(self._stitch_auto_overlap_check)
+
+        self._stitch_overlap_spin = QDoubleSpinBox()
+        self._stitch_overlap_spin.setFixedHeight(28)
+        self._stitch_overlap_spin.setDecimals(1)
+        self._stitch_overlap_spin.setSuffix(" %")
+        self._stitch_overlap_spin.setMinimum(1.0)
+        self._stitch_overlap_spin.setMaximum(95.0)
+        self._stitch_overlap_spin.setSingleStep(1.0)
+        self._stitch_overlap_spin.setToolTip("Overlap between neighbouring frames assumed when stitching.")
+        self._stitch_overlap_spin.valueChanged.connect(
+            lambda v: self._write_tca_float("stitch_overlap", round(v / 100.0, 4))
+        )
+        details_layout.addWidget(self._stitch_overlap_spin)
+        details_layout.addStretch(1)
+
+        layout.addWidget(self._stitch_details)
+
+        self._populate_step_stitch_from_settings()
+
+        return group
+
+    def _populate_step_stitch_from_settings(self) -> None:
+        tca = _get_tca()
+        if tca is None:
+            return
+        for widget, value in (
+            (self._step_distance_spin,  tca.step_distance_nm / _NM_PER_MM),
+            (self._image_overlap_spin,  tca.image_overlap * 100.0),
+            (self._stitch_overlap_spin, tca.stitch_overlap * 100.0),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+        for widget, value in (
+            (self._stitch_check,              tca.stitch_enabled),
+            (self._stitch_auto_overlap_check, tca.stitch_overlap_auto),
+        ):
+            widget.blockSignals(True)
+            widget.setChecked(value)
+            widget.blockSignals(False)
+        self._stitch_details.setEnabled(tca.stitch_enabled)
+        self._stitch_overlap_spin.setEnabled(not tca.stitch_overlap_auto)
+        self._refresh_overlap_state()
+
+    def _fov_nm(self) -> float | None:
+        """Field of view along the automation axis, or None without a camera calibration."""
+        ctx = get_app_context()
+        tca = _get_tca()
+        if ctx is None or ctx.machine_vision is None or tca is None or not ctx.machine_vision.is_calibrated:
+            return None
+        return ctx.machine_vision.calibration.stage_axis_imaging(tca.axis).fov_nm
+
+    def _refresh_overlap_state(self) -> None:
+        fov_nm = self._fov_nm()
+        self._image_overlap_spin.setEnabled(fov_nm is not None)
+        if fov_nm is None:
+            self._image_overlap_spin.setToolTip("Requires a camera calibration.")
+            self._fov_label.setText("Camera not calibrated: set the step distance directly.")
+            return
+        self._image_overlap_spin.setToolTip(
+            "Overlap between neighbouring frames. Changing it sets the step distance "
+            "from the camera calibration's field of view."
+        )
+        text = f"Field of view along the scan axis: {fov_nm / _NM_PER_MM:.3f} mm"
+        step_nm = round(self._step_distance_spin.value() * _NM_PER_MM)
+        if step_nm > 0:
+            text += f"  (step gives {1.0 - step_nm / fov_nm:.0%} overlap)"
+        self._fov_label.setText(text)
+
+    def _on_step_distance_changed(self, value_mm: float) -> None:
+        tca = _get_tca()
+        if tca is not None:
+            tca.step_distance_nm = round(value_mm * _NM_PER_MM)
+        self._refresh_overlap_state()
+
+    def _on_image_overlap_changed(self, value_pct: float) -> None:
+        self._write_tca_float("image_overlap", round(value_pct / 100.0, 4))
+        fov_nm = self._fov_nm()
+        if fov_nm is None:
+            return
+        printer_step_nm = self._get_printer_step_mm() * _NM_PER_MM
+        distance_nm = round(fov_nm * (1.0 - value_pct / 100.0) / printer_step_nm) * printer_step_nm
+        self._step_distance_spin.setValue(distance_nm / _NM_PER_MM)
+
+    def _on_stitch_toggled(self, checked: bool) -> None:
+        self._stitch_details.setEnabled(checked)
+        self._write_tca_check("stitch_enabled", checked)
+
+    def _on_stitch_auto_overlap_toggled(self, checked: bool) -> None:
+        self._stitch_overlap_spin.setEnabled(not checked)
+        self._write_tca_check("stitch_overlap_auto", checked)
+
     def _build_calibration_scale_group(self) -> QGroupBox:
         group = QGroupBox("Calibration Scale")
 
@@ -1138,6 +1312,8 @@ class TreeCoreWidget(QWidget):
         super().showEvent(event)
         self._refresh_slot_calibration_state()
         self._refresh_inspection_calibration_state()
+        if self._routine is None:
+            self._populate_step_stitch_from_settings()
         tca = _get_tca()
         num_slots = tca.num_slots if tca is not None else 20
         if len(self._sample_rows) != num_slots:
@@ -1166,6 +1342,8 @@ class TreeCoreWidget(QWidget):
 
     def _poll_idle_state(self) -> None:
         self._refresh_inspection_calibration_state()
+        if self._routine is None:
+            self._refresh_overlap_state()
         if self._cal_scale_toggle.isChecked():
             self._refresh_calibration_scale_info()
 
@@ -1485,6 +1663,24 @@ class TreeCoreWidget(QWidget):
                 return
             focus_stack_config = self._build_focus_stack_config()
 
+        step_mm = self._step_distance_spin.value()
+        fov_nm = self._fov_nm()
+        if step_mm > 0:
+            step_text = f"{step_mm:.3f} mm"
+        elif fov_nm is not None:
+            step_text = f"Auto ({self._image_overlap_spin.value():.0f}% overlap)"
+        else:
+            warning("TreeCoreWidget: no step distance set and no camera calibration to derive one")
+            ctx.toast.warning("Set a step distance or calibrate the camera before starting.")
+            return
+
+        if not self._stitch_check.isChecked():
+            stitch_text = "Off"
+        elif self._stitch_auto_overlap_check.isChecked():
+            stitch_text = "On (auto overlap)"
+        else:
+            stitch_text = f"On ({self._stitch_overlap_spin.value():.0f}% overlap)"
+
         output_path = self._output_folder.resolved_path
         if not OutputFolderWidget.confirm_if_exists(output_path, self):
             return
@@ -1500,6 +1696,8 @@ class TreeCoreWidget(QWidget):
             image_calibration_scale=image_calibration_scale,
             calibration_scale_mode=calibration_scale_mode,
             calibration_scale_per_slot=calibration_scale_per_slot,
+            step_text=step_text,
+            stitch_text=stitch_text,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1639,6 +1837,10 @@ class TreeCoreWidget(QWidget):
         self._optimal_focus_radio.setEnabled(False)
         self._focus_stack_radio.setEnabled(False)
         self._focus_stack_settings.setEnabled(False)
+        self._step_distance_spin.setEnabled(False)
+        self._image_overlap_spin.setEnabled(False)
+        self._stitch_check.setEnabled(False)
+        self._stitch_details.setEnabled(False)
         self._pause_resume_btn.setText("Pause")
         self._controls_widget.setVisible(True)
         self._poll_timer.start()
@@ -1659,6 +1861,10 @@ class TreeCoreWidget(QWidget):
         self._optimal_focus_radio.setEnabled(True)
         self._focus_stack_radio.setEnabled(True)
         self._focus_stack_settings.setEnabled(True)
+        self._step_distance_spin.setEnabled(True)
+        self._stitch_check.setEnabled(True)
+        self._stitch_details.setEnabled(self._stitch_check.isChecked())
+        self._refresh_overlap_state()
         self._controls_widget.setVisible(False)
         self._routine = None
         for row in self._sample_rows:
