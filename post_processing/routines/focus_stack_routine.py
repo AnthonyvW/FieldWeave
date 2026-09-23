@@ -49,49 +49,14 @@ from pathlib import Path
 from typing import Any, Callable, Generator
 
 import numpy as np
-from PIL import Image
 
 from focusweave import FocusStackConfig, RunResult, run
 from focusweave.streaming_stack import StreamingFocusStacker
 
 from common.fieldweaveConfig import FieldWeaveSettings
-from common.app_context import get_app_context
-from common.read_metadata import build_exif_bytes, build_png_info, extract_dpi, read_metadata
-from common.setting_types import FileFormat
+from common.read_metadata import read_metadata, save_image_with_metadata
 from post_processing.routines.post_processing_routine import PostProcessingRoutine
 from common.logger import info, warning, error
-
-
-def _save_stack_result(
-    image: np.ndarray,
-    out_path: Path,
-    fmt: FileFormat,
-    jpeg_quality: int,
-    metadata: dict[str, Any] | None = None,
-) -> bool:
-    # Let Pillow infer the format from out_path's extension instead of passing
-    # a format string ourselves -- avoids the FileFormat/Pillow name mismatch
-    # entirely (e.g. "jpg" vs the "JPEG" identifier Pillow expects).
-    save_kwargs: dict[str, Any] = {"quality": jpeg_quality} if fmt in (FileFormat.JPEG, FileFormat.JPG) else {}
-
-    if metadata:
-        dpi = extract_dpi(metadata)
-        if dpi is not None:
-            save_kwargs["dpi"] = (dpi, dpi)
-        if fmt == FileFormat.PNG:
-            save_kwargs["pnginfo"] = build_png_info(metadata)
-        else:
-            exif_bytes = build_exif_bytes(metadata)
-            if exif_bytes is not None:
-                save_kwargs["exif"] = exif_bytes
-
-    try:
-        Image.fromarray(image).save(out_path, **save_kwargs)
-    except OSError as exc:
-        error(f"Failed to save stacked image to {out_path}: {exc}")
-        return False
-
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -309,8 +274,7 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fmt = get_app_context().camera.settings.fformat
-        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality, metadata):
+        if not save_image_with_metadata(result.image, out_path, metadata, cfg.jpeg_quality):
             self._set_result(success=False)
             return
 
@@ -527,8 +491,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fmt = get_app_context().camera.settings.fformat
-        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality, self.reference_metadata):
+        if not save_image_with_metadata(result.image, out_path, self.reference_metadata, cfg.jpeg_quality):
             self._set_result(success=False)
             return
 

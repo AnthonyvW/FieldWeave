@@ -47,20 +47,18 @@ Result data keys
 
 from __future__ import annotations
 
-import os
 import re
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from common.fieldweaveConfig import FieldWeaveSettings
 from common.logger import debug, error, info, warning
-from common.read_metadata import extract_dpi, read_metadata
+from common.read_metadata import read_metadata, save_image_with_metadata
 from post_processing.routines.post_processing_routine import PostProcessingRoutine
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
@@ -73,9 +71,10 @@ _MAX_OVERLAP = 0.95
 _LAYOUT_SAMPLE_PAIRS = 5
 _LAYOUT_MIN_MATCHES = 8
 
-# Pillow refuses images above this by default as a decompression-bomb guard;
-# a full-length core composite legitimately exceeds it.
-Image.MAX_IMAGE_PIXELS = None
+_FRAME_POSITION_KEYS = (
+    "x_position_nm", "y_position_nm", "z_position_nm",
+    "x_position_mm", "y_position_mm", "z_position_mm",
+)
 
 
 @dataclass
@@ -509,13 +508,14 @@ class TreeCoreStitchRoutine(PostProcessingRoutine):
         self._set_status("Saving", 92, 100)
         yield
 
-        dpi = extract_dpi(read_metadata(layout.paths[0]) or {})
-        if not self._save(composite, dpi):
+        first, last = stitcher.stitched_range
+        metadata = self._composite_metadata(layout, stitcher)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not save_image_with_metadata(cv2.cvtColor(composite, cv2.COLOR_BGR2RGB), self.output_path, metadata):
             self._set_result(success=False)
             return
 
         h, w = composite.shape[:2]
-        first, last = stitcher.stitched_range
         info(f"[TreeCoreStitch] Wrote {w}x{h} composite to {self.output_path}")
         self._set_result(
             success=True,
@@ -585,16 +585,23 @@ class TreeCoreStitchRoutine(PostProcessingRoutine):
         debug(f"[TreeCoreStitch] Prepending calibration slide {slide_path}")
         return prepend_calibration_slide(composite, slide)
 
-    def _save(self, composite: np.ndarray, dpi: float | None) -> bool:
-        save_kwargs: dict[str, object] = {}
-        if dpi is not None:
-            save_kwargs["dpi"] = (dpi, dpi)
-        if self.output_path.suffix.lower() in (".tif", ".tiff"):
-            save_kwargs["compression"] = "tiff_lzw"
-        try:
-            os.makedirs(self.output_path.parent, exist_ok=True)
-            Image.fromarray(cv2.cvtColor(composite, cv2.COLOR_BGR2RGB)).save(self.output_path, **save_kwargs)
-        except OSError as exc:
-            error(f"[TreeCoreStitch] Failed to save {self.output_path}: {exc}")
-            return False
-        return True
+    def _composite_metadata(self, layout: StitchLayout, stitcher: _Stitcher) -> dict[str, Any] | None:
+        """The first stitched frame's metadata, with its per-frame stage
+        position replaced by a description of the stitch."""
+        first, last = stitcher.stitched_range
+        metadata = read_metadata(layout.paths[first])
+        if metadata is None:
+            return None
+        comment = metadata.get("UserComment")
+        if isinstance(comment, dict):
+            additional = comment.setdefault("additional", {})
+            for key in _FRAME_POSITION_KEYS:
+                additional.pop(key, None)
+            additional.update(
+                source="tree_core_stitch",
+                frames_stitched=last - first + 1,
+                overlap=round(layout.overlap, 4),
+                vertical_core=layout.vertical_core,
+                calibration_slide=self.calibration_slide_folder is not None,
+            )
+        return metadata

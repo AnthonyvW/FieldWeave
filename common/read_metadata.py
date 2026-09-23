@@ -10,10 +10,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PIL import ExifTags, Image
 from PIL.PngImagePlugin import PngInfo
+
+if TYPE_CHECKING:
+    import numpy as np
 
 # EXIF 2.3 UserComment charset-designation codes (first 8 bytes of the tag).
 _USER_COMMENT_CHARSETS = {
@@ -116,6 +119,16 @@ STRUCTURAL_TAGS = {
     "SamplesPerPixel",
     "RowsPerStrip",
     "PlanarConfiguration",
+    "TileWidth",
+    "TileLength",
+    "Predictor",
+    "SampleFormat",
+    "ExtraSamples",
+    "NewSubfileType",
+    "SubfileType",
+    "FillOrder",
+    "JPEGTables",
+    "YCbCrSubSampling",
 }
 
 # These tags store the byte offset of a nested IFD within the *source*
@@ -186,6 +199,44 @@ def build_png_info(metadata: dict[str, Any]) -> PngInfo:
         info.add_text(name, value if isinstance(value, str) else json.dumps(value))
 
     return info
+
+
+def save_image_with_metadata(
+    image: np.ndarray,
+    out_path: Path,
+    metadata: dict[str, Any] | None,
+    jpeg_quality: int = 95,
+) -> bool:
+    """Save an RGB array to *out_path*, carrying over *metadata* as produced by
+    read_metadata() from a source image.  The format follows the extension.
+    Returns False if the file could not be written."""
+    suffix = out_path.suffix.lower()
+    save_kwargs: dict[str, Any] = {}
+    if suffix in (".jpg", ".jpeg"):
+        save_kwargs["quality"] = jpeg_quality
+    elif suffix in (".tif", ".tiff"):
+        save_kwargs["compression"] = "tiff_deflate"
+
+    if metadata:
+        dpi = extract_dpi(metadata)
+        if dpi is not None:
+            save_kwargs["dpi"] = (dpi, dpi)
+        if suffix == ".png":
+            save_kwargs["pnginfo"] = build_png_info(metadata)
+        else:
+            exif_bytes = build_exif_bytes(metadata)
+            if exif_bytes is not None:
+                save_kwargs["exif"] = exif_bytes
+
+    try:
+        Image.fromarray(image).save(out_path, **save_kwargs)
+    except OSError as exc:
+        # Imported here so this module still runs as a standalone script,
+        # where the common package isn't importable.
+        from common.logger import error
+        error(f"Failed to save image to {out_path}: {exc}")
+        return False
+    return True
 
 
 def read_exif_metadata(filepath: Path) -> dict[str, Any] | None:
