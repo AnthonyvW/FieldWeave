@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDoubleSpinBox, QGroupBox, QLabel, QSpinBox, QWidget
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QSpinBox, QWidget
 
 ORANGE = "#FFA500"
 NM_PER_MM = 1_000_000
@@ -12,6 +12,11 @@ class NoScrollDoubleSpinBox(QDoubleSpinBox):
 
 
 class NoScrollSpinBox(QSpinBox):
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class NoScrollComboBox(QComboBox):
     def wheelEvent(self, event) -> None:
         event.ignore()
 

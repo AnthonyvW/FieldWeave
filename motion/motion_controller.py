@@ -195,17 +195,23 @@ class MotionController:
         self._run_loop()
 
     def _connect(self) -> None:
-        """Probe available serial ports and open the first Marlin printer found."""
+        """Open the configured port, or probe available ports starting with the last one used."""
         baud = self.config.baud_rate
         indicators = [self.config.FIRMWARE_NAME, self.config.MACHINE_TYPE, "TF init", "echo:"]
 
         detected = [p.device for p in serial.tools.list_ports.comports()]
-        if not detected:
-            raise RuntimeError("No serial ports found. Is the printer connected?")
-
         info(f"Available ports: {detected}")
 
-        for dev in detected:
+        manual = self.config.com_port
+        if manual:
+            candidates = [manual]
+        else:
+            if not detected:
+                raise RuntimeError("No serial ports found. Is the printer connected?")
+            last = self.config.last_com_port
+            candidates = [last] + [d for d in detected if d != last] if last in detected else detected
+
+        for dev in candidates:
             debug(f"Trying {dev} ...")
             ser, lines = _probe_port(
                 port_device=dev,
@@ -220,10 +226,29 @@ class MotionController:
                 info(f"Printer found on {dev}")
                 for ln in lines[-10:]:
                     debug(f"[{dev}] {ln}")
+                self._remember_port(dev)
                 return
             warning(f"{dev} did not respond as a compatible printer ({len(lines)} line(s))")
 
-        raise RuntimeError(f"Printer not found on any port. Tried: {detected}")
+        if manual:
+            raise RuntimeError(
+                f"Printer not found on configured port {manual}. "
+                "Select a different port or Auto-detect in the navigation settings."
+            )
+        raise RuntimeError(f"Printer not found on any port. Tried: {candidates}")
+
+    def _remember_port(self, dev: str) -> None:
+        if self.config.last_com_port == dev:
+            return
+        self.config.last_com_port = dev
+        # Save from a fresh copy of the file so unsaved edits made in the
+        # settings dialog while probing are not persisted as a side effect.
+        try:
+            on_disk = self._config_manager.load()
+            on_disk.last_com_port = dev
+            self._config_manager.save(on_disk)
+        except Exception as exc:
+            warning(f"Could not save last COM port: {exc}")
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():

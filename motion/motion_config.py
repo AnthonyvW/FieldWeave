@@ -304,6 +304,10 @@ class MotionSystemSettings:
     FIRMWARE_NAME: str = "Marlin"
     MACHINE_TYPE: str = "Ender-3"
     baud_rate: int = 115200
+    # Serial port chosen in settings; empty string means auto-detect.
+    com_port: str = ""
+    # Port the controller last connected on, probed first during auto-detect.
+    last_com_port: str = ""
     max_x: int = 220  # Maximum X dimension in mm
     max_y: int = 235  # Maximum Y dimension in mm
     max_z: int = 220   # Maximum Z dimension in mm

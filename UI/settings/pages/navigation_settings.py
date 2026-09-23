@@ -120,8 +120,7 @@ class NavigationSettingsWidget(QWidget):
         s = self._live_settings()
         if s is not None:
             self._controller.apply_to_live(key, value, s)
-        current = self._controller._w[key].value()
-        self._controller.mark_field(key, current)
+        self._controller.mark_field(key, value)
         self._recheck_unsaved()
 
     def _on_nav_float(self, key: str, value: float) -> None:
