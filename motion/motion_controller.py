@@ -112,7 +112,7 @@ def _probe_port(
 class MotionState:
     """Current lifecycle state of the motion controller."""
     CONNECTING = "connecting"    # Worker thread is still starting up / probing serial
-    HOMING     = "homing"        # Connected to printer, running initial homing sequence
+    HOMING     = "homing"        # Connected to printer, running a homing sequence
     READY      = "ready"         # Connected, homed, and accepting commands
     FAULTED    = "faulted"       # Runtime fault (bad G-code response, timeout, etc.)
     FAILED     = "failed"        # Could not connect at all during initialisation
@@ -159,6 +159,7 @@ class MotionController:
 
         self._ready = threading.Event()
         self._homing = False
+        self._home_done: threading.Event | None = None
         self._init_error: Exception | None = None
 
         self._stop_event = threading.Event()
@@ -181,6 +182,9 @@ class MotionController:
             return MotionState.FAULTED
         if not self._ready.is_set():
             return MotionState.HOMING if self._homing else MotionState.CONNECTING
+        home_done = self._home_done
+        if home_done is not None and not home_done.is_set():
+            return MotionState.HOMING
         return MotionState.READY
 
     @property
@@ -545,8 +549,10 @@ class MotionController:
         if not self.config.homing_axes:
             warning("Ignoring home: homing is disabled for every axis")
             return
+        done: threading.Event | None = None
         for cmd in self._home_commands():
-            self._enqueue(cmd.gcode, message=cmd.message or "")
+            done = self._enqueue(cmd.gcode, message=cmd.message or "")
+        self._home_done = done
         if wait:
             self.wait_for_idle()
 

@@ -954,7 +954,7 @@ class NavigationWidget(QWidget):
             return
 
         ctx.motion.home()
-        self._update_position_display()
+        self._check_motion_ready()
 
     def _z_increase(self) -> None:
         """Increase Z height (subject to inversion)."""
