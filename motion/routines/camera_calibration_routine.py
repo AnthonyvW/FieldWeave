@@ -17,13 +17,16 @@ Usage::
     routine = CameraCalibrationRoutine(motion=ctx.motion)
     routine.start()
     routine.wait()
-    if ctx.machine_vision.is_calibrated:
+    if routine.result.success:
         print("Calibration succeeded")
+    else:
+        print(routine.result.get("error"))
 """
 
 from __future__ import annotations
 
 import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from typing import Generator
 import numpy as np
@@ -35,8 +38,6 @@ from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 
-# 1 tick = 0.01 mm = 10 000 nm
-_NM_PER_TICK = 10_000
 _NM_PER_MM = 1_000_000
 
 # Progress step indices (out of _TOTAL_STEPS)
@@ -68,15 +69,15 @@ class CameraCalibrationRoutine(AutomationRoutine):
     ----------
     motion:
         Active :class:`MotionControllerManager`.
-    move_x_ticks:
-        Distance to move in +X during calibration, in 0.01 mm tick units.
+    move_x_nm:
+        Distance to move in +X during calibration, in nanometres.
         ``None`` (default) reads the value from
-        ``machine_vision.settings.camera_calibration.move_x_ticks`` at
+        ``machine_vision.settings.camera_calibration.move_x_nm`` at
         runtime.
-    move_y_ticks:
-        Distance to move in +Y during calibration, in 0.01 mm tick units.
+    move_y_nm:
+        Distance to move in +Y during calibration, in nanometres.
         ``None`` (default) reads the value from
-        ``machine_vision.settings.camera_calibration.move_y_ticks`` at
+        ``machine_vision.settings.camera_calibration.move_y_nm`` at
         runtime.
     settle_s:
         Seconds to wait after each move before capturing a still frame.
@@ -84,6 +85,12 @@ class CameraCalibrationRoutine(AutomationRoutine):
     capture_timeout_s:
         Maximum seconds to wait for each still frame to arrive from the
         camera.
+
+    Result
+    ------
+    On success ``result.data`` holds ``calibration`` (the new
+    :class:`CameraCalibration`).  On failure it holds ``error``, a message
+    suitable for showing to the user.
     """
 
     job_name = "Camera Calibration"
@@ -92,16 +99,16 @@ class CameraCalibrationRoutine(AutomationRoutine):
         self,
         motion: MotionControllerManager,
         *,
-        move_x_ticks: int | None = None,
-        move_y_ticks: int | None = None,
+        move_x_nm: int | None = None,
+        move_y_nm: int | None = None,
         settle_s: float = 0.6,
         capture_timeout_s: float = 10.0,
     ) -> None:
         super().__init__(motion)
 
         # None means "read from settings at runtime".
-        self._move_x_ticks_override: int | None = move_x_ticks
-        self._move_y_ticks_override: int | None = move_y_ticks
+        self._move_x_nm_override: int | None = move_x_nm
+        self._move_y_nm_override: int | None = move_y_nm
         self._settle_s = settle_s
         self._capture_timeout_s = capture_timeout_s
 
@@ -118,28 +125,25 @@ class CameraCalibrationRoutine(AutomationRoutine):
 
         if not ctx.has_camera:
             error("[CameraCalibration] No camera available — aborting")
+            self._fail("No camera available.")
             return
 
         # Read move distances from settings unless the caller overrode them.
         cal_settings = mv.settings.camera_calibration
-        move_x_ticks: int = (
-            self._move_x_ticks_override
-            if self._move_x_ticks_override is not None
-            else cal_settings.move_x_ticks
+        move_x_nm: int = (
+            self._move_x_nm_override
+            if self._move_x_nm_override is not None
+            else cal_settings.move_x_nm
         )
-        move_y_ticks: int = (
-            self._move_y_ticks_override
-            if self._move_y_ticks_override is not None
-            else cal_settings.move_y_ticks
+        move_y_nm: int = (
+            self._move_y_nm_override
+            if self._move_y_nm_override is not None
+            else cal_settings.move_y_nm
         )
-        move_x_nm = move_x_ticks * _NM_PER_TICK
-        move_y_nm = move_y_ticks * _NM_PER_TICK
 
         info(
-            f"[CameraCalibration] move_x={move_x_ticks} ticks "
-            f"({move_x_nm / _NM_PER_MM:.3f} mm)  "
-            f"move_y={move_y_ticks} ticks "
-            f"({move_y_nm / _NM_PER_MM:.3f} mm)"
+            f"[CameraCalibration] move_x={move_x_nm / _NM_PER_MM:.3f} mm  "
+            f"move_y={move_y_nm / _NM_PER_MM:.3f} mm"
         )
 
         # ----------------------------------------------------------------
@@ -152,6 +156,7 @@ class CameraCalibrationRoutine(AutomationRoutine):
             frame = capture_still_frame(camera_manager, timeout_s=self._capture_timeout_s)
             if frame is None:
                 error(f"[CameraCalibration] Frame capture failed at {label}")
+                self._fail(f"Frame capture failed at the {label} position.")
             return frame
 
         # ----------------------------------------------------------------
@@ -304,25 +309,29 @@ class CameraCalibrationRoutine(AutomationRoutine):
             y_frame=frame_y,
             y_width=frame_y.shape[1],
             y_height=frame_y.shape[0],
-            ref_x=ref.x // _NM_PER_TICK,
-            ref_y=ref.y // _NM_PER_TICK,
-            ref_z=ref.z // _NM_PER_TICK,
-            move_x_ticks=move_x_ticks,
-            move_y_ticks=move_y_ticks,
+            ref_x=ref.x,
+            ref_y=ref.y,
+            ref_z=ref.z,
+            move_x_nm=move_x_nm,
+            move_y_nm=move_y_nm,
         )
 
         try:
             calibration = future.result(timeout=30.0)
+        except FutureTimeoutError:
+            error("[CameraCalibration] Calibration computation timed out")
+            self._fail("Calibration computation timed out.")
+            return
         except Exception as exc:
-            error(f"[CameraCalibration] Calibration computation failed: {exc!r}")
-            self._set_status("Failed — see log for details", _TOTAL_STEPS, _TOTAL_STEPS)
+            error(f"[CameraCalibration] Calibration computation failed: {exc}")
+            self._fail(str(exc))
             return
 
         self._set_status("Done", _TOTAL_STEPS, _TOTAL_STEPS)
         info(
             f"[CameraCalibration] Complete: "
-            f"ref=({ref.x // _NM_PER_TICK}, {ref.y // _NM_PER_TICK}) ticks"
-            f"  move_x={move_x_ticks} ticks  move_y={move_y_ticks} ticks"
+            f"ref=({ref_x_mm:.3f}, {ref_y_mm:.3f}) mm"
+            f"  move_x={move_x_nm / _NM_PER_MM:.3f} mm  move_y={move_y_nm / _NM_PER_MM:.3f} mm"
         )
 
         # Persist the reference position and calibration timestamp to motion settings.
@@ -335,3 +344,9 @@ class CameraCalibrationRoutine(AutomationRoutine):
             cal_pos.is_set = True
             cal_pos.last_calibrated_iso = datetime.now(timezone.utc).isoformat()
             ctx.motion._controller._config_manager.save(motion_settings)
+
+        self._set_result(success=True, calibration=calibration)
+
+    def _fail(self, message: str) -> None:
+        self._set_status(f"Failed — {message}", _TOTAL_STEPS, _TOTAL_STEPS)
+        self._set_result(success=False, error=message)

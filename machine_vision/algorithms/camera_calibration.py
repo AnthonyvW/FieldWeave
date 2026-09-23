@@ -5,7 +5,7 @@ Camera-to-stage spatial calibration for vision-guided movement.
 
 This module provides the pure calibration maths and image-processing helpers
 that map between image pixel coordinates and physical stage coordinates (in
-0.01 mm "tick" units).  It has no dependency on any printer controller,
+nanometres, matching ``motion.models.Position``).  It has no dependency on any printer controller,
 GUI framework, or Qt; all I/O and motion control remains the caller's
 responsibility.
 
@@ -17,18 +17,12 @@ Typical workflow
 4.  Call ``build_calibration`` with the three edge maps and the known move
     distances to obtain a ``CameraCalibration`` instance.
 5.  Call ``pixel_to_world_delta`` on any subsequent frame to convert a
-    pixel coordinate into a stage-coordinate delta (in ticks).
-
-Serialisation
--------------
-``CameraCalibration.to_dict`` / ``CameraCalibration.from_dict`` round-trip
-through plain Python dicts so the caller can persist the result via whatever
-config system is in use (e.g. ``MachineVisionSettingsManager``).
+    pixel coordinate into a stage-coordinate delta (in nanometres).
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 from dataclasses import dataclass
 from collections.abc import Callable
 
@@ -92,24 +86,24 @@ class CameraCalibration:
     """
     Immutable snapshot of a completed camera-to-stage calibration.
 
-    All coordinates use "tick" units (0.01 mm) to match the rest of the
-    printer controller.
+    All stage coordinates and distances are in nanometres, matching
+    ``motion.models.Position``.
 
     Attributes
     ----------
     M_est:
-        2×2 matrix that maps a world delta (in ticks) to a pixel delta.
+        2×2 matrix that maps a world delta (in nm) to a pixel delta.
         ``pixel_delta = M_est @ world_delta``
     M_inv:
         Inverse of ``M_est``.  Maps a pixel delta to a world delta.
         ``world_delta = M_inv @ pixel_delta``
     ref_x, ref_y, ref_z:
-        Stage position (in ticks) where calibration was performed.  Used as
+        Stage position (in nm) where calibration was performed.  Used as
         the origin for absolute vision-guided moves.
     image_width, image_height:
         Resolution of the images used during calibration.
-    move_x_ticks, move_y_ticks:
-        Calibration move distances (in ticks) that were used to build M_est.
+    move_x_nm, move_y_nm:
+        Calibration move distances (in nm) that were used to build M_est.
     dpi:
         Estimated camera resolution in dots-per-inch, derived from M_est.
         ``None`` if the calculation failed.
@@ -125,16 +119,16 @@ class CameraCalibration:
     image_width: int
     image_height: int
 
-    move_x_ticks: int
-    move_y_ticks: int
+    move_x_nm: int
+    move_y_nm: int
 
     dpi: float | None = None
 
     y_axis_orientation: CameraYAxisOrientation = "vertical"
     """
     Which image axis the world Y axis is primarily aligned with.
-    Derived from ``M_est``; not persisted.  Recomputed by ``from_dict``
-    and ``build_calibration``.
+    Derived from ``M_est``; not persisted.  Recomputed whenever a
+    calibration is loaded or built.
     """
 
     # ------------------------------------------------------------------
@@ -174,8 +168,8 @@ class CameraCalibration:
 
         Returns
         -------
-        (dx_ticks, dy_ticks):
-            Stage delta in tick units (0.01 mm).  Add to the current stage
+        (dx_nm, dy_nm):
+            Stage delta in nanometres.  Add to the current stage
             position to move the clicked point under the camera centre.
         """
         cx = image_center_x if image_center_x is not None else self.image_width / 2.0
@@ -187,69 +181,22 @@ class CameraCalibration:
         # M_inv maps a pixel delta to the stage move that *produced* that shift.
         # We want the move that *cancels* it — i.e. brings the clicked point to
         # centre — so we negate once.
-        dx_ticks = -float(world_delta[0, 0])
-        dy_ticks = -float(world_delta[1, 0])
-        return dx_ticks, dy_ticks
-
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise to a plain dict suitable for YAML / JSON storage.
-
-        All values are converted to native Python scalars (``float``, ``int``)
-        so that YAML serialisers that reject numpy types (``np.float64`` etc.)
-        do not fail.
-        """
-        def _to_float_list(arr: np.ndarray) -> list[list[float]]:
-            return [[float(v) for v in row] for row in arr]
-
-        return {
-            "M_est": _to_float_list(self.M_est),
-            "M_inv": _to_float_list(self.M_inv),
-            "ref_pos_x": self.ref_x,
-            "ref_pos_y": self.ref_y,
-            "ref_pos_z": self.ref_z,
-            "image_width": self.image_width,
-            "image_height": self.image_height,
-            "move_x_ticks": self.move_x_ticks,
-            "move_y_ticks": self.move_y_ticks,
-            "dpi": float(self.dpi) if self.dpi is not None else None,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> CameraCalibration:
-        """
-        Deserialise from a plain dict (inverse of ``to_dict``).
-
-        Raises ``KeyError`` if required keys are missing and ``ValueError``
-        if the stored matrices are not 2×2.
-        """
-        M_est = np.array(d["M_est"], dtype=np.float64)
-        M_inv = np.array(d["M_inv"], dtype=np.float64)
-
-        if M_est.shape != (2, 2) or M_inv.shape != (2, 2):
-            raise ValueError("Calibration matrices must be 2×2")
-
-        return cls(
-            M_est=M_est,
-            M_inv=M_inv,
-            ref_x=int(d["ref_pos_x"]),
-            ref_y=int(d["ref_pos_y"]),
-            ref_z=int(d["ref_pos_z"]),
-            image_width=int(d["image_width"]),
-            image_height=int(d["image_height"]),
-            move_x_ticks=int(d.get("move_x_ticks", 100)),
-            move_y_ticks=int(d.get("move_y_ticks", 100)),
-            dpi=d.get("dpi"),
-            y_axis_orientation=derive_y_axis_orientation(M_est),
-        )
+        dx_nm = -float(world_delta[0, 0])
+        dy_nm = -float(world_delta[1, 0])
+        return dx_nm, dy_nm
 
 
 # ---------------------------------------------------------------------------
 # Image processing helpers
 # ---------------------------------------------------------------------------
+
+CALIBRATION_WORKING_LONG_SIDE = 2560
+
+# An empty or featureless edge map makes cv2.phaseCorrelate return exactly
+# half the image size with a near-zero response, which would otherwise be
+# stored as a wildly wrong calibration.
+MIN_PHASE_CORRELATION_RESPONSE = 0.05
+
 
 def rgb_to_gray(arr: np.ndarray) -> np.ndarray:
     """
@@ -267,6 +214,37 @@ def rgb_to_gray(arr: np.ndarray) -> np.ndarray:
     if arr.ndim == 2:
         return arr
     return cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+
+
+def downscale_to_working_size(gray_u8: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """
+    Shrink a greyscale image so its long side is at most
+    ``CALIBRATION_WORKING_LONG_SIDE`` pixels.
+
+    Canny's thresholds are absolute gradient values, and a higher-resolution
+    sensor viewing the same optics spreads each edge over more pixels, so
+    per-pixel gradients shrink and most edges fall below threshold.  Working
+    at a fixed resolution keeps edge detection independent of the camera.
+
+    Returns
+    -------
+    (image, scale_x, scale_y):
+        The (possibly) downscaled image and the per-axis factors that convert
+        a shift measured in it back to original-resolution pixels.  They
+        differ slightly when the image cannot be shrunk by an exact ratio,
+        because each output dimension is rounded to a whole pixel.
+    """
+    h, w = gray_u8.shape[:2]
+    long_side = max(h, w)
+    if long_side <= CALIBRATION_WORKING_LONG_SIDE:
+        return gray_u8, 1.0, 1.0
+    factor = CALIBRATION_WORKING_LONG_SIDE / long_side
+    small = cv2.resize(
+        gray_u8,
+        (round(w * factor), round(h * factor)),
+        interpolation=cv2.INTER_AREA,
+    )
+    return small, w / small.shape[1], h / small.shape[0]
 
 
 def compute_edge_map(gray_u8: np.ndarray) -> np.ndarray:
@@ -332,13 +310,14 @@ def build_calibration(
     edges_base: np.ndarray,
     edges_x: np.ndarray,
     edges_y: np.ndarray,
-    move_x_ticks: int,
-    move_y_ticks: int,
+    move_x_nm: int,
+    move_y_nm: int,
     ref_x: int,
     ref_y: int,
     ref_z: int,
     image_width: int,
     image_height: int,
+    pixel_scale: tuple[float, float] = (1.0, 1.0),
 ) -> CameraCalibration:
     """
     Compute the pixel-to-world calibration matrix from three edge maps.
@@ -346,8 +325,8 @@ def build_calibration(
     The caller must supply edge maps captured at three stage positions:
 
     * ``edges_base`` — at the reference (origin) position.
-    * ``edges_x``   — after moving ``move_x_ticks`` in +X from base.
-    * ``edges_y``   — after moving ``move_y_ticks`` in +Y from base
+    * ``edges_x``   — after moving ``move_x_nm`` in +X from base.
+    * ``edges_y``   — after moving ``move_y_nm`` in +Y from base
       (the stage must have returned to base before this capture).
 
     Phase correlation between base↔x and base↔y gives the pixel shift
@@ -356,20 +335,24 @@ def build_calibration(
 
     .. code-block:: text
 
-        M_est @ [move_x_ticks, 0     ]ᵀ = [dpx_x, dpy_x]ᵀ
-        M_est @ [0,      move_y_ticks]ᵀ = [dpx_y, dpy_y]ᵀ
+        M_est @ [move_x_nm, 0        ]ᵀ = [dpx_x, dpy_x]ᵀ
+        M_est @ [0,         move_y_nm]ᵀ = [dpx_y, dpy_y]ᵀ
 
     Parameters
     ----------
     edges_base, edges_x, edges_y:
         Float32 normalised edge maps of identical shape, produced by
         ``compute_edge_map``.
-    move_x_ticks, move_y_ticks:
-        Calibration move distances in tick units (0.01 mm).
+    move_x_nm, move_y_nm:
+        Calibration move distances in nanometres.
     ref_x, ref_y, ref_z:
-        Stage position in ticks at the time ``edges_base`` was captured.
+        Stage position in nanometres at the time ``edges_base`` was captured.
     image_width, image_height:
-        Pixel dimensions of the images used for calibration.
+        Pixel dimensions of the original (full-resolution) frames.
+    pixel_scale:
+        ``(scale_x, scale_y)`` converting a shift measured in the edge maps
+        to original-resolution pixels, as returned by
+        ``downscale_to_working_size``.
 
     Returns
     -------
@@ -378,16 +361,33 @@ def build_calibration(
     Raises
     ------
     ValueError
-        If the world matrix is singular (moves were collinear or too small
-        to produce measurable pixel shifts).
+        If either shift could not be measured reliably, or the world matrix
+        is singular (moves were collinear or too small to produce measurable
+        pixel shifts).
     """
-    dpx_x, dpy_x, _resp_x = phase_correlation_shift(edges_base, edges_x)
-    dpx_y, dpy_y, _resp_y = phase_correlation_shift(edges_base, edges_y)
+    dpx_x, dpy_x, resp_x = phase_correlation_shift(edges_base, edges_x)
+    dpx_y, dpy_y, resp_y = phase_correlation_shift(edges_base, edges_y)
+
+    for axis, resp in (("X", resp_x), ("Y", resp_y)):
+        if resp < MIN_PHASE_CORRELATION_RESPONSE:
+            raise ValueError(
+                f"Calibration failed: the {axis} move could not be matched "
+                f"(phase correlation response {resp:.3f} < "
+                f"{MIN_PHASE_CORRELATION_RESPONSE}).  Make sure the sample is "
+                "in focus and has visible texture, and that the move keeps "
+                "most of the field of view overlapping."
+            )
+
+    scale_x, scale_y = pixel_scale
+    dpx_x *= scale_x
+    dpy_x *= scale_y
+    dpx_y *= scale_x
+    dpy_y *= scale_y
 
     # Build 2×2 world and pixel matrices; solve M_est = pixel_mat @ world_inv.
     world_mat = np.array(
-        [[move_x_ticks, 0.0],
-         [0.0,          move_y_ticks]],
+        [[move_x_nm, 0.0],
+         [0.0,       move_y_nm]],
         dtype=np.float64,
     ).T  # columns are world vectors
 
@@ -414,8 +414,8 @@ def build_calibration(
         ref_z=ref_z,
         image_width=image_width,
         image_height=image_height,
-        move_x_ticks=move_x_ticks,
-        move_y_ticks=move_y_ticks,
+        move_x_nm=move_x_nm,
+        move_y_nm=move_y_nm,
         y_axis_orientation=derive_y_axis_orientation(M_est),
     )
 
@@ -442,24 +442,30 @@ class CalibrationBuild(VisionAlgorithm):
         base_bytes: bytes, base_width: int, base_height: int,
         x_bytes: bytes,    x_width: int,    x_height: int,
         y_bytes: bytes,    y_width: int,    y_height: int,
-        move_x_ticks: int, move_y_ticks: int,
+        move_x_nm: int, move_y_nm: int,
         ref_x: int, ref_y: int, ref_z: int,
     ) -> CameraCalibration:
-        def _to_edge(fb: bytes, w: int, h: int) -> np.ndarray:
+        def _to_edge(fb: bytes, w: int, h: int) -> tuple[np.ndarray, tuple[float, float]]:
             arr = np.frombuffer(fb, dtype=np.uint8).reshape((h, w, 3))
-            return compute_edge_map(rgb_to_gray(arr))
+            small, scale_x, scale_y = downscale_to_working_size(rgb_to_gray(arr))
+            return compute_edge_map(small), (scale_x, scale_y)
+
+        edges_base, scale = _to_edge(base_bytes, base_width, base_height)
+        edges_x, _ = _to_edge(x_bytes, x_width, x_height)
+        edges_y, _ = _to_edge(y_bytes, y_width, y_height)
 
         calibration = build_calibration(
-            edges_base=_to_edge(base_bytes, base_width, base_height),
-            edges_x=_to_edge(x_bytes, x_width, x_height),
-            edges_y=_to_edge(y_bytes, y_width, y_height),
-            move_x_ticks=move_x_ticks,
-            move_y_ticks=move_y_ticks,
+            edges_base=edges_base,
+            edges_x=edges_x,
+            edges_y=edges_y,
+            move_x_nm=move_x_nm,
+            move_y_nm=move_y_nm,
             ref_x=ref_x,
             ref_y=ref_y,
             ref_z=ref_z,
             image_width=base_width,
             image_height=base_height,
+            pixel_scale=scale,
         )
         self._settings.camera_calibration.calibration = calibration
         self._save_settings()

@@ -132,7 +132,6 @@ if TYPE_CHECKING:
     from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 
 _NM_PER_MM = 1_000_000
-_NM_PER_TICK = 10_000
 
 _FOCUS_DROP_REACQUIRE = 0.2   # score drop below reference that triggers re-descent
 _FOCUS_DROP_GAP       = 0.35  # score drop in a single step that indicates a gap/end
@@ -659,7 +658,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             #   cal_x = sensor_x * (cal_w / sensor_w)
             #   cal_y = sensor_y * (cal_h / sensor_h)
             # Substituting the full sensor dimension cancels, giving cal_w / cal_h
-            # directly.  pixel_to_world_delta then gives the stage travel in ticks
+            # directly.  pixel_to_world_delta then gives the stage travel in nm
             # required to shift the full frame width/height to centre — i.e. the FOV.
             if axis == "y":
                 cal_offset_x = 0.0
@@ -669,7 +668,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 cal_offset_y = 0.0
 
             fov_delta = cal.pixel_to_world_delta(cal_offset_x, cal_offset_y)
-            fov_nm = abs(fov_delta[1] if axis == "y" else fov_delta[0]) * _NM_PER_TICK
+            fov_nm = abs(fov_delta[1] if axis == "y" else fov_delta[0])
 
             if fov_nm <= 0:
                 error(f"[TreeCoreImaging] Derived FOV is zero — skipping {slot_label}")

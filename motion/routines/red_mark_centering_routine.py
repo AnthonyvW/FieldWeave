@@ -189,7 +189,7 @@ class RedMarkCenteringRoutine(AutomationRoutine):
         else:
             away_pixel = band_lo_mark - centre_pos
 
-        # pixel_to_world_delta returns the stage move (in ticks) to bring the
+        # pixel_to_world_delta returns the stage move (in nm) to bring the
         # given pixel coordinate to the image centre.  We only need it once,
         # for the mark itself.  The away-move is a proportional fraction of
         # that same delta — scaling by away_pixel / pixel_offset_to_mark gives

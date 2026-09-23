@@ -17,7 +17,13 @@ from typing import Any, Literal, Union
 
 from common.generic_config import ConfigManager
 from common.logger import info
-from machine_vision.algorithms.camera_calibration import CameraCalibration, CameraYAxisOrientation
+import numpy as np
+
+from machine_vision.algorithms.camera_calibration import (
+    CameraCalibration,
+    CameraYAxisOrientation,
+    derive_y_axis_orientation,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -437,23 +443,23 @@ class CameraCalibrationSettings:
     """
     Persistent camera-calibration configuration.
 
-    ``move_x_ticks`` and ``move_y_ticks`` are the distances (in 0.01 mm tick
-    units) that the stage moves during the calibration routine.  They are
+    ``move_x_nm`` and ``move_y_nm`` are the distances (in nanometres) that
+    the stage moves during the calibration routine.  They are
     persisted here so that the UI can edit them and the printer controller can
     read them without hard-coding defaults.
 
     ``calibration`` holds the last successfully computed
     ``CameraCalibration``, serialised to/from a plain dict via
-    ``CameraCalibration.to_dict`` / ``CameraCalibration.from_dict``.  It is
+    ``_dump_camera_calibration`` / ``_load_camera_calibration``.  It is
     ``None`` when no calibration has been performed yet or after
     ``clear_calibration`` is called.
     """
 
-    move_x_ticks: int = 100
-    """Distance to move in +X during calibration (0.01 mm units; 100 = 1 mm)."""
+    move_x_nm: int = 1_000_000
+    """Distance to move in +X during calibration (nm; 1 000 000 = 1 mm)."""
 
-    move_y_ticks: int = 100
-    """Distance to move in +Y during calibration (0.01 mm units; 100 = 1 mm)."""
+    move_y_nm: int = 1_000_000
+    """Distance to move in +Y during calibration (nm; 1 000 000 = 1 mm)."""
 
     calibration: CameraCalibration | None = None
     """Most recently computed calibration, or None if uncalibrated."""
@@ -471,10 +477,10 @@ class CameraCalibrationSettings:
         return self.calibration.y_axis_orientation
 
     def validate(self) -> None:
-        if self.move_x_ticks <= 0:
-            raise ValueError("move_x_ticks must be > 0")
-        if self.move_y_ticks <= 0:
-            raise ValueError("move_y_ticks must be > 0")
+        if self.move_x_nm <= 0:
+            raise ValueError("move_x_nm must be > 0")
+        if self.move_y_nm <= 0:
+            raise ValueError("move_y_nm must be > 0")
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +677,71 @@ def _load_background(d: dict[str, Any]) -> BackgroundDetectionSettings:
     )
 
 
+# Stage unit used by calibrations saved before the switch to nanometres.
+_LEGACY_NM_PER_TICK = 10_000
+
+
+def _load_camera_calibration(d: dict[str, Any]) -> CameraCalibration:
+    """
+    Calibrations saved before stage units moved to nanometres (identified by
+    ``move_x_ticks`` instead of ``move_x_nm``) stored everything in 0.01 mm
+    ticks; they are converted on load so they stay usable.
+
+    Raises ``KeyError`` if required keys are missing and ``ValueError`` if the
+    stored matrices are not 2×2.
+    """
+    M_est = np.array(d["M_est"], dtype=np.float64)
+    M_inv = np.array(d["M_inv"], dtype=np.float64)
+
+    if M_est.shape != (2, 2) or M_inv.shape != (2, 2):
+        raise ValueError("Calibration matrices must be 2×2")
+
+    if "move_x_nm" in d:
+        nm_per_unit = 1
+        move_x = d["move_x_nm"]
+        move_y = d["move_y_nm"]
+    else:
+        nm_per_unit = _LEGACY_NM_PER_TICK
+        move_x = d.get("move_x_ticks", 100)
+        move_y = d.get("move_y_ticks", 100)
+        M_est = M_est / nm_per_unit
+        M_inv = M_inv * nm_per_unit
+
+    return CameraCalibration(
+        M_est=M_est,
+        M_inv=M_inv,
+        ref_x=int(d["ref_pos_x"]) * nm_per_unit,
+        ref_y=int(d["ref_pos_y"]) * nm_per_unit,
+        ref_z=int(d["ref_pos_z"]) * nm_per_unit,
+        image_width=int(d["image_width"]),
+        image_height=int(d["image_height"]),
+        move_x_nm=int(move_x) * nm_per_unit,
+        move_y_nm=int(move_y) * nm_per_unit,
+        dpi=d.get("dpi"),
+        y_axis_orientation=derive_y_axis_orientation(M_est),
+    )
+
+
+def _dump_camera_calibration(cal: CameraCalibration) -> dict[str, Any]:
+    # yaml.safe_dump rejects numpy arrays and scalars, so everything is
+    # converted to native Python types.
+    def _to_float_list(arr: np.ndarray) -> list[list[float]]:
+        return [[float(v) for v in row] for row in arr]
+
+    return {
+        "M_est": _to_float_list(cal.M_est),
+        "M_inv": _to_float_list(cal.M_inv),
+        "ref_pos_x": cal.ref_x,
+        "ref_pos_y": cal.ref_y,
+        "ref_pos_z": cal.ref_z,
+        "image_width": cal.image_width,
+        "image_height": cal.image_height,
+        "move_x_nm": cal.move_x_nm,
+        "move_y_nm": cal.move_y_nm,
+        "dpi": float(cal.dpi) if cal.dpi is not None else None,
+    }
+
+
 class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
     """
     Persistent configuration manager for machine-vision settings.
@@ -718,12 +789,12 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         calibration: CameraCalibration | None = None
         if cal_dict:
             try:
-                calibration = CameraCalibration.from_dict(cal_dict)
+                calibration = _load_camera_calibration(cal_dict)
             except Exception:
                 pass  # Corrupt saved calibration; start uncalibrated.
         camera_calibration = CameraCalibrationSettings(
-            move_x_ticks=cal_data.get("move_x_ticks", D.move_x_ticks),
-            move_y_ticks=cal_data.get("move_y_ticks", D.move_y_ticks),
+            move_x_nm=cal_data.get("move_x_nm", D.move_x_nm),
+            move_y_nm=cal_data.get("move_y_nm", D.move_y_nm),
             calibration=calibration,
         )
 
@@ -818,9 +889,9 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 },
             },
             "camera_calibration": {
-                "move_x_ticks": cc.move_x_ticks,
-                "move_y_ticks": cc.move_y_ticks,
-                "calibration": cc.calibration.to_dict() if cc.calibration is not None else None,
+                "move_x_nm": cc.move_x_nm,
+                "move_y_nm": cc.move_y_nm,
+                "calibration": _dump_camera_calibration(cc.calibration) if cc.calibration is not None else None,
             },
             "inspect_calibration": {
                 "preview": {

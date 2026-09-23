@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 # All Position coordinates are stored internally in nanometers.
 # 1 mm = 1_000_000 nm
 _NM_PER_MM = 1_000_000
-_NM_PER_TICK = 10_000
 
 
 @dataclass
@@ -68,8 +67,8 @@ def pixels_to_stage_delta(
     cal_h = float(calibration.image_height)
     cal_x = sensor_pixel_x * (cal_w / sensor_w)
     cal_y = sensor_pixel_y * (cal_h / sensor_h)
-    dx_ticks, dy_ticks = calibration.pixel_to_world_delta(cal_x, cal_y)
-    return int(round(dx_ticks * _NM_PER_TICK)), int(round(dy_ticks * _NM_PER_TICK))
+    dx_nm, dy_nm = calibration.pixel_to_world_delta(cal_x, cal_y)
+    return int(round(dx_nm)), int(round(dy_nm))
 
 
 def distance_to_stage_delta(
@@ -93,9 +92,9 @@ def distance_to_stage_delta(
     else:
         ref_x = (sensor_w / 2.0) * (cal_w / sensor_w)
         ref_y = sensor_h * (cal_h / sensor_h)
-    edge_ticks_x, edge_ticks_y = calibration.pixel_to_world_delta(ref_x, ref_y)
-    full_frame_nm_x = abs(int(round(edge_ticks_x * _NM_PER_TICK))) * 2
-    full_frame_nm_y = abs(int(round(edge_ticks_y * _NM_PER_TICK))) * 2
+    edge_nm_x, edge_nm_y = calibration.pixel_to_world_delta(ref_x, ref_y)
+    full_frame_nm_x = abs(int(round(edge_nm_x))) * 2
+    full_frame_nm_y = abs(int(round(edge_nm_y))) * 2
     if axis == "x":
         scale = full_frame_nm_x / sensor_w if sensor_w > 0 else 1.0
         return int(round(distance_nm * scale / full_frame_nm_x * full_frame_nm_x)), 0
@@ -120,11 +119,11 @@ def fraction_to_stage_delta(
     if axis == "x":
         ref_x = sensor_w * (cal_w / sensor_w)
         ref_y = (sensor_h / 2.0) * (cal_h / sensor_h)
-        ticks_x, ticks_y = calibration.pixel_to_world_delta(ref_x, ref_y)
-        full_nm = abs(int(round(ticks_x * _NM_PER_TICK))) * 2
+        edge_nm_x, _ = calibration.pixel_to_world_delta(ref_x, ref_y)
+        full_nm = abs(int(round(edge_nm_x))) * 2
         return int(round(full_nm * fraction)), 0
     ref_x = (sensor_w / 2.0) * (cal_w / sensor_w)
     ref_y = sensor_h * (cal_h / sensor_h)
-    ticks_x, ticks_y = calibration.pixel_to_world_delta(ref_x, ref_y)
-    full_nm = abs(int(round(ticks_y * _NM_PER_TICK))) * 2
+    _, edge_nm_y = calibration.pixel_to_world_delta(ref_x, ref_y)
+    full_nm = abs(int(round(edge_nm_y))) * 2
     return 0, int(round(full_nm * fraction))

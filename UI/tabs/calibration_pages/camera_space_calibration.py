@@ -4,9 +4,11 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QTextEdit,
@@ -21,8 +23,11 @@ from UI.widgets.navigation_widget import NavigationWidget
 from UI.widgets.preview_overlay.interaction_mode import PreviewModeSpec, ModeToken
 from common.app_context import get_app_context, open_settings
 from common.logger import error, info
+from motion.motion_controller_manager import MotionState
 
 _NM_PER_MM = 1_000_000
+_FALLBACK_STEP_NM = 40_000
+_MAX_MOVE_MM = 50.0
 
 _STEPS: list[tuple[str, str]] = [
     (
@@ -37,7 +42,9 @@ _STEPS: list[tuple[str, str]] = [
     ),
     (
         "Start Calibration Capture",
-        "Press \"Start Capture\" to begin the automated calibration sequence.\n\n",
+        "Press \"Start Capture\" to begin the automated calibration sequence.\n\n"
+        "The stage moves by the X and Y distances below. Each move should shift the image by roughly "
+        "half to a third of the field of view.",
     ),
     (
         "Verify the coordinate mapping",
@@ -270,6 +277,13 @@ class CameraSpaceStepsWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
+        self._move_x_spin = self._add_move_row(layout, "X Move:")
+        self._move_y_spin = self._add_move_row(layout, "Y Move:")
+
+        self._min_move_label = QLabel()
+        self._min_move_label.setObjectName("AreaScanMinLabel")
+        layout.addWidget(self._min_move_label)
+
         self._start_capture_btn = QPushButton("Start Capture")
         self._start_capture_btn.setObjectName("CalStartCapture")
         self._start_capture_btn.setMinimumHeight(34)
@@ -285,6 +299,77 @@ class CameraSpaceStepsWidget(QWidget):
 
         widget.hide()
         return widget
+
+    def _add_move_row(self, layout: QVBoxLayout, label: str) -> QDoubleSpinBox:
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+        spin = QDoubleSpinBox()
+        spin.wheelEvent = lambda e: e.ignore()
+        spin.setSuffix(" mm")
+        spin.editingFinished.connect(self._save_move_distances)
+        row.addWidget(spin)
+        layout.addLayout(row)
+        return spin
+
+    @staticmethod
+    def _machine_step_nm() -> int:
+        motion = get_app_context().motion
+        if motion is not None and motion.settings is not None:
+            return motion.settings.step_size
+        return _FALLBACK_STEP_NM
+
+    @staticmethod
+    def _decimals_for_step(step_nm: int) -> int:
+        """Fewest decimal places (at least 2) that show a multiple of the step exactly in mm."""
+        decimals = 2
+        while decimals < 6 and step_nm % 10 ** (6 - decimals) != 0:
+            decimals += 1
+        return decimals
+
+    @staticmethod
+    def _snap_to_step_nm(distance_nm: float, step_nm: int) -> int:
+        return max(1, round(distance_nm / step_nm)) * step_nm
+
+    def _load_move_distances(self) -> None:
+        # Read on every visit so a step size changed in settings takes effect.
+        step_nm = self._machine_step_nm()
+        step_mm = step_nm / _NM_PER_MM
+        decimals = self._decimals_for_step(step_nm)
+        self._min_move_label.setText(f"(min: {step_mm:.{decimals}f} mm)")
+
+        cal_settings = get_app_context().machine_vision.settings.camera_calibration
+        for spin, move_nm in (
+            (self._move_x_spin, cal_settings.move_x_nm),
+            (self._move_y_spin, cal_settings.move_y_nm),
+        ):
+            spin.blockSignals(True)
+            spin.setDecimals(decimals)
+            spin.setRange(step_mm, _MAX_MOVE_MM)
+            spin.setSingleStep(step_mm)
+            spin.setValue(self._snap_to_step_nm(move_nm, step_nm) / _NM_PER_MM)
+            spin.blockSignals(False)
+
+    def _save_move_distances(self) -> None:
+        mv = get_app_context().machine_vision
+        cal_settings = mv.settings.camera_calibration
+        step_nm = self._machine_step_nm()
+        move_x_nm = self._snap_to_step_nm(self._move_x_spin.value() * _NM_PER_MM, step_nm)
+        move_y_nm = self._snap_to_step_nm(self._move_y_spin.value() * _NM_PER_MM, step_nm)
+        for spin, move_nm in ((self._move_x_spin, move_x_nm), (self._move_y_spin, move_y_nm)):
+            spin.blockSignals(True)
+            spin.setValue(move_nm / _NM_PER_MM)
+            spin.blockSignals(False)
+        if (move_x_nm, move_y_nm) == (cal_settings.move_x_nm, cal_settings.move_y_nm):
+            return
+        cal_settings.move_x_nm = move_x_nm
+        cal_settings.move_y_nm = move_y_nm
+        mv.save_settings()
+        decimals = self._move_x_spin.decimals()
+        info(
+            f"[CameraSpaceCalibration] Calibration moves set to "
+            f"X={move_x_nm / _NM_PER_MM:.{decimals}f} mm  "
+            f"Y={move_y_nm / _NM_PER_MM:.{decimals}f} mm"
+        )
 
     def _set_crosshair(self, enabled: bool) -> None:
         if self._mode_token is not None:
@@ -332,11 +417,23 @@ class CameraSpaceStepsWidget(QWidget):
         # Step 3 (index 2) shows capture controls; Next is gated on completion
         self._capture_widget.setVisible(self._current_step == 2)
         if self._current_step == 2:
+            self._load_move_distances()
             self._next_btn.setEnabled(self._capture_complete)
         else:
             self._next_btn.setEnabled(True)
 
         self._set_status("")
+
+    def _motion_not_ready_reason(self) -> str | None:
+        motion = get_app_context().motion
+        state = motion.get_state() if motion is not None else MotionState.FAILED
+        if state == MotionState.READY:
+            return None
+        if state == MotionState.HOMING:
+            return "Wait for the motion system to finish homing before continuing"
+        if state in (MotionState.FAILED, MotionState.FAULTED):
+            return "Motion system is not connected"
+        return "Wait for the motion system to finish connecting before continuing"
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
@@ -366,6 +463,12 @@ class CameraSpaceStepsWidget(QWidget):
             pass
 
     def _next_step(self) -> None:
+        # The stage can't be positioned before homing, so step 2 (index 1) is the gate.
+        if self._current_step == 1:
+            reason = self._motion_not_ready_reason()
+            if reason is not None:
+                get_app_context().toast.warning(reason, duration=3000)
+                return
         if self._current_step < self._total_steps - 1:
             self._current_step += 1
             self._update_step_display()
@@ -481,6 +584,9 @@ class CameraSpaceStepsWidget(QWidget):
             self._set_status("No camera available.")
             return
 
+        # Commits a typed value even if the spin box never lost focus.
+        self._save_move_distances()
+
         try:
             from motion.routines.camera_calibration_routine import CameraCalibrationRoutine
             self._routine = CameraCalibrationRoutine(motion=motion)
@@ -492,12 +598,17 @@ class CameraSpaceStepsWidget(QWidget):
             return
 
         self._latest_activity: str = ""
+        self._set_move_spins_enabled(False)
         self._start_capture_btn.setEnabled(False)
         self._stop_capture_btn.setVisible(True)
         self._prev_btn.setEnabled(False)
         self._next_btn.setEnabled(False)
         self._set_status("Running…")
         self._poll_timer.start()
+
+    def _set_move_spins_enabled(self, enabled: bool) -> None:
+        self._move_x_spin.setEnabled(enabled)
+        self._move_y_spin.setEnabled(enabled)
 
     def _on_stop_capture_clicked(self) -> None:
         if self._routine is not None:
@@ -516,24 +627,26 @@ class CameraSpaceStepsWidget(QWidget):
 
     def _poll_capture_state(self) -> None:
         if self._routine is None or not self._routine.is_running:
-            final_activity = getattr(self, "_latest_activity", "")
             self._poll_timer.stop()
+            routine = self._routine
             self._routine = None
+            self._set_move_spins_enabled(True)
             self._start_capture_btn.setEnabled(True)
             self._stop_capture_btn.setVisible(False)
             self._prev_btn.setEnabled(self._current_step > 0)
 
-            try:
-                succeeded = get_app_context().machine_vision.is_calibrated
-            except Exception:
-                succeeded = False
-
-            if succeeded:
+            result = routine.result if routine is not None else None
+            if result is not None and result.success:
                 self._capture_complete = True
                 self._next_step()
-            else:
-                if final_activity:
-                    self._set_status(final_activity)
+                return
+
+            message = result.get("error") if result is not None else None
+            if message is None:
+                self._set_status("Calibration did not complete.")
+                return
+            self._set_status("Calibration failed.")
+            QMessageBox.warning(self, "Camera Calibration Failed", message)
             return
 
         activity = getattr(self, "_latest_activity", "")
