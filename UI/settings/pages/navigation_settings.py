@@ -33,6 +33,7 @@ from common.app_context import get_app_context
 from common.logger import error, info
 from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
 
+from UI.settings.pages.navigation.axes_settings import AxesSettingsWidget
 from UI.settings.pages.navigation.controller_settings import ControllerSettingsWidget
 from UI.settings.pages.navigation.navigation_group_settings import NavigationGroupSettingsWidget
 
@@ -40,7 +41,7 @@ from UI.settings.pages.navigation.navigation_group_settings import NavigationGro
 class NavigationSettingsWidget(QWidget):
     """Full settings page for navigation / motion controller configuration."""
 
-    _GROUP_NAMES = ["Controller", "Navigation"]
+    _GROUP_NAMES = ["Controller", "Axes", "Navigation"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -84,6 +85,10 @@ class NavigationSettingsWidget(QWidget):
         self._controller.connect_signals(self._on_controller_changed, self._on_connect_port)
         cl.addWidget(self._controller)
 
+        self._axes = AxesSettingsWidget()
+        self._axes.connect_signals(self._on_axes_check)
+        cl.addWidget(self._axes)
+
         self._navigation = NavigationGroupSettingsWidget()
         self._navigation.connect_signals(
             self._on_nav_float,
@@ -95,6 +100,7 @@ class NavigationSettingsWidget(QWidget):
 
         if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
             self.parent_dialog.register_group_box("Navigation", "Controller", self._controller)
+            self.parent_dialog.register_group_box("Navigation", "Axes", self._axes)
             self.parent_dialog.register_group_box("Navigation", "Navigation", self._navigation)
 
         cl.addStretch()
@@ -113,8 +119,10 @@ class NavigationSettingsWidget(QWidget):
 
     def _populate_from_settings(self, s: MotionSystemSettings) -> None:
         self._controller.populate(s)
+        self._axes.populate(s)
         self._navigation.populate(s)
         self._controller.snapshot(s)
+        self._axes.snapshot(s)
         self._navigation.snapshot(s)
         self._set_unsaved(False)
 
@@ -123,6 +131,13 @@ class NavigationSettingsWidget(QWidget):
         if s is not None:
             self._controller.apply_to_live(key, value, s)
         self._controller.mark_field(key, value)
+        self._recheck_unsaved()
+
+    def _on_axes_check(self, key: str, value: bool) -> None:
+        s = self._live_settings()
+        if s is not None:
+            self._axes.apply_to_live(key, value, s)
+        self._axes.mark_field(key, value)
         self._recheck_unsaved()
 
     def _on_nav_float(self, key: str, value: float) -> None:
@@ -149,11 +164,13 @@ class NavigationSettingsWidget(QWidget):
 
     def _recheck_unsaved(self) -> None:
         controller_changed = self._controller.has_changes()
+        axes_changed = self._axes.has_changes()
         nav_changed = self._navigation.has_changes()
-        has_changes = controller_changed or nav_changed
+        has_changes = controller_changed or axes_changed or nav_changed
 
         if self.parent_dialog and hasattr(self.parent_dialog, "set_category_modified"):
             self.parent_dialog.set_category_modified("Navigation", controller_changed, "Controller")
+            self.parent_dialog.set_category_modified("Navigation", axes_changed, "Axes")
             self.parent_dialog.set_category_modified("Navigation", nav_changed, "Navigation")
 
         self._set_unsaved(has_changes)
@@ -165,8 +182,10 @@ class NavigationSettingsWidget(QWidget):
         self._settings_manager.save(s)
         reconnect = self._controller.connection_changed(s)
         self._controller.snapshot(s)
+        self._axes.snapshot(s)
         self._navigation.snapshot(s)
         self._controller.clear_orange()
+        self._axes.clear_orange()
         self._navigation.clear_orange()
         self._recheck_unsaved()
         self._set_unsaved(False)

@@ -46,6 +46,7 @@ from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position, fraction_to_stage_delta
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XYZ_HOMED
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.red_mark_centering_routine import RedMarkCenteringRoutine
 
@@ -75,6 +76,7 @@ class SlotCalibrationRoutine(AutomationRoutine):
     """
 
     job_name = "Slot Calibration"
+    requirements = XYZ_HOMED
 
     def __init__(
         self,

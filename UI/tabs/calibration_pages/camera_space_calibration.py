@@ -20,8 +20,10 @@ from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.navigation_widget import NavigationWidget
+from UI.widgets.requirements_banner import RequirementsBanner
 from UI.widgets.preview_overlay.interaction_mode import PreviewModeSpec, ModeToken
 from common.app_context import get_app_context, open_settings
+from motion.routines.camera_calibration_routine import CameraCalibrationRoutine
 from common.logger import error, info
 from motion.motion_controller_manager import MotionState
 
@@ -122,10 +124,15 @@ class CameraSpaceCalibrationWidget(QWidget):
         main_layout.addWidget(self._description_label)
         main_layout.addStretch()
 
+        banner = RequirementsBanner(CameraCalibrationRoutine.requirements)
+        main_layout.addWidget(banner)
+
         start_btn = QPushButton("Start Calibration")
         start_btn.setObjectName("CalStartCalibration")
         start_btn.setMinimumHeight(45)
+        start_btn.setEnabled(banner.available)
         start_btn.clicked.connect(self.calibration_started)
+        banner.availability_changed.connect(start_btn.setEnabled)
         main_layout.addWidget(start_btn)
 
     def refresh(self) -> None:
@@ -588,7 +595,6 @@ class CameraSpaceStepsWidget(QWidget):
         self._save_move_distances()
 
         try:
-            from motion.routines.camera_calibration_routine import CameraCalibrationRoutine
             self._routine = CameraCalibrationRoutine(motion=motion)
             self._routine.on_state_changed = self._on_routine_state_changed
             motion.start_routine(self._routine)

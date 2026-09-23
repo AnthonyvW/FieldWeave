@@ -70,6 +70,7 @@ from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XYZ
 from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
 
 if TYPE_CHECKING:
@@ -309,6 +310,7 @@ class AreaScan(AutomationRoutine):
     """
 
     job_name = "Z-Stack Area Scan"
+    requirements = XYZ
 
     def __init__(
         self,

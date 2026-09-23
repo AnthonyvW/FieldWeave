@@ -193,6 +193,7 @@ class InspectionCalibrationScaleWidget(QWidget):
     """Widget for configuring and running the inspection calibration scale routine."""
 
     mode_name: str = "Calibration Scale"
+    requirements = InspectionCalibrationScaleRoutine.requirements
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

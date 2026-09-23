@@ -45,6 +45,7 @@ from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position, pixels_to_stage_delta
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XY
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from machine_vision.algorithms.red_mark_detection import RedMarkDetectionResult
 
@@ -75,6 +76,7 @@ class RedMarkCenteringRoutine(AutomationRoutine):
     """
 
     job_name = "Red Mark Centering"
+    requirements = XY
 
     def __init__(
         self,

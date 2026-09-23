@@ -399,6 +399,7 @@ class AreaScanWidget(QWidget):
     """Widget for configuring and running a area scan across an XY grid."""
 
     mode_name: str = "Area Scan"
+    requirements = AreaScan.requirements
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

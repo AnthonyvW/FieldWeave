@@ -6,6 +6,8 @@ from typing import Any
 
 from common.generic_config import ConfigManager
 
+AXES: tuple[str, ...] = ("x", "y", "z")
+
 # Default jog-step presets in nanometres (0.04 mm, 0.4 mm, 2.0 mm, 10.0 mm).
 _DEFAULT_STEP_PRESETS_NM: list[int] = [40_000, 400_000, 2_000_000, 10_000_000]
 
@@ -324,6 +326,19 @@ class MotionSystemSettings:
     invert_y: bool = False  # Invert Y direction in the navigation widget
     invert_z: bool = False  # Invert Z direction in the navigation widget
 
+    # Axes that are physically present and may be moved.
+    x_enabled: bool = True
+    y_enabled: bool = True
+    z_enabled: bool = True
+
+    # Axes included in a home sequence (only applies to enabled axes).
+    home_x: bool = True
+    home_y: bool = True
+    home_z: bool = True
+
+    # Run the home sequence automatically after connecting.
+    home_on_startup: bool = True
+
     # Starting height: Z position (nanometres) to move to after every home sequence.
     # 0 means stay at the homed position (no post-home move).
     starting_height_nm: int = 0
@@ -358,6 +373,15 @@ class MotionSystemSettings:
     z_stack_area_scan: AreaScanSettings = field(
         default_factory=AreaScanSettings
     )
+
+    @property
+    def enabled_axes(self) -> tuple[str, ...]:
+        return tuple(a for a in AXES if getattr(self, f"{a}_enabled"))
+
+    @property
+    def homing_axes(self) -> tuple[str, ...]:
+        """Enabled axes that are included in the home sequence."""
+        return tuple(a for a in self.enabled_axes if getattr(self, f"home_{a}"))
 
     def validate(self) -> None:
         """

@@ -42,6 +42,7 @@ from typing import Any, TYPE_CHECKING, Callable, Generator
 from common.app_context import get_app_context
 from common.logger import info, error, warning, debug
 from common.sleep_inhibitor import get_sleep_inhibitor
+from motion.requirements import NO_REQUIREMENTS, MotionRequirements
 
 if TYPE_CHECKING:
     from motion.motion_controller_manager import MotionControllerManager
@@ -110,6 +111,9 @@ class AutomationRoutine(ABC):
 
     #: Human-readable name shown in the status bar. Override in subclasses.
     job_name: str = "-"
+
+    #: Axes the routine moves and which of them must be homed. Override in subclasses.
+    requirements: MotionRequirements = NO_REQUIREMENTS
 
     def __init__(self, motion: MotionControllerManager) -> None:
         self.motion = motion

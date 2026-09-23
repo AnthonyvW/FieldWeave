@@ -15,7 +15,7 @@ import serial.tools.list_ports
 from common.logger import info, error, warning, debug
 
 from motion.models import Position
-from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
+from motion.motion_config import AXES, MotionSystemSettings, MotionSystemSettingsManager
 
 _NM_PER_MM = 1_000_000
 
@@ -23,6 +23,12 @@ _NM_PER_MM = 1_000_000
 def _is_move(gc: str) -> bool:
     """Return True if *gc* is a G-code command that produces physical motion."""
     return gc.upper().split()[0] in ("G0", "G1", "G28")
+
+
+def _g28_axes(gc: str) -> tuple[str, ...]:
+    """Axes homed by a G28 command; a bare G28 homes every axis."""
+    named = tuple(a for a in AXES if a.upper() in gc.upper().split()[1:])
+    return named or AXES
 
 
 def _probe_port(
@@ -148,6 +154,8 @@ class MotionController:
 
         self.position = Position(0, 0, 0)
         self.faulted = False
+        # Replaced rather than mutated so the UI can read it from another thread.
+        self.homed_axes: frozenset[str] = frozenset()
 
         self._ready = threading.Event()
         self._homing = False
@@ -210,9 +218,11 @@ class MotionController:
             self._ready.set()
             return
 
-        self._homing = True
-        self._home()
-        self._homing = False
+        self._exec(_Command("G90", message="Setting absolute positioning"))
+        if self.config.home_on_startup and self.config.homing_axes:
+            self._homing = True
+            self._home()
+            self._homing = False
         self._ready.set()
         self._run_loop()
 
@@ -321,6 +331,8 @@ class MotionController:
         self._send_and_wait(gc)
         if _is_move(gc):
             self._send_and_wait("M400")
+        if gc.upper().startswith("G28"):
+            self.homed_axes = self.homed_axes | frozenset(_g28_axes(gc))
 
     def _send_and_wait(self, gc: str) -> None:
         self._serial.write(f"{gc}\n".encode())
@@ -344,8 +356,13 @@ class MotionController:
 
     def _track_position(self, gc: str) -> None:
         upper = gc.upper()
-        if upper == "G28":
-            self.position = Position(0, 0, 0)
+        if upper.startswith("G28"):
+            homed = _g28_axes(gc)
+            self.position = Position(
+                x=0 if "x" in homed else self.position.x,
+                y=0 if "y" in homed else self.position.y,
+                z=0 if "z" in homed else self.position.z,
+            )
             return
         cmd_code = upper.split()[0] if upper else ""
         if cmd_code not in ("G0", "G1"):
@@ -366,13 +383,26 @@ class MotionController:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _home(self) -> None:
-        self._exec(_Command("G90", message="Setting absolute positioning"))
-        self._exec(_Command("G28", message="Homing..."))
+    def _home_commands(self) -> list[_Command]:
+        axes = self.config.homing_axes
+        commands = [
+            _Command("G90", message="Setting absolute positioning"),
+            _Command(
+                "G28 " + " ".join(a.upper() for a in axes),
+                message=f"Homing {', '.join(a.upper() for a in axes)}...",
+            ),
+        ]
         starting_height_nm = self.config.starting_height_nm
-        if starting_height_nm > 0:
+        if starting_height_nm > 0 and "z" in axes:
             mm = starting_height_nm / _NM_PER_MM
-            self._exec(_Command(f"G0 Z{mm:.6f}", message=f"Moving to starting height ({mm:.3f} mm)"))
+            commands.append(
+                _Command(f"G0 Z{mm:.6f}", message=f"Moving to starting height ({mm:.3f} mm)")
+            )
+        return commands
+
+    def _home(self) -> None:
+        for cmd in self._home_commands():
+            self._exec(cmd)
 
     def _enqueue(self, gc: str, message: str = "", log: bool = False) -> threading.Event:
         """Enqueue a G-code command and return its completion event.
@@ -453,8 +483,12 @@ class MotionController:
 
         If *wait* is True, blocks until the printer acknowledges the move.
         """
+        axes = self.config.enabled_axes
+        if not axes:
+            warning("Ignoring move: every axis is disabled")
+            return
         event = self._enqueue(
-            f"G0 {position.to_gcode()}",
+            f"G0 {position.to_gcode(axes)}",
             message=f"Moving to {position}",
         )
         if wait:
@@ -473,6 +507,10 @@ class MotionController:
         Returns False (and does not enqueue) if the resulting position would
         exceed the configured axis limits.
         """
+        if axis not in self.config.enabled_axes:
+            warning(f"Ignoring move: {axis.upper()} axis is disabled")
+            return False
+
         current_nm: int = getattr(self.position, axis)
         new_nm = current_nm + amount_nm if is_relative else amount_nm
 
@@ -498,21 +536,17 @@ class MotionController:
         return self.move(axis, amount_nm, wait=wait)
 
     def home(self, *, wait: bool = False) -> None:
-        """Enqueue a homing sequence (G90 + G28), then move to the configured
-        starting height if one is set.
+        """Enqueue a homing sequence (G90 + G28) for the axes with homing
+        enabled, then move to the configured starting height if Z was homed.
 
         If *wait* is True, blocks until all commands have been acknowledged
         by the printer.
         """
-        self._enqueue("G90", message="Set absolute positioning")
-        self._enqueue("G28", message="Homing...")
-        starting_height_nm = self.config.starting_height_nm
-        if starting_height_nm > 0:
-            mm = starting_height_nm / _NM_PER_MM
-            self._enqueue(
-                f"G0 Z{mm:.6f}",
-                message=f"Moving to starting height ({mm:.3f} mm)",
-            )
+        if not self.config.homing_axes:
+            warning("Ignoring home: homing is disabled for every axis")
+            return
+        for cmd in self._home_commands():
+            self._enqueue(cmd.gcode, message=cmd.message or "")
         if wait:
             self.wait_for_idle()
 

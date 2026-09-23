@@ -71,6 +71,7 @@ from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position, fraction_to_stage_delta
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XYZ_HOMED
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.autofocus.autofocus_routine import Autofocus
 from machine_vision.algorithms.calibration_bar_detection import AxisState, process_frame
@@ -160,6 +161,7 @@ class InspectionCalibrationScaleRoutine(AutomationRoutine):
     """
 
     job_name = "Inspection Calibration Scale"
+    requirements = XYZ_HOMED
 
     # Phase weight boundaries (percent, 0–100).
     # Weights shift slightly depending on whether a start position move is needed.
@@ -545,6 +547,7 @@ class InspectionCalibrationSinglePhotoRoutine(AutomationRoutine):
     """
 
     job_name = "Calibration Slide Photo"
+    requirements = XYZ_HOMED
 
     def __init__(
         self,

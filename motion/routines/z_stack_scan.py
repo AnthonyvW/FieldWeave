@@ -56,6 +56,7 @@ from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import Z_ONLY
 from post_processing.routines.focus_stack_routine import StreamingFocusStackRoutine
 from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
 
@@ -119,6 +120,7 @@ class ZStackScan(AutomationRoutine):
     """
 
     job_name = "Z-Stack Scan"
+    requirements = Z_ONLY
 
     def __init__(
         self,

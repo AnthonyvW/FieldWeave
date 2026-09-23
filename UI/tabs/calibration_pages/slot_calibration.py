@@ -18,6 +18,7 @@ from UI.style import RIGHT_SIDEBAR_WIDTH
 from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.navigation_widget import NavigationWidget
+from UI.widgets.requirements_banner import RequirementsBanner
 from UI.widgets.preview_overlay.interaction_mode import PreviewModeSpec, ModeToken
 from common.app_context import get_app_context, open_settings
 from common.logger import info
@@ -121,6 +122,10 @@ class SlotCalibrationWidget(QWidget):
         self._warning_label.hide()
         layout.addWidget(self._warning_label)
 
+        self._requirements_banner = RequirementsBanner(SlotCalibrationRoutine.requirements)
+        self._requirements_banner.availability_changed.connect(lambda _available: self.reset())
+        layout.addWidget(self._requirements_banner)
+
         self._start_btn = QPushButton("Start Calibration")
         self._start_btn.setObjectName("CalStartCalibration")
         self._start_btn.setMinimumHeight(45)
@@ -135,7 +140,7 @@ class SlotCalibrationWidget(QWidget):
 
     def reset(self) -> None:
         calibrated = self._is_camera_space_calibrated()
-        self._start_btn.setEnabled(calibrated)
+        self._start_btn.setEnabled(calibrated and self._requirements_banner.available)
         self._warning_label.setVisible(not calibrated)
 
 

@@ -115,6 +115,7 @@ from common.logger import error, info, warning
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XYZ_HOMED
 from motion.routines.red_mark_centering_routine import RedMarkCenteringRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
@@ -259,6 +260,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
     """
 
     job_name = "Tree Core Imaging"
+    requirements = XYZ_HOMED
 
     def __init__(
         self,

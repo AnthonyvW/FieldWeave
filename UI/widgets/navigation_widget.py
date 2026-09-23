@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt, QRectF, QTimer, QEvent
 from common.app_context import get_app_context
 from common.logger import warning
 from motion.motion_controller_manager import MotionState
-from motion.motion_config import MotionSystemSettings
+from motion.motion_config import AXES, MotionSystemSettings
 
 # Nanometres per millimetre.
 _NM_PER_MM = 1_000_000
@@ -97,6 +97,12 @@ class DiamondButton(QPushButton):
         self.unsetCursor()
         super().leaveEvent(event)
 
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.EnabledChange:
+            self.hover = False
+            self.update()
+        super().changeEvent(event)
+
     def mouseMoveEvent(self, event):
         # Update hover state based on whether mouse is over diamond
         is_over_diamond = self.hitButton(event.position().toPoint())
@@ -156,10 +162,11 @@ class DiamondButton(QPushButton):
         w = self.width()
         h = self.height()
 
-        color = QColor(self._base)
-        if self._hover:
+        enabled = self.isEnabled()
+        color = QColor(self._base) if enabled else QColor(235, 236, 237)
+        if enabled and self._hover:
             color = adjust_color(color, 0.90)  # Darken on hover
-        if self.isDown():
+        if enabled and self.isDown():
             color = adjust_color(color, 0.85)
 
         # Move origin to center
@@ -178,7 +185,7 @@ class DiamondButton(QPushButton):
         painter.drawRect(rect)
 
         # Border
-        pen = QPen(QColor(120, 120, 120))
+        pen = QPen(QColor(120, 120, 120) if enabled else QColor(190, 190, 190))
         pen.setWidth(2)
         pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
         painter.setPen(pen)
@@ -193,7 +200,7 @@ class DiamondButton(QPushButton):
         font.setPixelSize(self._font_px)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(Qt.GlobalColor.black)
+        painter.setPen(Qt.GlobalColor.black if enabled else QColor(170, 170, 170))
 
         # Apply vertical offset to text rect
         text_rect = self.rect()
@@ -217,6 +224,9 @@ class NavigationWidget(QWidget):
         self._invert_y: bool = False
         self._invert_z: bool = False
 
+        self._enabled_axes: tuple[str, ...] = AXES
+        self._homing_axes: tuple[str, ...] = AXES
+
         # Step size owned by this widget instance (nm).  Never written back to
         # the motion system's settings — the motion system manages its own value.
         self._step_size_nm: int = _FALLBACK_PRESETS_NM[0]
@@ -239,13 +249,15 @@ class NavigationWidget(QWidget):
         # Step-size preset buttons container — rebuilt by _apply_settings().
         self._step_buttons_layout: QHBoxLayout | None = None
 
-        self._setup_ui()
-
         # Overlay is created lazily in showEvent once the widget has a parent,
         # so we can reparent it to the grandparent and cover its layout margins.
+        # Declared before _setup_ui because building the UI refreshes the position
+        # readout, which touches the overlay if the controller is already ready.
         self._overlay: QWidget | None = None
         self._overlay_label: QLabel | None = None
         self._motion_available: bool = False
+
+        self._setup_ui()
 
         # Poll until the controller is ready, then switch to a position-refresh timer
         self._ready_timer = QTimer(self)
@@ -280,12 +292,14 @@ class NavigationWidget(QWidget):
             getattr(s, "invert_y", False),
             getattr(s, "invert_z", False),
             tuple(_settings_presets_nm(s)),
+            s.enabled_axes,
+            s.homing_axes,
         )
 
     def _apply_settings(self, snapshot: tuple | None) -> None:
         """Apply a settings snapshot (or fallbacks when snapshot is None) to the widget."""
         if snapshot is not None:
-            invert_x, invert_y, invert_z, presets_nm = snapshot
+            invert_x, invert_y, invert_z, presets_nm, enabled_axes, homing_axes = snapshot
             self._invert_x = invert_x
             self._invert_y = invert_y
             self._invert_z = invert_z
@@ -294,8 +308,49 @@ class NavigationWidget(QWidget):
             self._invert_y = False
             self._invert_z = False
             presets_nm = tuple(_FALLBACK_PRESETS_NM)
+            enabled_axes = AXES
+            homing_axes = AXES
 
         self._rebuild_step_buttons(list(presets_nm))
+        self._apply_axis_availability(enabled_axes, homing_axes)
+
+    def _apply_axis_availability(self, enabled_axes: tuple[str, ...], homing_axes: tuple[str, ...]) -> None:
+        """Grey out jog buttons for disabled axes, and Home when nothing can be homed."""
+        self._enabled_axes = enabled_axes
+        self._homing_axes = homing_axes
+        x_on = "x" in enabled_axes
+        y_on = "y" in enabled_axes
+        z_on = "z" in enabled_axes
+        self.left_btn.setEnabled(x_on)
+        self.right_btn.setEnabled(x_on)
+        self.top_btn.setEnabled(y_on)
+        self.bot_btn.setEnabled(y_on)
+        self.z_up_btn.setEnabled(z_on)
+        self.z_down_btn.setEnabled(z_on)
+        self.center_btn.setEnabled(bool(homing_axes))
+        self.center_btn.setToolTip(
+            f"Home {', '.join(a.upper() for a in homing_axes)}" if homing_axes
+            else "Homing is disabled for every axis"
+        )
+        self._update_position_display()
+        if not self._position_timer_active():
+            self.position_label.setText(self._position_text(None))
+
+    def _position_timer_active(self) -> bool:
+        timer = getattr(self, "_position_timer", None)
+        return timer is not None and timer.isActive()
+
+    def _position_text(self, position_mm: tuple[float, float, float] | None) -> str:
+        """Position readout listing only the enabled axes; None shows placeholders."""
+        parts = []
+        for i, axis in enumerate(AXES):
+            if axis not in self._enabled_axes:
+                continue
+            value = "--" if position_mm is None else f"{position_mm[i]:.2f}"
+            parts.append(f"{axis.upper()}: {value}")
+        if not parts:
+            return "All axes disabled"
+        return "  ".join(parts) + " mm"
 
     def _poll_settings(self) -> None:
         """Check whether settings have changed and apply them if so."""
@@ -430,12 +485,12 @@ class NavigationWidget(QWidget):
         elif state in (MotionState.FAILED, MotionState.FAULTED):
             self._set_motion_available(False)
             self._position_timer.stop()
-            self.position_label.setText("X: --  Y: --  Z: -- mm")
+            self.position_label.setText(self._position_text(None))
             self._set_overlay_message("Motion System Not Connected")
         elif state == MotionState.HOMING:
             self._set_motion_available(False)
             self._position_timer.stop()
-            self.position_label.setText("X: --  Y: --  Z: -- mm")
+            self.position_label.setText(self._position_text(None))
             self._set_overlay_message("Homing Motion System...")
         elif routine_running:
             self._set_motion_available(False)
@@ -444,7 +499,7 @@ class NavigationWidget(QWidget):
         else:
             self._set_motion_available(False)
             self._position_timer.stop()
-            self.position_label.setText("X: --  Y: --  Z: -- mm")
+            self.position_label.setText(self._position_text(None))
             self._set_overlay_message("Connecting to Motion System...")
 
     def _set_motion_available(self, available: bool) -> None:
@@ -671,11 +726,11 @@ class NavigationWidget(QWidget):
 
             if is_over_obj_diamond:
                 # Mouse is over this button's diamond - it should be hovered
-                hovered_btn = obj
+                hovered_btn = obj if obj.isEnabled() else None
             else:
                 # Mouse is in corner region - check buttons beneath
                 for btn in buttons:
-                    if btn is obj:
+                    if btn is obj or not btn.isEnabled():
                         continue
 
                     btn_local = btn.mapFromGlobal(global_pos)
@@ -713,8 +768,8 @@ class NavigationWidget(QWidget):
                                self.right_btn, self.bot_btn]
 
                     for btn in buttons:
-                        if btn is obj:
-                            continue  # Skip the button we're filtering
+                        if btn is obj or not btn.isEnabled():
+                            continue  # Skip the button we're filtering and greyed-out axes
 
                         # Check if this button is beneath the click
                         btn_local = btn.mapFromGlobal(global_pos)
@@ -781,6 +836,11 @@ class NavigationWidget(QWidget):
             QPushButton:pressed {
                 background-color: rgb(177, 180, 182);
             }
+            QPushButton:disabled {
+                background-color: rgb(235, 236, 237);
+                border-color: rgb(190, 190, 190);
+                color: rgb(170, 170, 170);
+            }
         """)
         self.z_up_btn.clicked.connect(self._z_increase)
         layout.addWidget(self.z_up_btn, 0, Qt.AlignmentFlag.AlignCenter)
@@ -801,6 +861,11 @@ class NavigationWidget(QWidget):
             QPushButton:pressed {
                 background-color: rgb(177, 180, 182);
             }
+            QPushButton:disabled {
+                background-color: rgb(235, 236, 237);
+                border-color: rgb(190, 190, 190);
+                color: rgb(170, 170, 170);
+            }
         """)
         self.z_down_btn.clicked.connect(self._z_decrease)
         layout.addWidget(self.z_down_btn, 0, Qt.AlignmentFlag.AlignCenter)
@@ -815,8 +880,7 @@ class NavigationWidget(QWidget):
         ctx = get_app_context()
         if ctx.motion is None or not ctx.motion.is_ready():
             return
-        x_mm, y_mm, z_mm = ctx.motion.get_position().to_mm()
-        position_text = f"X: {x_mm:.2f}  Y: {y_mm:.2f}  Z: {z_mm:.2f} mm"
+        position_text = self._position_text(ctx.motion.get_position().to_mm())
         self.position_label.setText(position_text)
         if self._overlay_label is not None and self._overlay_label.isVisible():
             self._set_overlay_message(f"Automation Running...\n{position_text}")
@@ -874,7 +938,8 @@ class NavigationWidget(QWidget):
 
         dialog = QMessageBox(self)
         dialog.setWindowTitle("Confirm Homing")
-        dialog.setText("Are you sure you want to home the motion system?")
+        axes = ", ".join(a.upper() for a in self._homing_axes)
+        dialog.setText(f"Are you sure you want to home the motion system ({axes})?")
         dialog.setInformativeText(
             "Ensure the path is clear before continuing."
         )

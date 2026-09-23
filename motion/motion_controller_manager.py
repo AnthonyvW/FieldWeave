@@ -267,6 +267,9 @@ class MotionControllerManager:
             raise RuntimeError(
                 "A routine is already running. Call stop_routine() first."
             )
+        unmet = routine.requirements.describe_problems(self)
+        if unmet:
+            raise RuntimeError(f"{routine.job_name}: {unmet}")
         self._active_routine = routine
         routine.on_state_changed = self._emit_routine_state
         routine.on_complete = self._on_routine_complete
@@ -372,6 +375,12 @@ class MotionControllerManager:
         """Clear a faulted state so the controller can accept commands again."""
         self._emit_interaction()
         self._get_controller().reset_fault()
+
+    @property
+    def homed_axes(self) -> frozenset[str]:
+        """Axes that have completed a home sequence on the current connection."""
+        ctrl = self._controller
+        return ctrl.homed_axes if ctrl is not None else frozenset()
 
     @property
     def is_faulted(self) -> bool:

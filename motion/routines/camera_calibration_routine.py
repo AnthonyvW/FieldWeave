@@ -36,6 +36,7 @@ from common.logger import info, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XY
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 
 _NM_PER_MM = 1_000_000
@@ -94,6 +95,7 @@ class CameraCalibrationRoutine(AutomationRoutine):
     """
 
     job_name = "Camera Calibration"
+    requirements = XY
 
     def __init__(
         self,

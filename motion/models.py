@@ -18,13 +18,12 @@ class Position:
     y: int  # nanometers
     z: int  # nanometers
 
-    def to_gcode(self) -> str:
-        """Convert position to G-code coordinates (millimetres, 6 decimal places)."""
-        return (
-            f"X{self.x / _NM_PER_MM:.6f}"
-            f" Y{self.y / _NM_PER_MM:.6f}"
-            f" Z{self.z / _NM_PER_MM:.6f}"
-        )
+    def to_gcode(self, axes: tuple[str, ...] = ("x", "y", "z")) -> str:
+        """Convert position to G-code coordinates (millimetres, 6 decimal places).
+
+        Only the listed *axes* are included, so disabled axes are never commanded.
+        """
+        return " ".join(f"{a.upper()}{getattr(self, a) / _NM_PER_MM:.6f}" for a in axes)
 
     @classmethod
     def from_mm(cls, x: float, y: float, z: float) -> Position:

@@ -125,6 +125,7 @@ class FocusStackWidget(QWidget):
     """Widget for configuring and running a Z-axis focus stack."""
 
     mode_name: str = "Focus Stacking"
+    requirements = ZStackScan.requirements
     _SECS_PER_FRAME: float = 3.15
 
     def __init__(self, parent: QWidget | None = None) -> None:
