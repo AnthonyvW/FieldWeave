@@ -9,6 +9,7 @@ from datetime import datetime
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QHBoxLayout,
     QLabel,
@@ -133,6 +134,15 @@ class LogsTab(QWidget):
         self._logger = get_logger()
         self._logger.register_callback(self._on_log_message)
 
+        # A child tab never receives closeEvent, so unregister on quit and on destruction instead.
+        # The destroyed handler must not reference self's C++ side, which is already gone by then.
+        logger = self._logger
+        callback = self._on_log_message
+        self.destroyed.connect(lambda: logger.unregister_callback(callback))
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._unregister_from_logger)
+
         self._load_existing_logs()
 
     def _load_existing_logs(self) -> None:
@@ -248,6 +258,6 @@ class LogsTab(QWidget):
         except Exception as e:
             self._logger.error(f"Failed to open log folder: {e}")
 
-    def closeEvent(self, event) -> None:
+    def _unregister_from_logger(self) -> None:
+        self._flush_timer.stop()
         self._logger.unregister_callback(self._on_log_message)
-        super().closeEvent(event)
