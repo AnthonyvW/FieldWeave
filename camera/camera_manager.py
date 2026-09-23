@@ -273,6 +273,12 @@ class CameraManager(QObject):
         info(f"Opening camera: {camera_info.display_name}")
 
         def _on_open_complete(success: bool, _result: object) -> None:
+            # The result is delivered via a queued signal, so the user may have
+            # switched cameras (closing this one) before it arrives.
+            if self._active_camera is not threaded_camera:
+                debug(f"Ignoring open result for {camera_info}: camera was closed before it finished opening")
+                return
+
             if not success:
                 error(f"Failed to open camera: {camera_info}")
                 threaded_camera.stop_thread(wait=False)
