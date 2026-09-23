@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -30,24 +32,30 @@ def _probe_port(
     request: bytes = b"M115\r\n",
     read_window_s: float = 10,
     min_lines: int = 3,
+    stop_event: threading.Event | None = None,
 ) -> tuple[serial.Serial | None, list[str]]:
     """
     Try to identify a Marlin-like printer on a single serial port.
 
     Returns (serial_connection, response_lines) on success, or
     (None, response_lines) on failure.  On success the connection is left
-    open for the caller.
+    open for the caller.  Probing is abandoned early if *stop_event* is set.
     """
+    def stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
     responses: list[str] = []
     ser: serial.Serial | None = None
     success = False
     try:
-        ser = serial.Serial(port_device, baudrate=baud, timeout=1, write_timeout=1)
+        # Exclusive so another process (or a stale controller) holding the
+        # port on Linux makes the open fail instead of silently sharing it.
+        ser = serial.Serial(port_device, baudrate=baud, timeout=1, write_timeout=1, exclusive=True)
 
         # Some controllers reset on open due to DTR; allow them to chatter.
         start = time.time()
         quiet_since = start
-        while time.time() - start < 2.0:
+        while time.time() - start < 2.0 and not stopped():
             while ser.in_waiting:
                 line = ser.readline().decode("utf-8", errors="ignore").strip()
                 if line:
@@ -61,7 +69,7 @@ def _probe_port(
         ser.write(request)
 
         start = time.time()
-        while time.time() - start < read_window_s:
+        while time.time() - start < read_window_s and not stopped():
             if ser.in_waiting:
                 line = ser.readline().decode("utf-8", errors="ignore").strip()
                 if line:
@@ -76,6 +84,13 @@ def _probe_port(
                 time.sleep(0.05)
 
         return (ser, responses) if success else (None, responses)
+
+    except serial.SerialException as exc:
+        hint = ""
+        if exc.errno == errno.EACCES and sys.platform.startswith("linux"):
+            hint = " (add your user to the 'dialout' group and log in again)"
+        warning(f"Could not open {port_device}{hint}: {exc}")
+        return None, responses
 
     except Exception:
         return None, responses
@@ -127,9 +142,9 @@ class MotionController:
     - Expose a simple message-listener hook for UI feedback.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: MotionSystemSettings | None = None) -> None:
         self._config_manager = MotionSystemSettingsManager()
-        self.config: MotionSystemSettings = self._config_manager.load()
+        self.config: MotionSystemSettings = config if config is not None else self._config_manager.load()
 
         self.position = Position(0, 0, 0)
         self.faulted = False
@@ -212,6 +227,8 @@ class MotionController:
             candidates = [last] + [d for d in detected if d != last] if last in detected else detected
 
         for dev in candidates:
+            if self._stop_event.is_set():
+                raise RuntimeError("Connection cancelled")
             debug(f"Trying {dev} ...")
             ser, lines = _probe_port(
                 port_device=dev,
@@ -220,8 +237,12 @@ class MotionController:
                 request=b"M115\n",
                 read_window_s=10,
                 min_lines=3,
+                stop_event=self._stop_event,
             )
             if ser is not None:
+                if self._stop_event.is_set():
+                    ser.close()
+                    raise RuntimeError("Connection cancelled")
                 self._serial = ser
                 info(f"Printer found on {dev}")
                 for ln in lines[-10:]:

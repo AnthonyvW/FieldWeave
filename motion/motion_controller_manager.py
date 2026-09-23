@@ -83,6 +83,8 @@ class MotionControllerManager:
         self._state_listeners: list[MotionStateCallback] = []
         self._routine_state_listeners: list[RoutineStateCallback] = []
         self._interaction_listeners: list[InteractionCallback] = []
+        # Held here as well as on the controller so they survive a restart.
+        self._message_listeners: list[Callable[[str, bool], None]] = []
 
         # Track the last known state so we only fire listeners on actual changes.
         self._last_known_state: str = MotionState.CONNECTING
@@ -100,10 +102,12 @@ class MotionControllerManager:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _start(self) -> None:
+    def _start(self, config: MotionSystemSettings | None = None) -> None:
         """Instantiate and start the controller (non-blocking)."""
         with self._lock:
-            self._controller = MotionController()
+            self._controller = MotionController(config)
+            for listener in self._message_listeners:
+                self._controller.add_message_listener(listener)
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
         """
@@ -129,9 +133,16 @@ class MotionControllerManager:
                 self._controller = None
 
     def restart(self) -> None:
-        """Shut down any existing controller and start a fresh one."""
+        """Shut down any existing controller and reconnect using its current settings.
+
+        Blocks while the old controller releases the serial port, so call it
+        off the UI thread.
+        """
+        # Carry the live settings over so unsaved edits from other settings
+        # pages are not replaced by the on-disk copy.
+        config = self.settings
         self.shutdown()
-        self._start()
+        self._start(config)
 
     # ------------------------------------------------------------------
     # State-change listeners
@@ -391,9 +402,16 @@ class MotionControllerManager:
 
     def add_message_listener(self, listener: Callable[[str, bool], None]) -> None:
         """Subscribe to controller messages.  Signature: (text: str, log: bool) -> None."""
-        self._get_controller().add_message_listener(listener)
+        self._message_listeners.append(listener)
+        ctrl = self._controller
+        if ctrl is not None:
+            ctrl.add_message_listener(listener)
 
     def remove_message_listener(self, listener: Callable[[str, bool], None]) -> None:
+        try:
+            self._message_listeners.remove(listener)
+        except ValueError:
+            pass
         ctrl = self._controller
         if ctrl is not None:
             ctrl.remove_message_listener(listener)

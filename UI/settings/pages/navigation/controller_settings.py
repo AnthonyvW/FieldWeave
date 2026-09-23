@@ -49,7 +49,7 @@ class ControllerSettingsWidget(SettingsGroupBase):
         self._port_combo.setToolTip(
             "Serial port of the motion controller.\n"
             "Auto-detect probes every port, starting with the last one that worked.\n"
-            "Changes take effect the next time FieldWeave starts."
+            "Saving a new port reconnects the controller."
         )
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setToolTip("Rescan for available serial ports.")
@@ -61,7 +61,7 @@ class ControllerSettingsWidget(SettingsGroupBase):
         port_layout.addWidget(self._port_combo)
         port_layout.addWidget(refresh_btn)
         port_layout.addStretch()
-        form.addRow(self._register_label("com_port", QLabel("COM port:")), port_row)
+        form.addRow(self._register_label("com_port", QLabel("Serial port:")), port_row)
 
         baud_spin = NoScrollSpinBox()
         baud_spin.setMinimum(1_200)
@@ -126,7 +126,9 @@ class ControllerSettingsWidget(SettingsGroupBase):
         self._port_combo.addItem(auto_label, "")
 
         devices: list[str] = []
-        for p in sorted(serial.tools.list_ports.comports(), key=lambda p: p.device):
+        # include_links adds the stable /dev/serial/by-id/... names on Linux, which
+        # keep pointing at the same controller when ttyUSB/ttyACM numbers shuffle.
+        for p in sorted(serial.tools.list_ports.comports(include_links=True), key=lambda p: p.device):
             devices.append(p.device)
             has_desc = p.description and p.description not in ("n/a", p.device)
             self._port_combo.addItem(f"{p.device} - {p.description}" if has_desc else p.device, p.device)
@@ -162,6 +164,10 @@ class ControllerSettingsWidget(SettingsGroupBase):
 
         for w in self._w.values():
             w.blockSignals(False)
+
+    def connection_changed(self, s: MotionSystemSettings) -> bool:
+        """True if *s* differs from the snapshot in a way that requires reconnecting."""
+        return s.com_port != self._saved.get("com_port") or s.baud_rate != self._saved.get("baud_rate")
 
     def snapshot(self, s: MotionSystemSettings) -> None:
         self._saved = {

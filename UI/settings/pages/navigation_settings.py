@@ -16,6 +16,8 @@ Design
 
 from __future__ import annotations
 
+import threading
+
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
     QFrame,
@@ -161,6 +163,7 @@ class NavigationSettingsWidget(QWidget):
         ctx = get_app_context()
         s = self._current_settings()
         self._settings_manager.save(s)
+        reconnect = self._controller.connection_changed(s)
         self._controller.snapshot(s)
         self._navigation.snapshot(s)
         self._controller.clear_orange()
@@ -169,6 +172,22 @@ class NavigationSettingsWidget(QWidget):
         self._set_unsaved(False)
         ctx.toast.success("Navigation settings saved", duration=2000)
         info("Navigation settings saved")
+        if reconnect:
+            self._reconnect_motion()
+
+    def _reconnect_motion(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None:
+            return
+        if motion.routine_running:
+            ctx.toast.warning(
+                "A routine is running. The new connection settings will be used after FieldWeave restarts.",
+            )
+            return
+        ctx.toast.info("Reconnecting to the motion controller...", duration=2000)
+        info("Connection settings changed, restarting motion controller")
+        threading.Thread(target=motion.restart, daemon=True, name="MotionRestart").start()
 
     def _set_unsaved(self, has_changes: bool) -> None:
         self._has_unsaved_changes = has_changes
