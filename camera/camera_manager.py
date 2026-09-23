@@ -20,6 +20,7 @@ from camera.camera_enumerator import (
     AmscopeEnumerator,
     GenericUSBEnumerator,
 )
+from common.fieldweaveConfig import SavedCamera
 from common.logger import info, error, warning, exception, debug
 
 
@@ -197,6 +198,54 @@ class CameraManager(QObject):
 
     def get_cameras_by_type(self, camera_type: CameraType) -> list[CameraInfo]:
         return [cam for cam in self._available_cameras if cam.camera_type == camera_type]
+
+    @staticmethod
+    def saved_camera_from_info(camera_info: CameraInfo) -> SavedCamera:
+        metadata = camera_info.metadata or {}
+        return SavedCamera(
+            camera_type=camera_info.camera_type.value,
+            device_id=camera_info.device_id,
+            display_name=camera_info.display_name,
+            model=camera_info.model,
+            vid=metadata.get("vid"),
+            pid=metadata.get("pid"),
+        )
+
+    def find_saved_camera(self, saved: SavedCamera) -> CameraInfo | None:
+        """Return the available camera matching *saved*, or None if it isn't connected."""
+        candidates = [
+            cam for cam in self._available_cameras
+            if cam.camera_type.value == saved.camera_type
+        ]
+
+        # USB device ids are OpenCV indices that shift as devices are added,
+        # so VID/PID is the only stable identity for them.
+        if saved.vid is not None and saved.pid is not None:
+            for cam in candidates:
+                metadata = cam.metadata or {}
+                if metadata.get("vid") == saved.vid and metadata.get("pid") == saved.pid:
+                    return cam
+            return None
+
+        for cam in candidates:
+            if cam.device_id == saved.device_id and cam.display_name == saved.display_name:
+                return cam
+
+        if saved.camera_type != CameraType.GENERIC_USB.value:
+            for cam in candidates:
+                if cam.device_id == saved.device_id:
+                    return cam
+
+        # Amscope ids embed the USB port path, so a camera moved to another
+        # port is still recognised as long as its name/model is unambiguous.
+        same_name = [
+            cam for cam in candidates
+            if cam.display_name == saved.display_name and cam.model == saved.model
+        ]
+        if len(same_name) == 1:
+            return same_name[0]
+
+        return None
 
     # ------------------------------------------------------------------
     # Lifecycle

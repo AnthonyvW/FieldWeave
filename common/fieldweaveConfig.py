@@ -50,6 +50,33 @@ class PostProcessingSettings:
 
 
 @dataclass
+class SavedCamera:
+    """Identity of a camera, stored so the same physical device can be reopened on the next run."""
+
+    camera_type: str
+    device_id: str
+    display_name: str
+    model: str | None = None
+    vid: int | None = None
+    pid: int | None = None
+
+    def validate(self) -> None:
+        if not self.camera_type:
+            raise ValueError("camera_type must be a non-empty string")
+
+
+@dataclass
+class CameraManagerSettings:
+    """Settings for the camera manager."""
+
+    last_camera: SavedCamera | None = None
+
+    def validate(self) -> None:
+        if self.last_camera is not None:
+            self.last_camera.validate()
+
+
+@dataclass
 class FieldWeaveSettings:
     """FieldWeave application settings"""
 
@@ -59,11 +86,15 @@ class FieldWeaveSettings:
     post_processing: PostProcessingSettings = field(
         default_factory=PostProcessingSettings
     )
+    camera_manager: CameraManagerSettings = field(
+        default_factory=CameraManagerSettings
+    )
 
     def validate(self) -> None:
         if not isinstance(self.version, str) or not self.version:
             raise ValueError("version must be a non-empty string")
         self.post_processing.validate()
+        self.camera_manager.validate()
 
 
 class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
@@ -122,9 +153,23 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
             ),
         )
 
+        cm_data: dict[str, Any] = data.get("camera_manager") or {}
+        last_camera_data: dict[str, Any] | None = cm_data.get("last_camera")
+        last_camera: SavedCamera | None = None
+        if last_camera_data and last_camera_data.get("camera_type"):
+            last_camera = SavedCamera(
+                camera_type=str(last_camera_data["camera_type"]),
+                device_id=str(last_camera_data.get("device_id", "")),
+                display_name=str(last_camera_data.get("display_name", "")),
+                model=last_camera_data.get("model"),
+                vid=last_camera_data.get("vid"),
+                pid=last_camera_data.get("pid"),
+            )
+
         settings = FieldWeaveSettings(
             version=data.get("version", FieldWeaveSettings.version),
             post_processing=post_settings,
+            camera_manager=CameraManagerSettings(last_camera=last_camera),
         )
 
         if migrated:
@@ -135,6 +180,7 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
 
     def to_dict(self, settings: FieldWeaveSettings) -> dict[str, Any]:
         sm = settings.post_processing.stitch_and_measure
+        last_camera = settings.camera_manager.last_camera
         return {
             "version": settings.version,
             "post_processing": {
@@ -146,5 +192,15 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
                     "save_debug_overlay": sm.save_debug_overlay,
                 },
                 "max_concurrent_focus_stacks": settings.post_processing.max_concurrent_focus_stacks,
+            },
+            "camera_manager": {
+                "last_camera": None if last_camera is None else {
+                    "camera_type": last_camera.camera_type,
+                    "device_id": last_camera.device_id,
+                    "display_name": last_camera.display_name,
+                    "model": last_camera.model,
+                    "vid": last_camera.vid,
+                    "pid": last_camera.pid,
+                },
             },
         }
