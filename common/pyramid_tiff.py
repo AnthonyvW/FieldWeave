@@ -14,6 +14,16 @@ once. This is what vips's own tiffsave does, equivalent to running:
 
     vips tiffsave INPUT OUTPUT --tile --pyramid --compression deflate
 
+The output is a classic TIFF unless it could exceed classic TIFF's 4 GiB
+limit, because BigTIFF can't be opened by Windows' built-in imaging
+(Photo Viewer, Photos, Explorer thumbnails), which reports it as damaged,
+corrupted or too large.
+
+libvips carries over only resolution and a few standard tags, so the
+source's first-page metadata (camera settings, timestamps, FieldWeave's
+private tags and UserComment) is copied onto the pyramid's first page
+afterwards.
+
 Defaults to deflate: lossless (jpeg's default produced visible blocking
 on sharp edges -- it discards data) and, unlike zstd, built directly
 into libtiff rather than linked as an optional external codec, so it
@@ -28,9 +38,11 @@ check is_available() before offering generation.
 
 from __future__ import annotations
 
+import io
 import math
 import os
 import shutil
+import struct
 import threading
 import time
 from collections.abc import Callable
@@ -38,8 +50,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tifffile
+from PIL import Image
 
 from common.logger import info, warning
+from common.read_metadata import build_exif_bytes, read_metadata
 
 # Matches TILE_SIZE in UI/widgets/preview_overlay/large_image_source.py --
 # when they agree, most of that reader's virtual tile requests land on
@@ -51,6 +65,23 @@ DEFAULT_QUALITY = 90
 DEFAULT_COMPRESSION = "deflate"
 
 BYTES_PER_GIB = 1024**3
+
+# Classic TIFF offsets are 32-bit. The headroom covers tile tables, the
+# metadata copied on afterwards, and deflate occasionally growing dense data.
+CLASSIC_TIFF_MAX_BYTES = 4 * BYTES_PER_GIB - 256 * 1024 * 1024
+
+_BYTES_PER_SAMPLE = {
+    "uchar": 1, "char": 1, "ushort": 2, "short": 2, "uint": 4, "int": 4,
+    "float": 4, "double": 8, "complex": 8, "dpcomplex": 16,
+}
+
+# Tags describing the pixel layout of the page they sit on (or pointing at
+# data elsewhere in the source file); libvips writes its own for the pyramid.
+_LAYOUT_TAG_CODES = frozenset({
+    254, 255, 256, 257, 258, 259, 262, 266, 273, 274, 277, 278, 279, 284,
+    317, 322, 323, 324, 325, 330, 338, 339, 347, 530, 532,
+    34665, 34853, 40965,
+})
 
 # Opening a flat image this size already takes long enough that adding
 # pyramids is worth offering for next time.
@@ -145,6 +176,114 @@ class _ProgressReporter:
         self.callback(percent, step_duration, elapsed, seconds_remaining)
 
 
+def needs_bigtiff(width: int, height: int, bands: int, bytes_per_sample: int) -> bool:
+    """Whether a pyramid of this image might not fit in a classic TIFF, assuming
+    no compression gain -- deflate can't be relied on for noisy or dense data."""
+    full_res = width * height * bands * bytes_per_sample
+    # Each pyramid level is a quarter of the one above, adding up to a third.
+    return full_res * 4 / 3 > CLASSIC_TIFF_MAX_BYTES
+
+
+def _ifd0_entries(tiff: tifffile.TiffFile, data: bytes | None = None) -> list[tuple[int, int, int, bytes]]:
+    """``(code, type, count, raw value bytes)`` for every non-layout tag on the
+    first page, read verbatim so each keeps its exact TIFF type."""
+    fh = tiff.filehandle
+    entries = []
+    for tag in tiff.pages[0].tags.values():
+        if tag.code in _LAYOUT_TAG_CODES:
+            continue
+        if data is not None:
+            raw = data[tag.valueoffset:tag.valueoffset + tag.valuebytecount]
+        else:
+            fh.seek(tag.valueoffset)
+            raw = fh.read(tag.valuebytecount)
+        entries.append((tag.code, int(tag.dtype), tag.count, raw))
+    return entries
+
+
+def _source_metadata_entries(source: Path) -> tuple[str, list[tuple[int, int, int, bytes]]]:
+    """Byte order and tag entries carrying *source*'s metadata."""
+    if source.suffix.lower() in TIFF_SUFFIXES:
+        with tifffile.TiffFile(source) as tf:
+            return tf.byteorder, _ifd0_entries(tf)
+
+    # JPEG/PNG metadata isn't laid out as TIFF tags, so it's rendered into a
+    # throwaway 1x1 TIFF by the same writer that carries it onto stacked images.
+    metadata = read_metadata(source)
+    exif_bytes = build_exif_bytes(metadata) if metadata else None
+    if exif_bytes is None:
+        return "<", []
+    buf = io.BytesIO()
+    Image.new("L", (1, 1)).save(buf, format="TIFF", exif=exif_bytes)
+    data = buf.getvalue()
+    with tifffile.TiffFile(io.BytesIO(data)) as tf:
+        return tf.byteorder, _ifd0_entries(tf, data)
+
+
+def _add_first_page_tags(path: Path, byteorder: str, entries: list[tuple[int, int, int, bytes]]) -> None:
+    """
+    Add (or replace) tags on the first page of the TIFF at *path*.
+
+    The first IFD is rewritten at the end of the file with the extra entries
+    and the header pointed at it; the old IFD is left behind unreferenced.
+    Every existing entry keeps its value or offset, so nothing else moves.
+    """
+    with open(path, "r+b") as f:
+        header = f.read(16)
+        bo = {b"II": "<", b"MM": ">"}[header[:2]]
+        if bo != byteorder:
+            raise ValueError("source and pyramid byte orders differ")
+        big = struct.unpack(bo + "H", header[2:4])[0] == 43
+        count_fmt, offset_fmt, inline, header_ptr = (
+            (bo + "Q", bo + "Q", 8, 8) if big else (bo + "H", bo + "I", 4, 4)
+        )
+        entry_size = 4 + 2 * inline
+        ifd0 = struct.unpack(offset_fmt, header[header_ptr:header_ptr + inline])[0]
+
+        f.seek(ifd0)
+        n = struct.unpack(count_fmt, f.read(struct.calcsize(count_fmt)))[0]
+        raw_entries = f.read(n * entry_size)
+        next_ifd = f.read(inline)
+        ifd_entries = {
+            struct.unpack(bo + "H", raw_entries[i:i + 2])[0]: raw_entries[i:i + entry_size]
+            for i in range(0, len(raw_entries), entry_size)
+        }
+
+        data_start = f.seek(0, os.SEEK_END)
+        data_start += -data_start % 8
+        blobs = bytearray()
+        for code, dtype, count, raw in entries:
+            if len(raw) <= inline:
+                value = raw.ljust(inline, b"\0")
+            else:
+                value = struct.pack(offset_fmt, data_start + len(blobs))
+                blobs += raw
+                blobs += b"\0" * (-len(blobs) % 2)
+            ifd_entries[code] = struct.pack(bo + "HH", code, dtype) + struct.pack(offset_fmt, count) + value
+
+        new_ifd = data_start + len(blobs)
+        ifd = (
+            struct.pack(count_fmt, len(ifd_entries))
+            + b"".join(ifd_entries[code] for code in sorted(ifd_entries))
+            + next_ifd
+        )
+        if not big and new_ifd + len(ifd) >= 2**32:
+            raise ValueError("metadata would push the file past the classic TIFF size limit")
+
+        f.seek(data_start)
+        f.write(bytes(blobs) + ifd)
+        f.seek(header_ptr)
+        f.write(struct.pack(offset_fmt, new_ifd))
+
+
+def copy_metadata(source: Path, target: Path) -> None:
+    """Copy *source*'s image metadata onto the first page of the TIFF *target*.
+    Raises OSError or ValueError if either file can't be read or written."""
+    byteorder, entries = _source_metadata_entries(source)
+    if entries:
+        _add_first_page_tags(target, byteorder, entries)
+
+
 def write_pyramid_tiff(
     input_path: Path,
     output_path: Path,
@@ -161,6 +300,7 @@ def write_pyramid_tiff(
     # with the result.
     pyvips.cache_set_max(0)
     image = pyvips.Image.new_from_file(str(input_path), access="sequential")
+    bigtiff = needs_bigtiff(image.width, image.height, image.bands, _BYTES_PER_SAMPLE.get(image.format, 8))
     if progress is not None:
         prior_seconds_per_percent = estimate_seconds_per_percent(input_path.stat().st_size)
         image.set_progress(True)
@@ -173,8 +313,13 @@ def write_pyramid_tiff(
         pyramid=True,
         compression=compression,
         Q=quality,
-        bigtiff=True,
+        bigtiff=bigtiff,
     )
+
+    try:
+        copy_metadata(input_path, output_path)
+    except (OSError, ValueError, KeyError, struct.error) as exc:
+        warning(f"pyramid_tiff: could not copy metadata from {input_path}: {exc}")
 
 
 def offer_size(path: Path) -> int | None:
