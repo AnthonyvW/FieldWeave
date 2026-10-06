@@ -228,7 +228,7 @@ class PostProcessingRoutine(ABC):
                     self._eta_seconds,
                 )
             except Exception as exc:
-                warning(f"[{type(self).__name__}] on_state_changed raised: {exc}")
+                warning(f"[{self.job_name}] on_state_changed raised: {exc}")
 
     # ------------------------------------------------------------------
     # Read-only state accessors
@@ -279,14 +279,14 @@ class PostProcessingRoutine(ABC):
         if not self._running:
             return
         self._pause_event.clear()
-        info(f"[{type(self).__name__}] Paused")
+        info(f"[{self.job_name}] Paused")
 
     def resume(self) -> None:
         """Resume a paused routine."""
         if not self._running:
             return
         self._pause_event.set()
-        info(f"[{type(self).__name__}] Resumed")
+        info(f"[{self.job_name}] Resumed")
 
     def stop(self) -> None:
         """Request the routine to stop after its current step.
@@ -295,7 +295,7 @@ class PostProcessingRoutine(ABC):
         """
         self._stop_event.set()
         self._pause_event.set()
-        info(f"[{type(self).__name__}] Stop requested")
+        info(f"[{self.job_name}] Stop requested")
 
     def wait(self, timeout: float | None = None) -> bool:
         """Block until the routine finishes (or *timeout* seconds pass).
@@ -335,34 +335,34 @@ class PostProcessingRoutine(ABC):
     # ------------------------------------------------------------------
 
     def _run(self) -> None:
-        info(f"[{type(self).__name__}] Starting")
+        info(f"[{self.job_name}] Starting")
         try:
             gen = self.steps()
             while True:
                 if self._stop_event.is_set():
-                    info(f"[{type(self).__name__}] Stopped")
+                    info(f"[{self.job_name}] Stopped")
                     break
 
                 self._pause_event.wait()
                 if self._stop_event.is_set():
-                    info(f"[{type(self).__name__}] Stopped while paused")
+                    info(f"[{self.job_name}] Stopped while paused")
                     break
 
                 try:
                     next(gen)
                 except StopIteration:
-                    info(f"[{type(self).__name__}] Completed successfully")
+                    info(f"[{self.job_name}] Completed successfully")
                     break
 
                 # Re-check pause immediately after the step so a pause issued
                 # during a step is honoured before the next one starts.
                 self._pause_event.wait()
                 if self._stop_event.is_set():
-                    info(f"[{type(self).__name__}] Stopped while paused")
+                    info(f"[{self.job_name}] Stopped while paused")
                     break
 
         except Exception as exc:
-            error(f"[{type(self).__name__}] Unhandled exception: {exc}")
+            error(f"[{self.job_name}] Unhandled exception: {exc}")
             error(traceback.format_exc())
         finally:
             self._running = False
@@ -381,4 +381,4 @@ class PostProcessingRoutine(ABC):
                 try:
                     cb(self._result)
                 except Exception as exc:
-                    warning(f"[{type(self).__name__}] on_complete raised: {exc}")
+                    warning(f"[{self.job_name}] on_complete raised: {exc}")

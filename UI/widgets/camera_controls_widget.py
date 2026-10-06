@@ -212,6 +212,10 @@ class CameraControlsWidget(QWidget):
     Camera-agnostic widget for camera controls including photo capture and file management.
     """
 
+    _AF_TOOLTIP = "Bidirectional sweep: coarse alternating search, refine march, fine polish."
+    _AF_DESCENT_TOOLTIP = "Descent-only: march downward from current Z, then fine polish."
+    _AF_FINE_TOOLTIP = "Fine-only: narrow bidirectional search around the current Z position."
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
 
@@ -230,6 +234,8 @@ class CameraControlsWidget(QWidget):
         self._capture_success: bool | None = None
         self._capture_filepath: str = ""
         self._capture_toast_id: int | None = None
+        self._autofocus_running: bool = False
+        self._autofocus_unavailable_reason: str | None = None
 
         self._setup_ui()
 
@@ -244,6 +250,7 @@ class CameraControlsWidget(QWidget):
         self._camera_poll_timer = QTimer(self)
         self._camera_poll_timer.setInterval(500)
         self._camera_poll_timer.timeout.connect(self._check_camera_available)
+        self._camera_poll_timer.timeout.connect(self._sync_autofocus_buttons)
         self._camera_poll_timer.start()
 
         self._capture_poll_timer = QTimer(self)
@@ -510,23 +517,17 @@ class CameraControlsWidget(QWidget):
 
         self._af_btn = QPushButton("Autofocus")
         self._af_btn.setFixedHeight(32)
-        self._af_btn.setToolTip(
-            "Bidirectional sweep: coarse alternating search, refine march, fine polish."
-        )
+        self._af_btn.setToolTip(self._AF_TOOLTIP)
         self._af_btn.clicked.connect(self._start_autofocus)
 
         self._af_descent_btn = QPushButton("Descent")
         self._af_descent_btn.setFixedHeight(32)
-        self._af_descent_btn.setToolTip(
-            "Descent-only: march downward from current Z, then fine polish."
-        )
+        self._af_descent_btn.setToolTip(self._AF_DESCENT_TOOLTIP)
         self._af_descent_btn.clicked.connect(self._start_autofocus_descent)
 
         self._af_fine_btn = QPushButton("Fine")
         self._af_fine_btn.setFixedHeight(32)
-        self._af_fine_btn.setToolTip(
-            "Fine-only: narrow bidirectional search around the current Z position."
-        )
+        self._af_fine_btn.setToolTip(self._AF_FINE_TOOLTIP)
         self._af_fine_btn.clicked.connect(self._start_autofocus_fine)
 
         trigger_layout.addWidget(self._af_btn)
@@ -567,9 +568,21 @@ class CameraControlsWidget(QWidget):
         self._af_pause_btn.setVisible(running)
         self._af_stop_btn.setVisible(running)
         self._af_status_label.setVisible(running)
-        self._af_btn.setEnabled(not running)
-        self._af_descent_btn.setEnabled(not running)
-        self._af_fine_btn.setEnabled(not running)
+        self._autofocus_running = running
+        self._sync_autofocus_buttons()
+
+    def _sync_autofocus_buttons(self) -> None:
+        """Grey out the autofocus triggers while one runs or when Z autofocus is unavailable."""
+        reason = Autofocus.requirements.describe_problems(get_app_context().motion)
+        enabled = not self._autofocus_running and not reason
+        for btn in (self._af_btn, self._af_descent_btn, self._af_fine_btn):
+            btn.setEnabled(enabled)
+        if reason == self._autofocus_unavailable_reason:
+            return
+        self._autofocus_unavailable_reason = reason
+        self._af_btn.setToolTip(reason or self._AF_TOOLTIP)
+        self._af_descent_btn.setToolTip(reason or self._AF_DESCENT_TOOLTIP)
+        self._af_fine_btn.setToolTip(reason or self._AF_FINE_TOOLTIP)
 
     def _enter_autofocus_running_state(self) -> None:
         self._set_autofocus_controls_visible(True)

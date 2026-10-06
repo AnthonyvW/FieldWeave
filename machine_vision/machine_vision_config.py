@@ -10,13 +10,20 @@ method has its own saved state.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Union
 
 from common.generic_config import ConfigManager
 from common.logger import info
-from machine_vision.algorithms.camera_calibration import CameraCalibration, CameraYAxisOrientation
+import numpy as np
+
+from machine_vision.algorithms.camera_calibration import (
+    CameraCalibration,
+    CameraYAxisOrientation,
+    derive_y_axis_orientation,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -436,23 +443,23 @@ class CameraCalibrationSettings:
     """
     Persistent camera-calibration configuration.
 
-    ``move_x_ticks`` and ``move_y_ticks`` are the distances (in 0.01 mm tick
-    units) that the stage moves during the calibration routine.  They are
+    ``move_x_nm`` and ``move_y_nm`` are the distances (in nanometres) that
+    the stage moves during the calibration routine.  They are
     persisted here so that the UI can edit them and the printer controller can
     read them without hard-coding defaults.
 
     ``calibration`` holds the last successfully computed
     ``CameraCalibration``, serialised to/from a plain dict via
-    ``CameraCalibration.to_dict`` / ``CameraCalibration.from_dict``.  It is
+    ``_dump_camera_calibration`` / ``_load_camera_calibration``.  It is
     ``None`` when no calibration has been performed yet or after
     ``clear_calibration`` is called.
     """
 
-    move_x_ticks: int = 100
-    """Distance to move in +X during calibration (0.01 mm units; 100 = 1 mm)."""
+    move_x_nm: int = 1_000_000
+    """Distance to move in +X during calibration (nm; 1 000 000 = 1 mm)."""
 
-    move_y_ticks: int = 100
-    """Distance to move in +Y during calibration (0.01 mm units; 100 = 1 mm)."""
+    move_y_nm: int = 1_000_000
+    """Distance to move in +Y during calibration (nm; 1 000 000 = 1 mm)."""
 
     calibration: CameraCalibration | None = None
     """Most recently computed calibration, or None if uncalibrated."""
@@ -470,10 +477,10 @@ class CameraCalibrationSettings:
         return self.calibration.y_axis_orientation
 
     def validate(self) -> None:
-        if self.move_x_ticks <= 0:
-            raise ValueError("move_x_ticks must be > 0")
-        if self.move_y_ticks <= 0:
-            raise ValueError("move_y_ticks must be > 0")
+        if self.move_x_nm <= 0:
+            raise ValueError("move_x_nm must be > 0")
+        if self.move_y_nm <= 0:
+            raise ValueError("move_y_nm must be > 0")
 
 
 # ---------------------------------------------------------------------------
@@ -530,11 +537,65 @@ class MachineVisionSettings:
         default_factory=InspectionCalibrationPosition
     )
     """Saved stage position used as the starting point for inspection calibration."""
+    single_image_calibration_position: InspectionCalibrationPosition = field(
+        default_factory=InspectionCalibrationPosition
+    )
+    """Saved stage position used for the single-photo calibration slide capture."""
     red_mark: RedMarkDetectionSettings = field(default_factory=RedMarkDetectionSettings)
     """Parameters for the red registration-mark detection algorithm."""
 
     background: BackgroundDetectionSettings = field(default_factory=BackgroundDetectionSettings)
     """Parameters for the black-plastic background detection algorithm."""
+
+    focus_stack_time_samples_s: dict[str, list[float]] = field(default_factory=dict)
+    """
+    Rolling per-resolution focus-stack seconds-per-image samples (most recent
+    last, capped at MAX_FOCUS_STACK_TIME_SAMPLES), keyed by "WxH" (the
+    camera's still resolution). Automation routines (e.g. the area scan)
+    divide each completed stack's duration by its image count and record the
+    result here via record_focus_stack_time_s(); multiply
+    get_focus_stack_time_per_image_s() by a stack's image count to estimate
+    that stack's duration. Not surfaced in any settings UI - purely an
+    automatically tracked estimate.
+    """
+
+    # Unannotated so dataclass()/to_dict() don't treat these as per-instance
+    # fields.
+    #
+    # 2.7s/image matches measured focus-stack throughput; used as a starting
+    # point until real samples are recorded for a given resolution.
+    DEFAULT_FOCUS_STACK_TIME_PER_IMAGE_S = 2.7
+    MAX_FOCUS_STACK_TIME_SAMPLES = 20
+
+    # Guards record_focus_stack_time_s() - multiple focus stacks can now
+    # complete concurrently (PostProcessingSettings.max_concurrent_focus_stacks),
+    # so appending/trimming the shared sample list needs to be serialised.
+    _focus_stack_time_lock = threading.Lock()
+
+    def get_focus_stack_time_per_image_s(self, resolution_key: str) -> float:
+        """Mean recorded focus-stack seconds-per-image for *resolution_key*.
+
+        Returns ``DEFAULT_FOCUS_STACK_TIME_PER_IMAGE_S`` when no samples have
+        been recorded yet.
+        """
+        samples = self.focus_stack_time_samples_s.get(resolution_key)
+        if not samples:
+            return self.DEFAULT_FOCUS_STACK_TIME_PER_IMAGE_S
+        return sum(samples) / len(samples)
+
+    def record_focus_stack_time_s(self, resolution_key: str, duration_s: float, image_count: int) -> None:
+        """Record a completed focus stack's duration, normalised to seconds-per-image.
+
+        Keeps only the most recent ``MAX_FOCUS_STACK_TIME_SAMPLES`` samples for
+        *resolution_key*. No-op if *image_count* is not positive.
+        """
+        if image_count <= 0:
+            return
+        with self._focus_stack_time_lock:
+            samples = self.focus_stack_time_samples_s.setdefault(resolution_key, [])
+            samples.append(duration_s / image_count)
+            if len(samples) > self.MAX_FOCUS_STACK_TIME_SAMPLES:
+                del samples[: len(samples) - self.MAX_FOCUS_STACK_TIME_SAMPLES]
 
     def validate(self) -> None:
         self.focus.validate()
@@ -616,6 +677,71 @@ def _load_background(d: dict[str, Any]) -> BackgroundDetectionSettings:
     )
 
 
+# Stage unit used by calibrations saved before the switch to nanometres.
+_LEGACY_NM_PER_TICK = 10_000
+
+
+def _load_camera_calibration(d: dict[str, Any]) -> CameraCalibration:
+    """
+    Calibrations saved before stage units moved to nanometres (identified by
+    ``move_x_ticks`` instead of ``move_x_nm``) stored everything in 0.01 mm
+    ticks; they are converted on load so they stay usable.
+
+    Raises ``KeyError`` if required keys are missing and ``ValueError`` if the
+    stored matrices are not 2×2.
+    """
+    M_est = np.array(d["M_est"], dtype=np.float64)
+    M_inv = np.array(d["M_inv"], dtype=np.float64)
+
+    if M_est.shape != (2, 2) or M_inv.shape != (2, 2):
+        raise ValueError("Calibration matrices must be 2×2")
+
+    if "move_x_nm" in d:
+        nm_per_unit = 1
+        move_x = d["move_x_nm"]
+        move_y = d["move_y_nm"]
+    else:
+        nm_per_unit = _LEGACY_NM_PER_TICK
+        move_x = d.get("move_x_ticks", 100)
+        move_y = d.get("move_y_ticks", 100)
+        M_est = M_est / nm_per_unit
+        M_inv = M_inv * nm_per_unit
+
+    return CameraCalibration(
+        M_est=M_est,
+        M_inv=M_inv,
+        ref_x=int(d["ref_pos_x"]) * nm_per_unit,
+        ref_y=int(d["ref_pos_y"]) * nm_per_unit,
+        ref_z=int(d["ref_pos_z"]) * nm_per_unit,
+        image_width=int(d["image_width"]),
+        image_height=int(d["image_height"]),
+        move_x_nm=int(move_x) * nm_per_unit,
+        move_y_nm=int(move_y) * nm_per_unit,
+        dpi=d.get("dpi"),
+        y_axis_orientation=derive_y_axis_orientation(M_est),
+    )
+
+
+def _dump_camera_calibration(cal: CameraCalibration) -> dict[str, Any]:
+    # yaml.safe_dump rejects numpy arrays and scalars, so everything is
+    # converted to native Python types.
+    def _to_float_list(arr: np.ndarray) -> list[list[float]]:
+        return [[float(v) for v in row] for row in arr]
+
+    return {
+        "M_est": _to_float_list(cal.M_est),
+        "M_inv": _to_float_list(cal.M_inv),
+        "ref_pos_x": cal.ref_x,
+        "ref_pos_y": cal.ref_y,
+        "ref_pos_z": cal.ref_z,
+        "image_width": cal.image_width,
+        "image_height": cal.image_height,
+        "move_x_nm": cal.move_x_nm,
+        "move_y_nm": cal.move_y_nm,
+        "dpi": float(cal.dpi) if cal.dpi is not None else None,
+    }
+
+
 class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
     """
     Persistent configuration manager for machine-vision settings.
@@ -663,12 +789,12 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         calibration: CameraCalibration | None = None
         if cal_dict:
             try:
-                calibration = CameraCalibration.from_dict(cal_dict)
+                calibration = _load_camera_calibration(cal_dict)
             except Exception:
                 pass  # Corrupt saved calibration; start uncalibrated.
         camera_calibration = CameraCalibrationSettings(
-            move_x_ticks=cal_data.get("move_x_ticks", D.move_x_ticks),
-            move_y_ticks=cal_data.get("move_y_ticks", D.move_y_ticks),
+            move_x_nm=cal_data.get("move_x_nm", D.move_x_nm),
+            move_y_nm=cal_data.get("move_y_nm", D.move_y_nm),
             calibration=calibration,
         )
 
@@ -696,14 +822,29 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
             z_nm=icp_data.get("z_nm", 0),
         )
 
+        sicp_data: dict[str, Any] = data.get("single_image_calibration_position", {})
+        single_image_calibration_position = InspectionCalibrationPosition(
+            is_set=sicp_data.get("is_set", False),
+            x_nm=sicp_data.get("x_nm", 0),
+            y_nm=sicp_data.get("y_nm", 0),
+            z_nm=sicp_data.get("z_nm", 0),
+        )
+
+        raw_focus_stack_time_samples = data.get("focus_stack_time_samples_s", {})
+        focus_stack_time_samples_s = (
+            raw_focus_stack_time_samples if isinstance(raw_focus_stack_time_samples, dict) else {}
+        )
+
         return MachineVisionSettings(
             dpi=data.get("dpi"),
             focus=focus,
             camera_calibration=camera_calibration,
             inspect_calibration=inspect_calibration,
             inspection_calibration_position=inspection_calibration_position,
+            single_image_calibration_position=single_image_calibration_position,
             red_mark=_load_red_mark(data.get("red_mark", {})),
             background=_load_background(data.get("background", {})),
+            focus_stack_time_samples_s=focus_stack_time_samples_s,
         )
 
     def to_dict(self, settings: MachineVisionSettings) -> dict[str, Any]:
@@ -714,6 +855,7 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
         cc = settings.camera_calibration
         ic = settings.inspect_calibration
         icp = settings.inspection_calibration_position
+        sicp = settings.single_image_calibration_position
         rm = settings.red_mark
         bg = settings.background
         return {
@@ -747,9 +889,9 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 },
             },
             "camera_calibration": {
-                "move_x_ticks": cc.move_x_ticks,
-                "move_y_ticks": cc.move_y_ticks,
-                "calibration": cc.calibration.to_dict() if cc.calibration is not None else None,
+                "move_x_nm": cc.move_x_nm,
+                "move_y_nm": cc.move_y_nm,
+                "calibration": _dump_camera_calibration(cc.calibration) if cc.calibration is not None else None,
             },
             "inspect_calibration": {
                 "preview": {
@@ -767,6 +909,12 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 "x_nm": icp.x_nm,
                 "y_nm": icp.y_nm,
                 "z_nm": icp.z_nm,
+            },
+            "single_image_calibration_position": {
+                "is_set": sicp.is_set,
+                "x_nm": sicp.x_nm,
+                "y_nm": sicp.y_nm,
+                "z_nm": sicp.z_nm,
             },
             "red_mark": {
                 "scale": rm.scale,
@@ -790,4 +938,5 @@ class MachineVisionSettingsManager(ConfigManager[MachineVisionSettings]):
                 "val_std_max": bg.val_std_max,
                 "scale": bg.scale,
             },
+            "focus_stack_time_samples_s": settings.focus_stack_time_samples_s,
         }

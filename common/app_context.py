@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from PySide6.QtWidgets import QApplication
 from camera.camera_manager import CameraManager
+from camera.camera_enumerator import CameraInfo
 from camera.cameras.base_camera import BaseCamera
 from machine_vision.machine_vision_manager import MachineVisionManager
 from post_processing.post_processing_manager import PostProcessingManager
@@ -45,6 +46,8 @@ class AppContext:
             return
 
         self._camera_manager: CameraManager | None = None
+        # Opened at startup only because the saved camera was missing; must not overwrite the saved choice.
+        self._fallback_camera_info: CameraInfo | None = None
         self._settings_dialog: SettingsDialog | None = None
         self._settings_manager: FieldWeaveSettingsManager | None = None
         self._settings: FieldWeaveSettings | None = None
@@ -263,16 +266,52 @@ class AppContext:
         try:
             info("Initializing camera manager...")
             self._camera_manager = CameraManager()
+            self._camera_manager.active_camera_changed.connect(self._on_active_camera_changed)
             cameras = self._camera_manager.enumerate_cameras()
             if cameras:
-                info("Auto-opening first available camera...")
-                if self._camera_manager.open_first_available(start_streaming=True):
+                saved = self._settings.camera_manager.last_camera if self._settings else None
+                target = self._camera_manager.find_saved_camera(saved) if saved else None
+                if target is not None:
+                    info(f"Auto-opening last used camera: {target.display_name}")
+                else:
+                    target = cameras[0]
+                    if saved is not None:
+                        warning(
+                            f"Last used camera '{saved.display_name}' not found - "
+                            f"opening first available camera: {target.display_name}"
+                        )
+                        self._fallback_camera_info = target
+                    else:
+                        info("Auto-opening first available camera...")
+                if self._camera_manager.switch_camera(target, start_streaming=True):
                     debug("Camera opened and streaming started successfully")
                 else:
-                    warning("Failed to auto-open first camera")
+                    warning(f"Failed to auto-open camera: {target.display_name}")
         except Exception as e:
             error(f"Failed to initialize camera manager: {e}")
             self._camera_manager = None
+
+    def _on_active_camera_changed(self, camera_info: CameraInfo | None) -> None:
+        if camera_info is None:
+            return
+
+        fallback = self._fallback_camera_info
+        self._fallback_camera_info = None
+        if camera_info is fallback:
+            return
+
+        if self._settings is None or self._settings_manager is None:
+            return
+
+        saved = CameraManager.saved_camera_from_info(camera_info)
+        if self._settings.camera_manager.last_camera == saved:
+            return
+
+        self._settings.camera_manager.last_camera = saved
+        if self._settings_manager.save(self._settings):
+            info(f"Saved last used camera: {camera_info.display_name}")
+        else:
+            error("Failed to save last used camera")
 
     def _initialize_motion_manager(self) -> None:
         try:

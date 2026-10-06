@@ -25,6 +25,7 @@ from common.app_context import get_app_context
 from common.logger import info, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import Z_ONLY
 from motion.routines.autofocus.autofocus_utils import (
     move_z_and_wait,
     quantize,
@@ -73,6 +74,7 @@ class AutofocusFine(AutomationRoutine):
     """
 
     job_name = "Autofocus (Fine)"
+    requirements = Z_ONLY
 
     def __init__(
         self,

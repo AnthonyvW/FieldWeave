@@ -5,8 +5,9 @@ Settings page for motion controller / navigation configuration.
 
 Design
 ------
-- Two QGroupBoxes: "Controller" (hardware parameters) and "Navigation"
-  (axis inversion toggles and jog-step presets for the navigation widget).
+- Three QGroupBoxes: "Controller" (hardware parameters), "Axes" (enable,
+  homing and inversion per axis) and "Navigation" (jog-step presets and
+  starting height for the navigation widget).
 - Modified fields turn orange exactly like AutomationSettingsWidget does.
 - get_group_names() returns the top-level group names so SettingsDialog can
   add them as sidebar sub-items.
@@ -15,6 +16,8 @@ Design
 """
 
 from __future__ import annotations
+
+import threading
 
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
@@ -28,9 +31,10 @@ from PySide6.QtWidgets import (
 )
 
 from common.app_context import get_app_context
-from common.logger import info
+from common.logger import error, info
 from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
 
+from UI.settings.pages.navigation.axes_settings import AxesSettingsWidget
 from UI.settings.pages.navigation.controller_settings import ControllerSettingsWidget
 from UI.settings.pages.navigation.navigation_group_settings import NavigationGroupSettingsWidget
 
@@ -38,7 +42,7 @@ from UI.settings.pages.navigation.navigation_group_settings import NavigationGro
 class NavigationSettingsWidget(QWidget):
     """Full settings page for navigation / motion controller configuration."""
 
-    _GROUP_NAMES = ["Controller", "Navigation"]
+    _GROUP_NAMES = ["Controller", "Axes", "Navigation"]
 
     def __init__(self, parent_dialog=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -79,13 +83,16 @@ class NavigationSettingsWidget(QWidget):
         cl.addWidget(title)
 
         self._controller = ControllerSettingsWidget()
-        self._controller.connect_signals(self._on_controller_changed)
+        self._controller.connect_signals(self._on_controller_changed, self._on_connect_port)
         cl.addWidget(self._controller)
+
+        self._axes = AxesSettingsWidget()
+        self._axes.connect_signals(self._on_axes_check)
+        cl.addWidget(self._axes)
 
         self._navigation = NavigationGroupSettingsWidget()
         self._navigation.connect_signals(
             self._on_nav_float,
-            self._on_nav_check,
             self._on_set_current_height,
             self._on_reset_height,
         )
@@ -93,6 +100,7 @@ class NavigationSettingsWidget(QWidget):
 
         if self.parent_dialog and hasattr(self.parent_dialog, "register_group_box"):
             self.parent_dialog.register_group_box("Navigation", "Controller", self._controller)
+            self.parent_dialog.register_group_box("Navigation", "Axes", self._axes)
             self.parent_dialog.register_group_box("Navigation", "Navigation", self._navigation)
 
         cl.addStretch()
@@ -111,8 +119,10 @@ class NavigationSettingsWidget(QWidget):
 
     def _populate_from_settings(self, s: MotionSystemSettings) -> None:
         self._controller.populate(s)
+        self._axes.populate(s)
         self._navigation.populate(s)
         self._controller.snapshot(s)
+        self._axes.snapshot(s)
         self._navigation.snapshot(s)
         self._set_unsaved(False)
 
@@ -120,8 +130,14 @@ class NavigationSettingsWidget(QWidget):
         s = self._live_settings()
         if s is not None:
             self._controller.apply_to_live(key, value, s)
-        current = self._controller._w[key].value()
-        self._controller.mark_field(key, current)
+        self._controller.mark_field(key, value)
+        self._recheck_unsaved()
+
+    def _on_axes_check(self, key: str, value: bool) -> None:
+        s = self._live_settings()
+        if s is not None:
+            self._axes.apply_to_live(key, value, s)
+        self._axes.mark_field(key, value)
         self._recheck_unsaved()
 
     def _on_nav_float(self, key: str, value: float) -> None:
@@ -129,13 +145,6 @@ class NavigationSettingsWidget(QWidget):
         if s is not None:
             self._navigation.apply_float_to_live(key, value, s)
         self._navigation.mark_float_field(key, value)
-        self._recheck_unsaved()
-
-    def _on_nav_check(self, key: str, value: bool) -> None:
-        s = self._live_settings()
-        if s is not None:
-            self._navigation.apply_check_to_live(key, value, s)
-        self._navigation.mark_check_field(key, value)
         self._recheck_unsaved()
 
     @Slot()
@@ -148,11 +157,13 @@ class NavigationSettingsWidget(QWidget):
 
     def _recheck_unsaved(self) -> None:
         controller_changed = self._controller.has_changes()
+        axes_changed = self._axes.has_changes()
         nav_changed = self._navigation.has_changes()
-        has_changes = controller_changed or nav_changed
+        has_changes = controller_changed or axes_changed or nav_changed
 
         if self.parent_dialog and hasattr(self.parent_dialog, "set_category_modified"):
             self.parent_dialog.set_category_modified("Navigation", controller_changed, "Controller")
+            self.parent_dialog.set_category_modified("Navigation", axes_changed, "Axes")
             self.parent_dialog.set_category_modified("Navigation", nav_changed, "Navigation")
 
         self._set_unsaved(has_changes)
@@ -162,14 +173,63 @@ class NavigationSettingsWidget(QWidget):
         ctx = get_app_context()
         s = self._current_settings()
         self._settings_manager.save(s)
+        reconnect = self._controller.connection_changed(s)
         self._controller.snapshot(s)
+        self._axes.snapshot(s)
         self._navigation.snapshot(s)
         self._controller.clear_orange()
+        self._axes.clear_orange()
         self._navigation.clear_orange()
         self._recheck_unsaved()
         self._set_unsaved(False)
         ctx.toast.success("Navigation settings saved", duration=2000)
         info("Navigation settings saved")
+        if reconnect:
+            self._reconnect_motion()
+
+    @Slot()
+    def _on_connect_port(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        s = self._live_settings()
+        if motion is None or s is None:
+            return
+        if motion.routine_running:
+            ctx.toast.warning("Stop the running routine before changing the motion controller port.")
+            return
+
+        port = self._controller.selected_port()
+        s.com_port = port
+        # Persist only the port so other unsaved edits on this page stay pending.
+        try:
+            on_disk = self._settings_manager.load()
+            on_disk.com_port = port
+            saved = self._settings_manager.save(on_disk)
+        except Exception as exc:
+            error(f"Failed to save motion controller port: {exc}")
+            saved = False
+        if saved:
+            self._controller.mark_port_saved(port)
+        else:
+            ctx.toast.warning("Could not save the selected port; it will only be used until FieldWeave restarts.")
+        self._recheck_unsaved()
+
+        self._reconnect_motion()
+
+    def _reconnect_motion(self) -> None:
+        ctx = get_app_context()
+        motion = ctx.motion
+        if motion is None:
+            return
+        if motion.routine_running:
+            ctx.toast.warning(
+                "A routine is running. The new connection settings will be used after FieldWeave restarts.",
+            )
+            return
+        port = motion.settings.com_port if motion.settings is not None else ""
+        ctx.toast.info(f"Connecting to {port or 'motion controller (auto-detect)'}...", duration=2000)
+        info("Connection settings changed, restarting motion controller")
+        threading.Thread(target=motion.restart, daemon=True, name="MotionRestart").start()
 
     def _set_unsaved(self, has_changes: bool) -> None:
         self._has_unsaved_changes = has_changes

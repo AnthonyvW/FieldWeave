@@ -25,6 +25,9 @@ Typical usage — queued (fire and forget)::
         manager.queue_routine(routine)
 
     manager.wait_for_queue(check_stop=lambda: should_abort)
+
+Queued routines may run several at a time - see
+``PostProcessingSettings.max_concurrent_focus_stacks``.
 """
 
 from __future__ import annotations
@@ -51,12 +54,15 @@ RoutineCompleteCallback = Callable[["RoutineResult"], None]
 
 class PostProcessingManager:
     """
-    Manages the lifecycle of the active :class:`PostProcessingRoutine`.
+    Manages the lifecycle of the active :class:`PostProcessingRoutine`, plus a
+    separate queue of routines that can run several at a time.
 
-    Only one routine runs at a time.  The manager wires the routine's
-    ``on_state_changed`` callback to its own listener list so UI components
-    only need to subscribe once here rather than re-subscribing each time a
-    new routine is created.
+    Immediate execution (`start_routine`) is limited to one routine at a
+    time - see below.  Queued execution (`queue_routine`) is independent of
+    that and may run multiple routines concurrently.  The manager wires each
+    routine's ``on_state_changed``/``on_complete`` callbacks to its own
+    listener lists so UI components only need to subscribe once here rather
+    than re-subscribing each time a new routine is created.
 
     Settings are owned by :class:`AppContext` and read live from there via
     the :attr:`settings` property, so this manager never holds its own copy.
@@ -66,16 +72,18 @@ class PostProcessingManager:
     State change notifications
     --------------------------
     Register a callable with  `add_routine_state_listener` to receive
-    live job/activity/progress updates from whatever routine is currently
-    active.
+    live job/activity/progress updates from whatever routine(s) are currently
+    active, immediate or queued.
 
     Queued execution
     ----------------
-    Call  `queue_routine` to add a routine to a FIFO queue that is drained
-    by an internal worker thread.  Queued routines run one at a time in
-    submission order, concurrently with whatever the caller is doing.  Use
-     `wait_for_queue` to block until the queue is empty, or
-     `clear_queue` to discard pending jobs.
+    Call  `queue_routine` to add a routine to a FIFO queue drained by a
+    pool of worker threads.  Up to
+    ``post_processing_settings.max_concurrent_focus_stacks`` queued routines
+    run concurrently with each other and with whatever the caller is doing;
+    beyond that they wait their turn in submission order.  Use
+     `wait_for_queue` to block until the queue is empty and every queued
+    routine has finished, or  `clear_queue` to discard pending jobs.
 
     Typical usage
     -------------
@@ -99,8 +107,10 @@ class PostProcessingManager:
         self._routine_complete_listeners: list[RoutineCompleteCallback] = []
 
         self._queue: Queue[PostProcessingRoutine | None] = Queue()
-        self._queue_worker: threading.Thread | None = None
+        self._queue_workers: list[threading.Thread] = []
         self._queue_worker_lock = threading.Lock()
+        self._active_queue_routines: set[PostProcessingRoutine] = set()
+        self._active_queue_routines_lock = threading.Lock()
 
         info("PostProcessingManager: initialised")
 
@@ -256,22 +266,30 @@ class PostProcessingManager:
 
     @property
     def queue_depth(self) -> int:
-        """Number of routines waiting in the queue (excludes the one currently running)."""
+        """Number of routines waiting in the queue (excludes ones currently running)."""
         return self._queue.qsize()
+
+    @property
+    def active_queue_workers(self) -> int:
+        """Number of queued routines currently executing (excludes ones still waiting)."""
+        with self._active_queue_routines_lock:
+            return len(self._active_queue_routines)
 
     def queue_routine(self, routine: PostProcessingRoutine) -> None:
         """Add *routine* to the FIFO queue.
 
-        A worker thread is started on the first call and keeps running until
-         `shutdown` is called.  Queued routines execute one at a time in
-        submission order.  The caller is never blocked.
+        Worker threads are (re)started as needed, up to
+        ``post_processing_settings.max_concurrent_focus_stacks``, and keep
+        running until  `shutdown` is called.  Queued routines are picked
+        up in submission order but may run concurrently with each other, up
+        to that limit.  The caller is never blocked.
         """
         self._queue.put(routine)
-        self._ensure_queue_worker_running()
+        self._ensure_queue_workers_running()
         info(f"PostProcessingManager: queued routine '{routine.job_name}' (depth now {self._queue.qsize()})")
 
     def clear_queue(self) -> int:
-        """Discard all pending queued routines without affecting the one currently running.
+        """Discard all pending queued routines without affecting ones already running.
 
         Returns the number of routines that were removed.
         """
@@ -279,7 +297,7 @@ class PostProcessingManager:
         while not self._queue.empty():
             item = self._queue.get_nowait()
             if item is None:
-                self._queue.put(None)  # put the sentinel back so the worker can exit
+                self._queue.put(None)  # put the sentinel back so a worker can exit
                 break
             removed += 1
         if removed:
@@ -291,14 +309,14 @@ class PostProcessingManager:
         check_stop: Callable[[], bool] | None = None,
         poll_interval: float = 0.25,
     ) -> bool:
-        """Block until the queue is empty and the worker is idle.
+        """Block until the queue is empty and every queued routine has finished.
 
         Parameters
         ----------
         check_stop:
             Optional callable polled every *poll_interval* seconds.  If it
-            returns ``True`` the active routine is stopped, the queue is
-            cleared, and this method returns ``False``.
+            returns ``True`` every active queued routine is stopped, the
+            queue is cleared, and this method returns ``False``.
         poll_interval:
             How often to poll *check_stop* and the queue state, in seconds.
 
@@ -308,43 +326,63 @@ class PostProcessingManager:
             ``True`` if the queue drained normally, ``False`` if aborted via
             *check_stop*.
         """
-        while not self._queue.empty() or self.routine_running:
+        while not self._queue.empty() or self.active_queue_workers > 0:
             if check_stop is not None and check_stop():
-                self.stop_routine()
                 self.clear_queue()
+                self._stop_active_queue_routines()
                 return False
             time.sleep(poll_interval)
         return True
 
-    def _ensure_queue_worker_running(self) -> None:
+    def _stop_active_queue_routines(self) -> None:
+        with self._active_queue_routines_lock:
+            routines = list(self._active_queue_routines)
+        for routine in routines:
+            routine.stop()
+        for routine in routines:
+            routine.wait(timeout=10)
+
+    def _ensure_queue_workers_running(self) -> None:
         with self._queue_worker_lock:
-            if self._queue_worker is None or not self._queue_worker.is_alive():
-                self._queue_worker = threading.Thread(
+            self._queue_workers = [w for w in self._queue_workers if w.is_alive()]
+            target = max(1, self.post_processing_settings.max_concurrent_focus_stacks)
+            while len(self._queue_workers) < target:
+                worker = threading.Thread(
                     target=self._queue_worker_loop,
                     daemon=True,
-                    name="PostProcessingQueueWorker",
+                    name=f"PostProcessingQueueWorker-{len(self._queue_workers)}",
                 )
-                self._queue_worker.start()
+                self._queue_workers.append(worker)
+                worker.start()
 
     def _queue_worker_loop(self) -> None:
         while True:
             routine = self._queue.get()
             if routine is None:
                 break
-            while self.routine_running:
-                time.sleep(0.05)
-            self.start_routine(routine)
+            with self._active_queue_routines_lock:
+                self._active_queue_routines.add(routine)
+            routine.on_state_changed = self._emit_routine_state
+            routine.on_complete = self._emit_routine_complete
+            info(f"PostProcessingManager: starting queued routine '{routine.job_name}'")
+            routine.start()
             routine.wait()
+            with self._active_queue_routines_lock:
+                self._active_queue_routines.discard(routine)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Stop any running routine and drain the queue worker cleanly."""
+        """Stop any running routine and drain the queue workers cleanly."""
         self.clear_queue()
-        self._queue.put(None)  # sentinel to exit the worker loop
+        self._stop_active_queue_routines()
+        with self._queue_worker_lock:
+            workers = list(self._queue_workers)
+        for _ in workers:
+            self._queue.put(None)  # one sentinel per worker so each can exit
         self.stop_routine()
-        if self._queue_worker is not None:
-            self._queue_worker.join(timeout=10)
+        for worker in workers:
+            worker.join(timeout=10)
         info("PostProcessingManager: shut down")

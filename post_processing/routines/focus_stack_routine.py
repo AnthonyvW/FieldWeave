@@ -43,54 +43,20 @@ Typical usage — streaming::
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Generator
 
 import numpy as np
-from PIL import Image
 
 from focusweave import FocusStackConfig, RunResult, run
 from focusweave.streaming_stack import StreamingFocusStacker
 
 from common.fieldweaveConfig import FieldWeaveSettings
-from common.app_context import get_app_context
-from common.read_metadata import build_exif_bytes, build_png_info, extract_dpi, read_metadata
-from common.setting_types import FileFormat
+from common.read_metadata import read_metadata, save_image_with_metadata
 from post_processing.routines.post_processing_routine import PostProcessingRoutine
 from common.logger import info, warning, error
-
-
-def _save_stack_result(
-    image: np.ndarray,
-    out_path: Path,
-    fmt: FileFormat,
-    jpeg_quality: int,
-    metadata: dict[str, Any] | None = None,
-) -> bool:
-    # Let Pillow infer the format from out_path's extension instead of passing
-    # a format string ourselves -- avoids the FileFormat/Pillow name mismatch
-    # entirely (e.g. "jpg" vs the "JPEG" identifier Pillow expects).
-    save_kwargs: dict[str, Any] = {"quality": jpeg_quality} if fmt in (FileFormat.JPEG, FileFormat.JPG) else {}
-
-    if metadata:
-        dpi = extract_dpi(metadata)
-        if dpi is not None:
-            save_kwargs["dpi"] = (dpi, dpi)
-        if fmt == FileFormat.PNG:
-            save_kwargs["pnginfo"] = build_png_info(metadata)
-        else:
-            exif_bytes = build_exif_bytes(metadata)
-            if exif_bytes is not None:
-                save_kwargs["exif"] = exif_bytes
-
-    try:
-        Image.fromarray(image).save(out_path, **save_kwargs)
-    except OSError as exc:
-        error(f"Failed to save stacked image to {out_path}: {exc}")
-        return False
-
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +158,12 @@ class FocusStackResult:
     frame_count: int
     result_rgb: np.ndarray
     """Final stacked image in RGB888 order, shape (H, W, 3), dtype uint8."""
+    duration_s: float = 0.0
+    """
+    Wall-clock time actually spent stacking, measured from when this routine
+    started running to completion - excludes any time spent waiting in the
+    post-processing queue behind other jobs.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +212,7 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
         self.config = config or FocusStackRoutineConfig()
         self._progress_start = progress_start
         self._progress_end = progress_end
+        self.job_name = f"Focus Stack ({Path(input_folder).name})"
 
     def _map_progress(self, fraction: float) -> int:
         span = self._progress_end - self._progress_start
@@ -249,6 +222,7 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
         cfg = self.config
         input_dir = Path(self.input_folder)
         out_path = Path(self.output_path)
+        stack_start = time.monotonic()
 
         self._set_status("Stacking images", self._progress_start, 100)
 
@@ -300,8 +274,7 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fmt = get_app_context().camera.settings.fformat
-        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality, metadata):
+        if not save_image_with_metadata(result.image, out_path, metadata, cfg.jpeg_quality):
             self._set_result(success=False)
             return
 
@@ -315,6 +288,7 @@ class QueuedFocusStackRoutine(PostProcessingRoutine):
                 image_height=h,
                 frame_count=frame_count,
                 result_rgb=result.image,
+                duration_s=time.monotonic() - stack_start,
             ),
         )
 
@@ -397,6 +371,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
         self.config = config or FocusStackRoutineConfig()
         self._progress_start = progress_start
         self._progress_end = progress_end
+        self.job_name = f"Focus Stack ({Path(output_path).stem})"
 
         self._image_queue: list[np.ndarray] = []
         self._queue_lock = threading.Lock()
@@ -499,6 +474,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
                 100,
             )
 
+        stack_start = time.monotonic()
         result: RunResult = stacker.finish(
             keep_size=cfg.keep_size,
             progress=_progress,
@@ -515,8 +491,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        fmt = get_app_context().camera.settings.fformat
-        if not _save_stack_result(result.image, out_path, fmt, cfg.jpeg_quality, self.reference_metadata):
+        if not save_image_with_metadata(result.image, out_path, self.reference_metadata, cfg.jpeg_quality):
             self._set_result(success=False)
             return
 
@@ -530,6 +505,7 @@ class StreamingFocusStackRoutine(PostProcessingRoutine):
                 image_height=h,
                 frame_count=self._frame_count,
                 result_rgb=result.image,
+                duration_s=time.monotonic() - stack_start,
             ),
         )
 

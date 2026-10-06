@@ -174,7 +174,7 @@ class _VisionWorker(QObject):
         base_bytes: bytes, base_width: int, base_height: int,
         x_bytes: bytes,    x_width: int,    x_height: int,
         y_bytes: bytes,    y_width: int,    y_height: int,
-        move_x_ticks: int, move_y_ticks: int,
+        move_x_nm: int, move_y_nm: int,
         ref_x: int, ref_y: int, ref_z: int,
     ) -> None:
         try:
@@ -182,9 +182,14 @@ class _VisionWorker(QObject):
                 base_bytes, base_width, base_height,
                 x_bytes,    x_width,    x_height,
                 y_bytes,    y_width,    y_height,
-                move_x_ticks, move_y_ticks,
+                move_x_nm, move_y_nm,
                 ref_x, ref_y, ref_z,
             ))
+        except ValueError as exc:
+            # Raised for expected failures (featureless or unmatched frames);
+            # the message is meant for the user, so a traceback would bury it.
+            error(f"_VisionWorker: calibration build failed: {exc}")
+            self.calibration_error.emit(str(exc))
         except Exception:
             msg = traceback.format_exc()
             error(f"_VisionWorker: calibration build failed:\n{msg}")
@@ -366,7 +371,7 @@ class MachineVisionManager(QObject):
         image_center_y: float | None = None,
     ) -> tuple[float, float] | None:
         """
-        Convert a pixel coordinate to a stage delta in tick units.
+        Convert a pixel coordinate to a stage delta in nanometres.
 
         Delegates to ``CameraCalibration.pixel_to_world_delta``.  Returns
         ``None`` when no calibration is available.
@@ -390,8 +395,8 @@ class MachineVisionManager(QObject):
         ref_x: int,
         ref_y: int,
         ref_z: int,
-        move_x_ticks: int | None = None,
-        move_y_ticks: int | None = None,
+        move_x_nm: int | None = None,
+        move_y_nm: int | None = None,
     ) -> Future[CameraCalibration]:
         """
         Submit three RGB888 frames for calibration and return a
@@ -403,15 +408,15 @@ class MachineVisionManager(QObject):
         captures.
 
         Each frame is copied immediately so camera buffers may be reused.
-        ``move_x_ticks`` and ``move_y_ticks`` default to the values stored in
+        ``move_x_nm`` and ``move_y_nm`` default to the values stored in
         ``settings.camera_calibration`` if not supplied.
 
         On success the calibration is written into the settings object and
         persisted automatically.
         """
         cc = self._settings.camera_calibration
-        mx = move_x_ticks if move_x_ticks is not None else cc.move_x_ticks
-        my = move_y_ticks if move_y_ticks is not None else cc.move_y_ticks
+        mx = move_x_nm if move_x_nm is not None else cc.move_x_nm
+        my = move_y_nm if move_y_nm is not None else cc.move_y_nm
 
         args = (
             bytes(base_frame), base_width, base_height,
@@ -436,8 +441,8 @@ class MachineVisionManager(QObject):
         ref_x: int,
         ref_y: int,
         ref_z: int,
-        move_x_ticks: int | None = None,
-        move_y_ticks: int | None = None,
+        move_x_nm: int | None = None,
+        move_y_nm: int | None = None,
     ) -> Future[CameraCalibration]:
         """
         Submit three RGB888 frames for calibration, guaranteed to be executed.
@@ -447,15 +452,15 @@ class MachineVisionManager(QObject):
         are always drained before any waiting droppable request is dispatched.
 
         Each frame is copied immediately so camera buffers may be reused.
-        ``move_x_ticks`` and ``move_y_ticks`` default to the values stored in
+        ``move_x_nm`` and ``move_y_nm`` default to the values stored in
         ``settings.camera_calibration`` if not supplied.
 
         On success the calibration is written into the settings object and
         persisted automatically.
         """
         cc = self._settings.camera_calibration
-        mx = move_x_ticks if move_x_ticks is not None else cc.move_x_ticks
-        my = move_y_ticks if move_y_ticks is not None else cc.move_y_ticks
+        mx = move_x_nm if move_x_nm is not None else cc.move_x_nm
+        my = move_y_nm if move_y_nm is not None else cc.move_y_nm
 
         args = (
             bytes(base_frame), base_width, base_height,

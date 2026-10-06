@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import serial.tools.list_ports
 from PySide6.QtWidgets import (
     QFormLayout,
-    QSpinBox,
-    QDoubleSpinBox,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
     QWidget,
 )
 
 from motion.motion_config import MotionSystemSettings
-from UI.settings.pages.shared import NM_PER_MM, NoScrollDoubleSpinBox, NoScrollSpinBox, SettingsGroupBase
+from UI.settings.pages.shared import (
+    NM_PER_MM,
+    NoScrollComboBox,
+    NoScrollDoubleSpinBox,
+    NoScrollSpinBox,
+    SettingsGroupBase,
+)
 
 
 _DEFAULT_PRESETS_MM = (0.04, 0.4, 2.0, 10.0)
@@ -30,11 +37,34 @@ class ControllerSettingsWidget(SettingsGroupBase):
         super().__init__("Controller", parent)
         self._w: dict[str, NoScrollSpinBox | NoScrollDoubleSpinBox] = {}
         self._saved: dict[str, object] = {}
+        self._last_com_port: str = ""
         self._build()
 
     def _build(self) -> None:
         form = QFormLayout(self)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self._port_combo = NoScrollComboBox()
+        self._port_combo.setMinimumWidth(220)
+        self._port_combo.setToolTip(
+            "Serial port of the motion controller.\n"
+            "Auto-detect probes every port, starting with the last one that worked.\n"
+            "Connect uses the selected port immediately and remembers it."
+        )
+        self._connect_btn = QPushButton("Connect")
+        self._connect_btn.setToolTip("Reconnect the motion controller using the selected port.")
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setToolTip("Rescan for available serial ports.")
+        refresh_btn.clicked.connect(self._refresh_ports)
+
+        port_row = QWidget()
+        port_layout = QHBoxLayout(port_row)
+        port_layout.setContentsMargins(0, 0, 0, 0)
+        port_layout.addWidget(self._port_combo)
+        port_layout.addWidget(self._connect_btn)
+        port_layout.addWidget(refresh_btn)
+        port_layout.addStretch()
+        form.addRow(self._register_label("com_port", QLabel("Serial port:")), port_row)
 
         baud_spin = NoScrollSpinBox()
         baud_spin.setMinimum(1_200)
@@ -86,7 +116,48 @@ class ControllerSettingsWidget(SettingsGroupBase):
         self._w["step_size"] = step_spin
         form.addRow(self._register_label("step_size", QLabel("Step size:")), step_spin)
 
-    def connect_signals(self, on_change) -> None:
+    def _current_port(self) -> str:
+        return self._port_combo.currentData() or ""
+
+    def _fill_port_combo(self, selected: str) -> None:
+        self._port_combo.blockSignals(True)
+        self._port_combo.clear()
+
+        auto_label = "Auto-detect"
+        if self._last_com_port:
+            auto_label += f" (last: {self._last_com_port})"
+        self._port_combo.addItem(auto_label, "")
+
+        devices: list[str] = []
+        # include_links adds the stable /dev/serial/by-id/... names on Linux, which
+        # keep pointing at the same controller when ttyUSB/ttyACM numbers shuffle.
+        for p in sorted(serial.tools.list_ports.comports(include_links=True), key=lambda p: p.device):
+            devices.append(p.device)
+            has_desc = p.description and p.description not in ("n/a", p.device)
+            self._port_combo.addItem(f"{p.device} - {p.description}" if has_desc else p.device, p.device)
+
+        if selected and selected not in devices:
+            self._port_combo.addItem(f"{selected} (not detected)", selected)
+
+        index = self._port_combo.findData(selected)
+        self._port_combo.setCurrentIndex(max(index, 0))
+        self._port_combo.blockSignals(False)
+
+    def _refresh_ports(self) -> None:
+        self._fill_port_combo(self._current_port())
+
+    def selected_port(self) -> str:
+        return self._current_port()
+
+    def mark_port_saved(self, port: str) -> None:
+        self._saved["com_port"] = port
+        self.mark_label("com_port", False)
+
+    def connect_signals(self, on_change, on_connect) -> None:
+        self._connect_btn.clicked.connect(on_connect)
+        self._port_combo.currentIndexChanged.connect(
+            lambda _i: on_change("com_port", self._current_port())
+        )
         for key, widget in self._w.items():
             widget.valueChanged.connect(lambda v, k=key: on_change(k, v))
 
@@ -94,6 +165,8 @@ class ControllerSettingsWidget(SettingsGroupBase):
         for w in self._w.values():
             w.blockSignals(True)
 
+        self._last_com_port = s.last_com_port
+        self._fill_port_combo(s.com_port)
         self._w["baud_rate"].setValue(s.baud_rate)
         self._w["max_x"].setValue(s.max_x)
         self._w["max_y"].setValue(s.max_y)
@@ -103,8 +176,13 @@ class ControllerSettingsWidget(SettingsGroupBase):
         for w in self._w.values():
             w.blockSignals(False)
 
+    def connection_changed(self, s: MotionSystemSettings) -> bool:
+        """True if *s* differs from the snapshot in a way that requires reconnecting."""
+        return s.com_port != self._saved.get("com_port") or s.baud_rate != self._saved.get("baud_rate")
+
     def snapshot(self, s: MotionSystemSettings) -> None:
         self._saved = {
+            "com_port":  s.com_port,
             "baud_rate": s.baud_rate,
             "max_x":     s.max_x,
             "max_y":     s.max_y,
@@ -113,7 +191,9 @@ class ControllerSettingsWidget(SettingsGroupBase):
         }
 
     def apply_to_live(self, key: str, value: object, s: MotionSystemSettings) -> None:
-        if key == "baud_rate":
+        if key == "com_port":
+            s.com_port = str(value)
+        elif key == "baud_rate":
             s.baud_rate = int(value)  # type: ignore[arg-type]
         elif key == "max_x":
             s.max_x = int(value)  # type: ignore[arg-type]
@@ -134,6 +214,7 @@ class ControllerSettingsWidget(SettingsGroupBase):
 
     def has_changes(self) -> bool:
         checks = {
+            "com_port":  self._current_port(),
             "baud_rate": self._w["baud_rate"].value(),
             "max_x":     self._w["max_x"].value(),
             "max_y":     self._w["max_y"].value(),

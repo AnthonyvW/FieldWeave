@@ -45,6 +45,7 @@ from common.logger import info, warning, error
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position, pixels_to_stage_delta
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XY
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from machine_vision.algorithms.red_mark_detection import RedMarkDetectionResult
 
@@ -75,6 +76,7 @@ class RedMarkCenteringRoutine(AutomationRoutine):
     """
 
     job_name = "Red Mark Centering"
+    requirements = XY
 
     def __init__(
         self,
@@ -189,7 +191,7 @@ class RedMarkCenteringRoutine(AutomationRoutine):
         else:
             away_pixel = band_lo_mark - centre_pos
 
-        # pixel_to_world_delta returns the stage move (in ticks) to bring the
+        # pixel_to_world_delta returns the stage move (in nm) to bring the
         # given pixel coordinate to the image centre.  We only need it once,
         # for the mark itself.  The away-move is a proportional fraction of
         # that same delta — scaling by away_pixel / pixel_offset_to_mark gives

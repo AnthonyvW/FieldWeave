@@ -50,6 +50,22 @@ class CameraSettings(ABC):
     _file_formats: tuple[str, ...] = tuple(f.value for f in FileFormat)
     _ui_update_callback: Any | None = field(default=None, repr=False, compare=False)
 
+    # Rolling per-resolution still-capture durations (most recent last, capped
+    # at MAX_CAPTURE_TIME_SAMPLES), keyed by "WxH". Deliberately absent from
+    # get_metadata() so it never becomes an editable control in the camera
+    # settings UI - only record_capture_time_s() updates it.
+    capture_time_samples_s: dict[str, list[float]] = field(default_factory=dict)
+
+    # Unannotated so dataclass() doesn't treat these as fields - otherwise
+    # they'd round-trip through to_dict()/from_dict() as if they were
+    # per-instance data and the reload would fail (they aren't __init__ params).
+    #
+    # 1.5s matches the fixed per-image estimate area scans used before this
+    # per-resolution tracking existed, kept as the baseline until real samples
+    # are recorded.
+    DEFAULT_CAPTURE_TIME_S = 1.5
+    MAX_CAPTURE_TIME_SAMPLES = 20
+
     def __post_init__(self) -> None:
         if isinstance(self.fformat, str):
             self.fformat = FileFormat(self.fformat)
@@ -271,6 +287,53 @@ class CameraSettings(ABC):
         if value < default:
             return 1
         return 0
+
+    # ------------------------------------------------------------------
+    # Per-resolution capture-time tracking
+    # ------------------------------------------------------------------
+
+    def get_resolution_key(self, resolution_index: int = 0) -> str:
+        """Return a stable "WxH" key for the still resolution at *resolution_index*.
+
+        Falls back to whatever resolution is currently configured when the
+        camera can't enumerate discrete still resolutions (e.g. USB cameras,
+        which grab stills from the live preview stream instead).
+        """
+        resolutions = self.get_still_resolutions()
+        if resolutions and 0 <= resolution_index < len(resolutions):
+            r = resolutions[resolution_index]
+            return f"{r.width}x{r.height}"
+        _, w, h = self.get_current_still_resolution()
+        return f"{w}x{h}"
+
+    def get_current_resolution_key(self) -> str:
+        """Return a stable "WxH" key for whatever still resolution is
+        currently configured (via ``get_current_still_resolution()``).
+
+        Unlike ``get_resolution_key()``, this reflects the resolution actually
+        configured on the camera rather than a specific capture-call index.
+        """
+        _, w, h = self.get_current_still_resolution()
+        return f"{w}x{h}"
+
+    def get_average_capture_time_s(self, resolution_key: str) -> float:
+        """Mean of the recorded capture durations for *resolution_key*.
+
+        Returns ``DEFAULT_CAPTURE_TIME_S`` when no samples have been recorded yet.
+        """
+        samples = self.capture_time_samples_s.get(resolution_key)
+        if not samples:
+            return self.DEFAULT_CAPTURE_TIME_S
+        return sum(samples) / len(samples)
+
+    def record_capture_time_s(self, resolution_key: str, duration_s: float) -> None:
+        """Record a still-capture duration, keeping only the most recent
+        ``MAX_CAPTURE_TIME_SAMPLES`` samples for *resolution_key*.
+        """
+        samples = self.capture_time_samples_s.setdefault(resolution_key, [])
+        samples.append(duration_s)
+        if len(samples) > self.MAX_CAPTURE_TIME_SAMPLES:
+            del samples[: len(samples) - self.MAX_CAPTURE_TIME_SAMPLES]
 
     def supports_histogram(self) -> bool:
         """

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -13,7 +15,7 @@ import serial.tools.list_ports
 from common.logger import info, error, warning, debug
 
 from motion.models import Position
-from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManager
+from motion.motion_config import AXES, MotionSystemSettings, MotionSystemSettingsManager
 
 _NM_PER_MM = 1_000_000
 
@@ -23,6 +25,12 @@ def _is_move(gc: str) -> bool:
     return gc.upper().split()[0] in ("G0", "G1", "G28")
 
 
+def _g28_axes(gc: str) -> tuple[str, ...]:
+    """Axes homed by a G28 command; a bare G28 homes every axis."""
+    named = tuple(a for a in AXES if a.upper() in gc.upper().split()[1:])
+    return named or AXES
+
+
 def _probe_port(
     port_device: str,
     baud: int,
@@ -30,24 +38,30 @@ def _probe_port(
     request: bytes = b"M115\r\n",
     read_window_s: float = 10,
     min_lines: int = 3,
+    stop_event: threading.Event | None = None,
 ) -> tuple[serial.Serial | None, list[str]]:
     """
     Try to identify a Marlin-like printer on a single serial port.
 
     Returns (serial_connection, response_lines) on success, or
     (None, response_lines) on failure.  On success the connection is left
-    open for the caller.
+    open for the caller.  Probing is abandoned early if *stop_event* is set.
     """
+    def stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
     responses: list[str] = []
     ser: serial.Serial | None = None
     success = False
     try:
-        ser = serial.Serial(port_device, baudrate=baud, timeout=1, write_timeout=1)
+        # Exclusive so another process (or a stale controller) holding the
+        # port on Linux makes the open fail instead of silently sharing it.
+        ser = serial.Serial(port_device, baudrate=baud, timeout=1, write_timeout=1, exclusive=True)
 
         # Some controllers reset on open due to DTR; allow them to chatter.
         start = time.time()
         quiet_since = start
-        while time.time() - start < 2.0:
+        while time.time() - start < 2.0 and not stopped():
             while ser.in_waiting:
                 line = ser.readline().decode("utf-8", errors="ignore").strip()
                 if line:
@@ -61,7 +75,7 @@ def _probe_port(
         ser.write(request)
 
         start = time.time()
-        while time.time() - start < read_window_s:
+        while time.time() - start < read_window_s and not stopped():
             if ser.in_waiting:
                 line = ser.readline().decode("utf-8", errors="ignore").strip()
                 if line:
@@ -77,6 +91,13 @@ def _probe_port(
 
         return (ser, responses) if success else (None, responses)
 
+    except serial.SerialException as exc:
+        hint = ""
+        if exc.errno == errno.EACCES and sys.platform.startswith("linux"):
+            hint = " (add your user to the 'dialout' group and log in again)"
+        warning(f"Could not open {port_device}{hint}: {exc}")
+        return None, responses
+
     except Exception:
         return None, responses
 
@@ -91,7 +112,7 @@ def _probe_port(
 class MotionState:
     """Current lifecycle state of the motion controller."""
     CONNECTING = "connecting"    # Worker thread is still starting up / probing serial
-    HOMING     = "homing"        # Connected to printer, running initial homing sequence
+    HOMING     = "homing"        # Connected to printer, running a homing sequence
     READY      = "ready"         # Connected, homed, and accepting commands
     FAULTED    = "faulted"       # Runtime fault (bad G-code response, timeout, etc.)
     FAILED     = "failed"        # Could not connect at all during initialisation
@@ -127,15 +148,18 @@ class MotionController:
     - Expose a simple message-listener hook for UI feedback.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: MotionSystemSettings | None = None) -> None:
         self._config_manager = MotionSystemSettingsManager()
-        self.config: MotionSystemSettings = self._config_manager.load()
+        self.config: MotionSystemSettings = config if config is not None else self._config_manager.load()
 
         self.position = Position(0, 0, 0)
         self.faulted = False
+        # Replaced rather than mutated so the UI can read it from another thread.
+        self.homed_axes: frozenset[str] = frozenset()
 
         self._ready = threading.Event()
         self._homing = False
+        self._home_done: threading.Event | None = None
         self._init_error: Exception | None = None
 
         self._stop_event = threading.Event()
@@ -158,7 +182,17 @@ class MotionController:
             return MotionState.FAULTED
         if not self._ready.is_set():
             return MotionState.HOMING if self._homing else MotionState.CONNECTING
+        home_done = self._home_done
+        if home_done is not None and not home_done.is_set():
+            return MotionState.HOMING
         return MotionState.READY
+
+    @property
+    def connection_error(self) -> str | None:
+        """Why connecting failed, or None if it has not failed (or was cancelled by shutdown)."""
+        if self._init_error is None or self._stop_event.is_set():
+            return None
+        return str(self._init_error)
 
     def is_ready(self) -> bool:
         """Return True once the printer has been found and homed."""
@@ -188,24 +222,34 @@ class MotionController:
             self._ready.set()
             return
 
-        self._homing = True
-        self._home()
-        self._homing = False
+        self._exec(_Command("G90", message="Setting absolute positioning"))
+        if self.config.home_on_startup and self.config.homing_axes:
+            self._homing = True
+            self._home()
+            self._homing = False
         self._ready.set()
         self._run_loop()
 
     def _connect(self) -> None:
-        """Probe available serial ports and open the first Marlin printer found."""
+        """Open the configured port, or probe available ports starting with the last one used."""
         baud = self.config.baud_rate
         indicators = [self.config.FIRMWARE_NAME, self.config.MACHINE_TYPE, "TF init", "echo:"]
 
         detected = [p.device for p in serial.tools.list_ports.comports()]
-        if not detected:
-            raise RuntimeError("No serial ports found. Is the printer connected?")
-
         info(f"Available ports: {detected}")
 
-        for dev in detected:
+        manual = self.config.com_port
+        if manual:
+            candidates = [manual]
+        else:
+            if not detected:
+                raise RuntimeError("No serial ports found. Is the printer connected?")
+            last = self.config.last_com_port
+            candidates = [last] + [d for d in detected if d != last] if last in detected else detected
+
+        for dev in candidates:
+            if self._stop_event.is_set():
+                raise RuntimeError("Connection cancelled")
             debug(f"Trying {dev} ...")
             ser, lines = _probe_port(
                 port_device=dev,
@@ -214,16 +258,39 @@ class MotionController:
                 request=b"M115\n",
                 read_window_s=10,
                 min_lines=3,
+                stop_event=self._stop_event,
             )
             if ser is not None:
+                if self._stop_event.is_set():
+                    ser.close()
+                    raise RuntimeError("Connection cancelled")
                 self._serial = ser
                 info(f"Printer found on {dev}")
                 for ln in lines[-10:]:
                     debug(f"[{dev}] {ln}")
+                self._remember_port(dev)
                 return
             warning(f"{dev} did not respond as a compatible printer ({len(lines)} line(s))")
 
-        raise RuntimeError(f"Printer not found on any port. Tried: {detected}")
+        if manual:
+            raise RuntimeError(
+                f"Printer not found on configured port {manual}. "
+                "Select a different port or Auto-detect in the navigation settings."
+            )
+        raise RuntimeError(f"Printer not found on any port. Tried: {candidates}")
+
+    def _remember_port(self, dev: str) -> None:
+        if self.config.last_com_port == dev:
+            return
+        self.config.last_com_port = dev
+        # Save from a fresh copy of the file so unsaved edits made in the
+        # settings dialog while probing are not persisted as a side effect.
+        try:
+            on_disk = self._config_manager.load()
+            on_disk.last_com_port = dev
+            self._config_manager.save(on_disk)
+        except Exception as exc:
+            warning(f"Could not save last COM port: {exc}")
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -268,6 +335,8 @@ class MotionController:
         self._send_and_wait(gc)
         if _is_move(gc):
             self._send_and_wait("M400")
+        if gc.upper().startswith("G28"):
+            self.homed_axes = self.homed_axes | frozenset(_g28_axes(gc))
 
     def _send_and_wait(self, gc: str) -> None:
         self._serial.write(f"{gc}\n".encode())
@@ -291,8 +360,13 @@ class MotionController:
 
     def _track_position(self, gc: str) -> None:
         upper = gc.upper()
-        if upper == "G28":
-            self.position = Position(0, 0, 0)
+        if upper.startswith("G28"):
+            homed = _g28_axes(gc)
+            self.position = Position(
+                x=0 if "x" in homed else self.position.x,
+                y=0 if "y" in homed else self.position.y,
+                z=0 if "z" in homed else self.position.z,
+            )
             return
         cmd_code = upper.split()[0] if upper else ""
         if cmd_code not in ("G0", "G1"):
@@ -313,13 +387,26 @@ class MotionController:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _home(self) -> None:
-        self._exec(_Command("G90", message="Setting absolute positioning"))
-        self._exec(_Command("G28", message="Homing..."))
+    def _home_commands(self) -> list[_Command]:
+        axes = self.config.homing_axes
+        commands = [
+            _Command("G90", message="Setting absolute positioning"),
+            _Command(
+                "G28 " + " ".join(a.upper() for a in axes),
+                message=f"Homing {', '.join(a.upper() for a in axes)}...",
+            ),
+        ]
         starting_height_nm = self.config.starting_height_nm
-        if starting_height_nm > 0:
+        if starting_height_nm > 0 and "z" in axes:
             mm = starting_height_nm / _NM_PER_MM
-            self._exec(_Command(f"G0 Z{mm:.6f}", message=f"Moving to starting height ({mm:.3f} mm)"))
+            commands.append(
+                _Command(f"G0 Z{mm:.6f}", message=f"Moving to starting height ({mm:.3f} mm)")
+            )
+        return commands
+
+    def _home(self) -> None:
+        for cmd in self._home_commands():
+            self._exec(cmd)
 
     def _enqueue(self, gc: str, message: str = "", log: bool = False) -> threading.Event:
         """Enqueue a G-code command and return its completion event.
@@ -400,8 +487,12 @@ class MotionController:
 
         If *wait* is True, blocks until the printer acknowledges the move.
         """
+        axes = self.config.enabled_axes
+        if not axes:
+            warning("Ignoring move: every axis is disabled")
+            return
         event = self._enqueue(
-            f"G0 {position.to_gcode()}",
+            f"G0 {position.to_gcode(axes)}",
             message=f"Moving to {position}",
         )
         if wait:
@@ -420,6 +511,10 @@ class MotionController:
         Returns False (and does not enqueue) if the resulting position would
         exceed the configured axis limits.
         """
+        if axis not in self.config.enabled_axes:
+            warning(f"Ignoring move: {axis.upper()} axis is disabled")
+            return False
+
         current_nm: int = getattr(self.position, axis)
         new_nm = current_nm + amount_nm if is_relative else amount_nm
 
@@ -445,21 +540,19 @@ class MotionController:
         return self.move(axis, amount_nm, wait=wait)
 
     def home(self, *, wait: bool = False) -> None:
-        """Enqueue a homing sequence (G90 + G28), then move to the configured
-        starting height if one is set.
+        """Enqueue a homing sequence (G90 + G28) for the axes with homing
+        enabled, then move to the configured starting height if Z was homed.
 
         If *wait* is True, blocks until all commands have been acknowledged
         by the printer.
         """
-        self._enqueue("G90", message="Set absolute positioning")
-        self._enqueue("G28", message="Homing...")
-        starting_height_nm = self.config.starting_height_nm
-        if starting_height_nm > 0:
-            mm = starting_height_nm / _NM_PER_MM
-            self._enqueue(
-                f"G0 Z{mm:.6f}",
-                message=f"Moving to starting height ({mm:.3f} mm)",
-            )
+        if not self.config.homing_axes:
+            warning("Ignoring home: homing is disabled for every axis")
+            return
+        done: threading.Event | None = None
+        for cmd in self._home_commands():
+            done = self._enqueue(cmd.gcode, message=cmd.message or "")
+        self._home_done = done
         if wait:
             self.wait_for_idle()
 

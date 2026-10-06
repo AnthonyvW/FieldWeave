@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -19,8 +20,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 
+from camera.settings.camera_settings import CameraSettings
 from common.app_context import get_app_context
+from common.fieldweaveConfig import PostProcessingSettings
 from common.logger import warning, error
+from machine_vision.machine_vision_config import MachineVisionSettings
 from motion.routines.area_scan import AreaScan
 from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 from UI.widgets.utilities.open_filesystem_object_button import OpenFolderButton
@@ -31,7 +35,88 @@ from UI.widgets.automation.output_folder_widget import OutputFolderWidget
 # Confirmation dialog
 # ---------------------------------------------------------------------------
 
-TIME_PER_IMAGE = 1.5 # Actual time it takes is 1.3, but it takes 0.2 seconds to settle
+def _get_time_per_image_s() -> float:
+    """Mean still-capture duration for the resolution the area scan will use.
+
+    Falls back to ``CameraSettings.DEFAULT_CAPTURE_TIME_S`` before any capture
+    history has been recorded for that resolution, or if the camera isn't
+    ready yet.
+    """
+    camera = get_app_context().camera
+    if camera is None:
+        return CameraSettings.DEFAULT_CAPTURE_TIME_S
+    try:
+        settings = camera.settings
+    except RuntimeError:
+        return CameraSettings.DEFAULT_CAPTURE_TIME_S
+    return settings.get_average_capture_time_s(settings.get_resolution_key(0))
+
+
+def _get_focus_stack_time_per_image_s() -> float:
+    """Mean focus-stack seconds-per-image for the resolution the area scan will use.
+
+    Falls back to ``MachineVisionSettings.DEFAULT_FOCUS_STACK_TIME_PER_IMAGE_S``
+    before any focus-stack history has been recorded for that resolution, or
+    if the camera/machine-vision subsystem isn't ready yet.
+    """
+    ctx = get_app_context()
+    camera = ctx.camera
+    mv = ctx.machine_vision
+    if camera is None or mv is None or mv.settings is None:
+        return MachineVisionSettings.DEFAULT_FOCUS_STACK_TIME_PER_IMAGE_S
+    try:
+        resolution_key = camera.settings.get_current_resolution_key()
+    except RuntimeError:
+        return MachineVisionSettings.DEFAULT_FOCUS_STACK_TIME_PER_IMAGE_S
+    return mv.settings.get_focus_stack_time_per_image_s(resolution_key)
+
+
+def _get_focus_stack_concurrency() -> int:
+    """How many focus stacks the post-processing manager runs at once."""
+    post_processing = get_app_context().post_processing
+    if post_processing is None:
+        return PostProcessingSettings.max_concurrent_focus_stacks
+    return max(1, post_processing.post_processing_settings.max_concurrent_focus_stacks)
+
+
+def _get_overhead_times_s() -> tuple[float, float]:
+    """(xy_overhead_s, z_overhead_s): mean move+settle overhead per stack and
+    per Z slice, learned from completed scans.
+
+    Falls back to the configured settle times (a lower bound - actual move
+    time isn't known ahead of a scan) when no history has been recorded yet
+    or the motion controller isn't ready.
+    """
+    motion = get_app_context().motion
+    if motion is None or motion.settings is None:
+        return 0.0, 0.0
+    automation = motion.settings.automation
+    xy_fallback_s = automation.settle_travel_ms / 1000.0
+    z_fallback_s = automation.settle_z_ms / 1000.0
+    return (
+        automation.get_xy_overhead_time_s(xy_fallback_s),
+        automation.get_z_overhead_time_s(z_fallback_s),
+    )
+
+
+def _format_duration(total_seconds: int) -> str:
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _format_completion_time(total_seconds: int) -> str:
+    """Wall-clock time *total_seconds* from now, for display as "done by"."""
+    now = datetime.now()
+    finish = now + timedelta(seconds=total_seconds)
+    if finish.date() == now.date():
+        return finish.strftime("%H:%M")
+    return finish.strftime("%Y-%m-%d %H:%M")
+
 
 class _ConfirmAreaScanDialog(QDialog):
     """Modal dialog summarising the area scan parameters before starting."""
@@ -49,6 +134,12 @@ class _ConfirmAreaScanDialog(QDialog):
         z_step_mm: float,
         step_decimals: int,
         output_folder: str,
+        time_per_image_s: float,
+        xy_overhead_s: float,
+        z_overhead_s: float,
+        focus_stack_enabled: bool,
+        focus_stack_time_per_image_s: float,
+        focus_stack_concurrency: int,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -69,16 +160,27 @@ class _ConfirmAreaScanDialog(QDialog):
         total_stacks = n_x * n_y
         total_images = total_stacks * n_z
 
-        # Rough estimate of how long it'll take
-        total_seconds = math.ceil(total_images * TIME_PER_IMAGE + total_stacks * 1.0)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours:
-            time_str = f"{hours}h {minutes}m {seconds}s"
-        elif minutes:
-            time_str = f"{minutes}m {seconds}s"
+        # Rough estimate of how long imaging alone will take. Z overhead is
+        # per slice (i.e. per image); XY overhead is per stack.
+        imaging_seconds = math.ceil(
+            total_images * (time_per_image_s + z_overhead_s) + total_stacks * xy_overhead_s
+        )
+        imaging_time_str = _format_duration(imaging_seconds)
+
+        # Focus stacking runs in parallel with imaging, and up to
+        # focus_stack_concurrency stacks run at once - but the very last
+        # stack can't be focus-stacked before its own images are captured,
+        # so the total is never sooner than imaging finishing plus that
+        # stack's own stacking time.
+        if focus_stack_enabled:
+            single_stack_focus_s = n_z * focus_stack_time_per_image_s
+            waves = math.ceil(total_stacks / focus_stack_concurrency) if total_stacks > 0 else 0
+            focus_stack_seconds = waves * single_stack_focus_s
+            finish_seconds = math.ceil(max(imaging_seconds + single_stack_focus_s, focus_stack_seconds))
+            total_time_str = _format_duration(finish_seconds)
+            done_by_str = _format_completion_time(finish_seconds)
         else:
-            time_str = f"{seconds}s"
+            done_by_str = _format_completion_time(imaging_seconds)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -106,9 +208,14 @@ class _ConfirmAreaScanDialog(QDialog):
             ("Z step / slices", f"{z_step_mm:{fmt}} mm  ({n_z} slices)"),
             ("Total XY positions", str(total_stacks)),
             ("Total images", str(total_images)),
-            ("Estimated time", time_str),
-            ("Output folder", output_folder),
         ]
+        if focus_stack_enabled:
+            rows.append(("Imaging time", imaging_time_str))
+            rows.append(("Total time (with stacking)", total_time_str))
+        else:
+            rows.append(("Estimated time", imaging_time_str))
+        rows.append(("Done by", done_by_str))
+        rows.append(("Output folder", output_folder))
 
         for label_text, value_text in rows:
             row = QWidget()
@@ -292,6 +399,7 @@ class AreaScanWidget(QWidget):
     """Widget for configuring and running a area scan across an XY grid."""
 
     mode_name: str = "Area Scan"
+    requirements = AreaScan.requirements
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -355,6 +463,7 @@ class AreaScanWidget(QWidget):
         self._fs_enable_check.stateChanged.connect(
             lambda v: self._write_check_to_settings("run_focus_stack", v)
         )
+        self._fs_enable_check.stateChanged.connect(self._update_summary)
         fs_layout.addWidget(self._fs_enable_check)
 
         self._fs_settings_widget = QWidget()
@@ -529,6 +638,27 @@ class AreaScanWidget(QWidget):
         workers_layout.addStretch(1)
         advanced_layout.addWidget(workers_row)
 
+        concurrent_stacks_row = QWidget()
+        concurrent_stacks_layout = QHBoxLayout(concurrent_stacks_row)
+        concurrent_stacks_layout.setContentsMargins(0, 0, 0, 0)
+        concurrent_stacks_layout.setSpacing(8)
+        concurrent_stacks_layout.addWidget(QLabel("Concurrent stacks:"))
+        self._concurrent_stacks_spin = QSpinBox()
+        self._concurrent_stacks_spin.setFixedHeight(28)
+        self._concurrent_stacks_spin.setMinimum(1)
+        self._concurrent_stacks_spin.setMaximum(16)
+        self._concurrent_stacks_spin.setValue(PostProcessingSettings.max_concurrent_focus_stacks)
+        self._concurrent_stacks_spin.setToolTip(
+            "How many focus stacks run at once. Higher values clear the backlog "
+            "faster at the cost of more simultaneous CPU/RAM use. Separate from "
+            "Workers, which controls parallelism within a single stack."
+        )
+        self._concurrent_stacks_spin.valueChanged.connect(self._write_concurrent_stacks_to_settings)
+        self._concurrent_stacks_spin.valueChanged.connect(self._update_summary)
+        concurrent_stacks_layout.addWidget(self._concurrent_stacks_spin)
+        concurrent_stacks_layout.addStretch(1)
+        advanced_layout.addWidget(concurrent_stacks_row)
+
         fs_settings_layout.addWidget(self._advanced_widget)
         fs_layout.addWidget(self._fs_settings_widget)
         self._fs_settings_widget.setVisible(False)
@@ -565,6 +695,14 @@ class AreaScanWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _populate_from_settings(self) -> None:
+        post_processing = get_app_context().post_processing
+        if post_processing is not None:
+            self._concurrent_stacks_spin.blockSignals(True)
+            self._concurrent_stacks_spin.setValue(
+                post_processing.post_processing_settings.max_concurrent_focus_stacks
+            )
+            self._concurrent_stacks_spin.blockSignals(False)
+
         motion = get_app_context().motion
         if motion is None or motion.settings is None:
             return
@@ -634,6 +772,13 @@ class AreaScanWidget(QWidget):
             return
         setattr(motion.settings.z_stack_area_scan, key, value != 0)
 
+    def _write_concurrent_stacks_to_settings(self, value: int) -> None:
+        post_processing = get_app_context().post_processing
+        if post_processing is None:
+            return
+        post_processing.post_processing_settings.max_concurrent_focus_stacks = value
+        post_processing.save_settings()
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -683,19 +828,31 @@ class AreaScanWidget(QWidget):
         total_stacks = n_x * n_y
         total_images = total_stacks * n_z
 
-        total_seconds = math.ceil(total_images * TIME_PER_IMAGE + total_stacks * 1.0)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, secs = divmod(remainder, 60)
-        if hours:
-            time_str = f"{hours}h {minutes}m {secs}s"
-        elif minutes:
-            time_str = f"{minutes}m {secs}s"
+        xy_overhead_s, z_overhead_s = _get_overhead_times_s()
+        imaging_seconds = math.ceil(
+            total_images * (_get_time_per_image_s() + z_overhead_s) + total_stacks * xy_overhead_s
+        )
+        imaging_time_str = _format_duration(imaging_seconds)
+
+        if self._fs_enable_check.isChecked():
+            single_stack_focus_s = n_z * _get_focus_stack_time_per_image_s()
+            concurrency = _get_focus_stack_concurrency()
+            waves = math.ceil(total_stacks / concurrency) if total_stacks > 0 else 0
+            focus_stack_seconds = waves * single_stack_focus_s
+            finish_seconds = math.ceil(max(imaging_seconds + single_stack_focus_s, focus_stack_seconds))
+            total_time_str = _format_duration(finish_seconds)
+            done_by_str = _format_completion_time(finish_seconds)
+            time_summary = (
+                f"Imaging: {imaging_time_str}  |  Total incl. stacking: {total_time_str}"
+                f"  |  Done by {done_by_str}"
+            )
         else:
-            time_str = f"{secs}s"
+            done_by_str = _format_completion_time(imaging_seconds)
+            time_summary = f"Est. time: {imaging_time_str}  |  Done by {done_by_str}"
 
         self._summary_label.setText(
             f"Grid: {n_x} × {n_y} positions  |  {n_z} Z slices each  |  "
-            f"{total_images} images total  |  Est. time: {time_str}"
+            f"{total_images} images total  |  {time_summary}"
         )
         self._start_btn.setEnabled(True)
 
@@ -807,6 +964,7 @@ class AreaScanWidget(QWidget):
 
         decimals = max(x.decimals, y.decimals, z.decimals)
 
+        xy_overhead_s, z_overhead_s = _get_overhead_times_s()
         dlg = _ConfirmAreaScanDialog(
             x_start=x_start,
             x_end=x_end,
@@ -819,6 +977,12 @@ class AreaScanWidget(QWidget):
             z_step_mm=z.step_mm,
             step_decimals=decimals,
             output_folder=output_folder,
+            time_per_image_s=_get_time_per_image_s(),
+            xy_overhead_s=xy_overhead_s,
+            z_overhead_s=z_overhead_s,
+            focus_stack_enabled=self._fs_enable_check.isChecked(),
+            focus_stack_time_per_image_s=_get_focus_stack_time_per_image_s(),
+            focus_stack_concurrency=_get_focus_stack_concurrency(),
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:

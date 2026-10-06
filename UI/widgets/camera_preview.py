@@ -602,7 +602,14 @@ class OverlayController:
         overlay = self._preview._measurement_overlay
         if overlay.has_loaded_measurements and not self._confirm_discard_measurements():
             return
-        overlay.clear_loaded()
+        self._replace_loaded_image(source)
+
+    def close_loaded_image(self) -> None:
+        """Close the loaded image and drop its measurements without confirming — for a caller that has already offered to save them."""
+        self._replace_loaded_image(None)
+
+    def _replace_loaded_image(self, source: LargeImageSource | None) -> None:
+        self._preview._measurement_overlay.clear_loaded()
         self._preview._loaded_image_overlay.set_source(source)
         self._preview._zoom_preview_overlay.reset_loaded()
         self._sync_content_dims()
@@ -998,18 +1005,24 @@ class CameraPreview(QFrame):
         source = self._loaded_image_overlay.source
         if source is None:
             return
-        full_h, full_w = source.dims()
-        if full_w <= 0 or full_h <= 0:
-            return
-        array = source.region((0, 0, full_w, full_h), 1)
-        for overlay in (
+        consumers = (
             self._focus_overlay,
             self._inspect_calibration_overlay,
             self._red_mark_overlay,
             self._background_overlay,
-        ):
-            if overlay.enabled:
-                overlay.update_full(array)
+        )
+        active = [overlay for overlay in consumers if overlay.enabled]
+        if not active:
+            return
+        full_h, full_w = source.dims()
+        if full_w <= 0 or full_h <= 0:
+            return
+        # For a pyramid source this decodes the whole image at native
+        # resolution — many gigabytes for a large source — so it's only
+        # worth paying for when something is actually going to consume it.
+        array = source.region((0, 0, full_w, full_h), 1)
+        for overlay in active:
+            overlay.update_full(array)
 
     @property
     def overlays(self) -> OverlayController:
@@ -1148,6 +1161,15 @@ class CameraPreview(QFrame):
     @Slot(int, int)
     def _on_frame_ready(self, width: int, height: int) -> None:
         """Receive a new preview frame from the camera manager."""
+        if self._loaded_image_overlay.enabled:
+            # _render_display below early-returns for the same reason, but
+            # not before this method has already paid for a full-frame
+            # buffer copy on the main thread on every arrival — at the
+            # live frame rate, that competed with the main thread's own
+            # paint/timer events for a loaded pyramid image's tiles,
+            # which is what made tiles so slow to appear while zoomed in.
+            return
+
         ctx = get_app_context()
         camera_manager = ctx.camera_manager
 

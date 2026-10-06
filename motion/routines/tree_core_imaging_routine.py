@@ -56,17 +56,41 @@ Procedure (per slot)
     current Z before capturing.  In focus_stack mode a Z-stack is captured
     directly.
 
-If ``image_calibration_scale`` is True, the calibration scale bar is imaged
-after all slots are complete.  The routine moves to the saved scale bar
-start position (from ``machine_vision.settings.inspection_calibration_position``)
-and runs :class:`~motion.routines.inspection_calibration_scale_routine.InspectionCalibrationScaleRoutine`,
-saving its output into ``<output_folder>/calibration_slide/``.
+If ``image_calibration_scale`` is True, the calibration slide is imaged
+using one of two modes selected via ``calibration_scale_mode``:
 
-The step size is derived from the live sensor dimensions (one frame captured
-per slot after arriving at the start position) combined with the camera
-calibration, so that consecutive frames share ``image_overlap`` fractional
-overlap (default 0.4).  For a Y-axis stage the FOV height drives the step;
-for X the FOV width does.
+``"stitched"`` (default)
+    The routine moves to the saved scale bar start position (from
+    ``machine_vision.settings.inspection_calibration_position``) and runs
+    :class:`~motion.routines.inspection_calibration_scale_routine.InspectionCalibrationScaleRoutine`,
+    which walks the bar, stitches the images, and measures DPI.
+
+``"single"``
+    The routine moves to the saved single-image position (from
+    ``machine_vision.settings.single_image_calibration_position``), autofocuses,
+    and captures one photo via
+    :class:`~motion.routines.inspection_calibration_scale_routine.InspectionCalibrationSinglePhotoRoutine`.
+    No DPI measurement is attempted — there is currently no algorithm to
+    derive DPI from a single frame.
+
+By default the calibration slide is imaged once, after all slots are
+complete, saving into ``<output_folder>/calibration_slide/``.  When
+``calibration_scale_per_slot`` is True it is instead imaged before every
+slot, saving into ``<output_folder>/<slot_name>/calibration_slide/``.
+
+The distance stepped between frames is either given directly
+(``step_distance_nm``) or derived from the camera calibration so that
+consecutive frames share ``image_overlap`` fractional overlap.  The field of
+view along the scan axis comes from whichever image axis the stage axis maps
+onto in the calibration.
+
+Once every frame of a slot has been captured, and in focus stack mode once
+every stack of that slot has been focus stacked, the frames are stitched into
+``<slot_folder>/<slot_name>.tiff`` by
+:class:`~post_processing.routines.tree_core_stitch_routine.TreeCoreStitchRoutine`
+(when ``stitch_enabled`` is set).  The calibration slide is prepended when it
+was imaged; the orientation, frame order and overlap are determined
+automatically unless a stitching overlap is set manually.
 
 Images are saved to ``<output_folder>/<sample_name>/Y<y>_X<x>_Z<z>.<ext>``
 where the extension is taken from the camera's current file-format setting and
@@ -89,6 +113,7 @@ Usage::
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Generator
@@ -98,21 +123,27 @@ from common.logger import error, info, warning
 from motion.motion_controller_manager import MotionControllerManager
 from motion.models import Position
 from motion.routines.automation_routine import AutomationRoutine
+from motion.requirements import XYZ_HOMED
 from motion.routines.red_mark_centering_routine import RedMarkCenteringRoutine
 from motion.routines.autofocus.autofocus_utils import capture_still_frame
 from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
 from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
-from motion.routines.inspection_calibration_scale_routine import InspectionCalibrationScaleRoutine
+from motion.routines.inspection_calibration_scale_routine import (
+    InspectionCalibrationScaleRoutine,
+    InspectionCalibrationSinglePhotoRoutine,
+)
 from machine_vision.algorithms.background_detection import is_background_frame
 from post_processing.routines.focus_stack_routine import QueuedFocusStackRoutine
+from post_processing.routines.tree_core_stitch_routine import StitchFrame, TreeCoreStitchRoutine
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
+    from machine_vision.machine_vision_manager import MachineVisionManager
+    from motion.motion_config import TreeCoreAutomationSettings
     from post_processing.post_processing_manager import PostProcessingManager
     from post_processing.routines.focus_stack_routine import FocusStackRoutineConfig
 
 _NM_PER_MM = 1_000_000
-_NM_PER_TICK = 10_000
 
 _FOCUS_DROP_REACQUIRE = 0.2   # score drop below reference that triggers re-descent
 _FOCUS_DROP_GAP       = 0.35  # score drop in a single step that indicates a gap/end
@@ -201,13 +232,27 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         Ordered sequence of ``(slot_index, name)`` pairs.  ``slot_index``
         is zero-based and must be within range for the current calibration.
         ``name`` becomes the sub-folder name inside *output_folder*.
+    step_distance_nm:
+        Distance to move between consecutive frames.  None uses
+        ``tree_core_automation.step_distance_nm``, or derives it from the
+        overlap when that is 0.
     image_overlap:
         Fractional overlap between consecutive frames in the sweep direction,
-        in the range [0, 1).  Defaults to 0.4 (40 % overlap).
+        in the range [0, 1).  When given, the step distance is derived from it
+        and the camera calibration, overriding any distance.  None uses
+        ``tree_core_automation.image_overlap`` whenever no distance is set.
     image_calibration_scale:
-        When True the calibration scale bar is imaged after all slots are
-        processed.  Output is saved to ``<output_folder>/calibration_slide/``.
-        Requires a saved scale bar position in the machine vision settings.
+        When True the calibration slide is imaged (see ``calibration_scale_mode``
+        and ``calibration_scale_per_slot``).  Requires a saved position in the
+        machine vision settings for the selected mode.
+    calibration_scale_mode:
+        ``"stitched"`` (default) walks the scale bar, stitches the images, and
+        measures DPI.  ``"single"`` moves to the single-image position,
+        autofocuses, and captures one photo — no DPI is measured.
+    calibration_scale_per_slot:
+        When True the calibration slide is imaged before every slot (saved
+        under each slot's own sub-folder) instead of once after all slots
+        are complete.
     focus_stack_config:
         When supplied and the imaging mode is ``"focus_stack"``, a
         :class:`QueuedFocusStackRoutine` is queued for each XY position after
@@ -229,9 +274,14 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         Far Z plane for focus stacking (used when focus_mode == "focus_stack").
     ``ctx.settings.motion.tree_core_automation.z_step_nm``:
         Z step between slices (used when focus_mode == "focus_stack").
+    ``ctx.settings.motion.tree_core_automation.stitch_enabled``:
+        Stitch each slot's frames once they are captured and stacked.
+    ``ctx.settings.motion.tree_core_automation.stitch_overlap_override`` / ``stitch_overlap``:
+        Override the automatically derived stitching overlap with the given fraction.
     """
 
     job_name = "Tree Core Imaging"
+    requirements = XYZ_HOMED
 
     def __init__(
         self,
@@ -239,15 +289,21 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         *,
         output_folder: str | Path,
         slots: list[tuple[int, str]],
-        image_overlap: float = 0.4,
+        step_distance_nm: int | None = None,
+        image_overlap: float | None = None,
         image_calibration_scale: bool = False,
+        calibration_scale_mode: str = "stitched",
+        calibration_scale_per_slot: bool = False,
         focus_stack_config: FocusStackRoutineConfig | None = None,
     ) -> None:
         super().__init__(motion)
         self._output_folder = Path(output_folder)
         self._slots = list(slots)
+        self._step_distance_nm = step_distance_nm
         self._image_overlap = image_overlap
         self._image_calibration_scale = image_calibration_scale
+        self._calibration_scale_mode = calibration_scale_mode
+        self._calibration_scale_per_slot = calibration_scale_per_slot
         self._focus_stack_config = focus_stack_config
 
     def steps(self) -> Generator[None, None, None]:
@@ -267,10 +323,6 @@ class TreeCoreImagingRoutine(AutomationRoutine):
 
         if not self._slots:
             warning("[TreeCoreImaging] No slots supplied — nothing to do")
-            return
-
-        if not mv.is_calibrated:
-            error("[TreeCoreImaging] No camera calibration — cannot derive step size, aborting")
             return
 
         camera = ctx.camera
@@ -307,10 +359,30 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             pct = _slot_pct(slot_iter, phase / n_phases)
             self._set_status(activity, pct, 100)
 
-        def _capture_and_save(slot_folder: Path, pos: Position) -> None:
+        def _capture_and_save(slot_folder: Path, pos: Position) -> tuple[Path, threading.Event, list[bool]]:
+            """Capture and save an image, returning its path and trackers for the background save.
+
+            ``capture_and_save_still``'s ``wait=True`` only blocks until the
+            frame has been captured - the file write happens on a background
+            thread and finishes after this call returns. Callers that need to
+            know the file is actually on disk (e.g. before handing the folder
+            to focus stacking) must wait on the returned event.
+            """
             filename = ctx.image_name_formatter.get_formatted_string(auto_increment_index=True)
             filepath = slot_folder / f"{filename}.{fformat}"
             info(f"[TreeCoreImaging] Capturing image: {filepath}")
+
+            save_done = threading.Event()
+            success_cell: list[bool] = [False]
+
+            def _on_complete(success: bool, _done=save_done, _cell=success_cell) -> None:
+                _cell[0] = success
+                _done.set()
+                if success:
+                    info(f"[TreeCoreImaging] Saved {filepath}")
+                else:
+                    warning(f"[TreeCoreImaging] Save failed: {filepath}")
+
             camera.capture_and_save_still(
                 filepath=filepath,
                 resolution_index=0,
@@ -325,14 +397,19 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     "source": "tree_core_imaging",
                 },
                 timeout_ms=int(capture_timeout_s * 1000),
+                on_complete=_on_complete,
                 wait=True,
             )
-            info(f"[TreeCoreImaging] Saved {filepath}")
+            return filepath, save_done, success_cell
 
         def _capture_z_stack(xy_pos: Position, stack_folder: Path) -> int:
             """Capture a Z-stack at the given XY position into stack_folder.
 
-            Returns the number of images successfully captured.
+            Blocks until every frame's background save has completed before
+            returning, so the folder is safe to hand off to focus stacking
+            immediately afterwards.
+
+            Returns the number of images successfully captured and saved.
             """
             z_near = tca.z_near_plane_nm
             z_far = tca.z_far_plane_nm
@@ -351,15 +428,23 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 z_positions.append(z)
                 z += z_direction * z_step
 
-            captured = 0
+            pending_saves: list[tuple[int, threading.Event, list[bool]]] = []
             for z_nm in z_positions:
                 if self._check_stop():
                     break
                 target = Position(x=xy_pos.x, y=xy_pos.y, z=z_nm)
                 self.motion.move_to_position(target, wait=True)
                 actual_pos = self.motion.get_position()
-                _capture_and_save(stack_folder, actual_pos)
-                captured += 1
+                _, save_done, success_cell = _capture_and_save(stack_folder, actual_pos)
+                pending_saves.append((z_nm, save_done, success_cell))
+
+            captured = 0
+            for z_nm, save_done, success_cell in pending_saves:
+                save_done.wait(timeout=capture_timeout_s)
+                if success_cell[0]:
+                    captured += 1
+                else:
+                    warning(f"[TreeCoreImaging] Save failed at Z={z_nm} nm")
 
             return captured
 
@@ -373,34 +458,54 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         else:
             axis_max_nm = motion_settings.max_x * _NM_PER_MM
 
+        step_nm = self._resolve_step_nm(tca, mv, axis)
+        if step_nm is None:
+            return
+        step_nm = _round_to_step(step_nm)
+        if step_nm <= 0:
+            error("[TreeCoreImaging] Step distance rounds to zero — aborting")
+            return
+        info(f"[TreeCoreImaging] Step distance {step_nm / _NM_PER_MM:.3f} mm")
+
+        stitch_enabled = tca.stitch_enabled
+        stitch_overlap = tca.stitch_overlap if tca.stitch_overlap_override else None
+
         # ------------------------------------------------------------------
-        # Optional calibration scale imaging — run first so it is captured
-        # even if the slot run is interrupted partway through.
+        # Calibration slide capture helper — shared between the once-per-run
+        # and once-per-slot placements below.
         # ------------------------------------------------------------------
 
-        if self._image_calibration_scale:
-            self._set_status("Imaging calibration scale", 0, 100)
-            info("[TreeCoreImaging] Starting calibration scale imaging")
+        def _run_calibration_slide_capture(cal_folder: Path, status_prefix: str) -> bool:
+            """Run the configured calibration slide capture into cal_folder.
 
-            icp = ctx.machine_vision.settings.inspection_calibration_position
+            Returns False if a stop was requested mid-capture, True otherwise.
+            """
+            if self._calibration_scale_mode == "single":
+                position = ctx.machine_vision.settings.single_image_calibration_position
+                routine_cls = InspectionCalibrationSinglePhotoRoutine
+                position_label = "single-image"
+            else:
+                position = ctx.machine_vision.settings.inspection_calibration_position
+                routine_cls = InspectionCalibrationScaleRoutine
+                position_label = "scale bar"
+
             start_position: Position | None = None
-            if getattr(icp, "is_set", False):
-                start_position = Position(x=icp.x_nm, y=icp.y_nm, z=icp.z_nm)
+            if getattr(position, "is_set", False):
+                start_position = Position(x=position.x_nm, y=position.y_nm, z=position.z_nm)
                 info(
-                    f"[TreeCoreImaging] Moving to scale bar position"
-                    f" X={icp.x_nm / _NM_PER_MM:.3f} mm"
-                    f" Y={icp.y_nm / _NM_PER_MM:.3f} mm"
-                    f" Z={icp.z_nm / _NM_PER_MM:.3f} mm"
+                    f"[TreeCoreImaging] Moving to {position_label} position"
+                    f" X={position.x_nm / _NM_PER_MM:.3f} mm"
+                    f" Y={position.y_nm / _NM_PER_MM:.3f} mm"
+                    f" Z={position.z_nm / _NM_PER_MM:.3f} mm"
                 )
             else:
-                warning("[TreeCoreImaging] No saved scale bar position — starting calibration scale routine from current position")
+                warning(f"[TreeCoreImaging] No saved {position_label} position — starting calibration capture from current position")
 
-            cal_slide_folder = self._output_folder / "calibration_slide"
-            cal_slide_folder.mkdir(parents=True, exist_ok=True)
+            cal_folder.mkdir(parents=True, exist_ok=True)
 
-            cal_routine = InspectionCalibrationScaleRoutine(
+            cal_routine = routine_cls(
                 motion=self.motion,
-                output_path=str(cal_slide_folder),
+                output_path=str(cal_folder),
                 start_position=start_position,
                 capture_timeout_s=capture_timeout_s,
             )
@@ -409,16 +514,28 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             while cal_routine.is_running:
                 if self._check_stop():
                     cal_routine.stop()
-                    return
-                self._set_status(
-                    f"Calibration scale — {cal_routine.activity}",
-                    0,
-                    100,
-                )
+                    return False
+                self._set_status(f"{status_prefix} — {cal_routine.activity}", 0, 100)
                 time.sleep(0.25)
 
             cal_routine.wait()
-            info("[TreeCoreImaging] Calibration scale imaging complete")
+            info(f"[TreeCoreImaging] Calibration slide capture complete: {cal_folder}")
+            return True
+
+        # ------------------------------------------------------------------
+        # Once-per-run calibration slide imaging — run first so it is
+        # captured even if the slot run is interrupted partway through.
+        # Skipped when calibration_scale_per_slot is True, in which case it
+        # is captured before each slot instead (see the slot loop below).
+        # ------------------------------------------------------------------
+
+        if self._image_calibration_scale and not self._calibration_scale_per_slot:
+            self._set_status("Imaging calibration scale", 0, 100)
+            info("[TreeCoreImaging] Starting calibration slide imaging")
+
+            cal_slide_folder = self._output_folder / "calibration_slide"
+            if not _run_calibration_slide_capture(cal_slide_folder, "Calibration scale"):
+                return
 
             yield
             if self._check_stop():
@@ -447,6 +564,23 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             slot_folder = self._output_folder / slot_name
             slot_folder.mkdir(parents=True, exist_ok=True)
             info(f"[TreeCoreImaging] Output folder: {slot_folder}")
+
+            # ------------------------------------------------------------------
+            # Per-slot calibration slide imaging (only when configured to run
+            # before every slot rather than once for the whole run).
+            # ------------------------------------------------------------------
+
+            if self._image_calibration_scale and self._calibration_scale_per_slot:
+                self._set_status(f"Imaging calibration scale — {slot_label}", 0, 100)
+                info(f"[TreeCoreImaging] Starting calibration slide imaging for {slot_label}")
+
+                cal_slide_folder = slot_folder / "calibration_slide"
+                if not _run_calibration_slide_capture(cal_slide_folder, f"Calibration scale — {slot_label}"):
+                    return
+
+                yield
+                if self._check_stop():
+                    return
 
             # ------------------------------------------------------------------
             # Move to the slot's mark position and centre
@@ -540,48 +674,6 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             if self._check_stop():
                 return
 
-            # Capture one frame to get live sensor dimensions for FOV derivation.
-            # The sensor size won't change during the run so this is done once per slot.
-            size_frame = capture_still_frame(ctx.camera_manager, timeout_s=capture_timeout_s)
-            if size_frame is None:
-                error(f"[TreeCoreImaging] Frame capture for step-size derivation failed — skipping {slot_label}")
-                continue
-
-            sensor_h, sensor_w = size_frame.shape[:2]
-            cal = mv.calibration
-            cal_w = float(cal.image_width)
-            cal_h = float(cal.image_height)
-
-            # Map the full sensor dimension into calibration pixel space using the
-            # same scaling as _to_cal in the centering routine:
-            #   cal_x = sensor_x * (cal_w / sensor_w)
-            #   cal_y = sensor_y * (cal_h / sensor_h)
-            # Substituting the full sensor dimension cancels, giving cal_w / cal_h
-            # directly.  pixel_to_world_delta then gives the stage travel in ticks
-            # required to shift the full frame width/height to centre — i.e. the FOV.
-            if axis == "y":
-                cal_offset_x = 0.0
-                cal_offset_y = cal_h
-            else:
-                cal_offset_x = cal_w
-                cal_offset_y = 0.0
-
-            fov_delta = cal.pixel_to_world_delta(cal_offset_x, cal_offset_y)
-            fov_nm = abs(fov_delta[1] if axis == "y" else fov_delta[0]) * _NM_PER_TICK
-
-            if fov_nm <= 0:
-                error(f"[TreeCoreImaging] Derived FOV is zero — skipping {slot_label}")
-                continue
-
-            step_nm = int(round(fov_nm * (1.0 - self._image_overlap)))
-            step_nm = _round_to_step(step_nm)
-            info(
-                f"[TreeCoreImaging] sensor={sensor_w}x{sensor_h}"
-                f"  FOV={fov_nm:.0f} nm"
-                f"  overlap={self._image_overlap:.0%}"
-                f"  step={step_nm} nm"
-            )
-
             # Record the starting position and fixed perpendicular coordinate for
             # both sweeps. Z uses the autofocus-determined height.
             start_pos = self.motion.get_position()
@@ -591,19 +683,30 @@ class TreeCoreImagingRoutine(AutomationRoutine):
             def _in_bounds(main_nm: int) -> bool:
                 return 0 <= main_nm <= axis_max_nm
 
+            slot_frames: list[StitchFrame] = []
+            pending_saves: list[threading.Event] = []
+
+            def _capture_frame(main_nm: int, pos: Position) -> None:
+                """Capture the frame (or Z-stack) at *pos* and record it for stitching."""
+                if focus_mode == "focus_stack":
+                    stack_folder = slot_folder / f"stack_{main_nm}"
+                    stack_folder.mkdir(parents=True, exist_ok=True)
+                    captured = _capture_z_stack(pos, stack_folder)
+                    if captured > 0 and self._focus_stack_config is not None:
+                        routine = self._enqueue_focus_stack(post_processing, stack_folder, slot_folder)
+                        if routine is not None:
+                            slot_frames.append(StitchFrame(stage_nm=main_nm, source=routine))
+                else:
+                    filepath, save_done, _ = _capture_and_save(slot_folder, pos)
+                    slot_frames.append(StitchFrame(path=filepath, stage_nm=main_nm))
+                    pending_saves.append(save_done)
+
             # ------------------------------------------------------------------
             # Capture at starting position
             # ------------------------------------------------------------------
 
             info(f"[TreeCoreImaging] Capturing starting position image for {slot_label}")
-            if focus_mode == "focus_stack":
-                stack_folder = slot_folder / f"stack_{main_start_nm}"
-                stack_folder.mkdir(parents=True, exist_ok=True)
-                captured = _capture_z_stack(start_pos, stack_folder)
-                if captured > 0 and self._focus_stack_config is not None:
-                    self._enqueue_focus_stack(post_processing, stack_folder, slot_folder)
-            else:
-                _capture_and_save(slot_folder, start_pos)
+            _capture_frame(main_start_nm, start_pos)
 
             yield
             if self._check_stop():
@@ -660,12 +763,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 )
 
                 if focus_mode == "focus_stack":
-                    actual_xy = self.motion.get_position()
-                    stack_folder = slot_folder / f"stack_{current_main_nm}"
-                    stack_folder.mkdir(parents=True, exist_ok=True)
-                    captured = _capture_z_stack(actual_xy, stack_folder)
-                    if captured > 0 and self._focus_stack_config is not None:
-                        self._enqueue_focus_stack(post_processing, stack_folder, slot_folder)
+                    _capture_frame(current_main_nm, self.motion.get_position())
                 else:
                     info(f"[TreeCoreImaging] Forward sweep — fine autofocus at {current_main_nm} nm")
                     new_z_nm, new_score = _run_autofocus_fine(self.motion, self)
@@ -736,8 +834,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                                 f" — reverting reference to descent_score={descent_score:.3f}"
                             )
 
-                    actual_pos = self.motion.get_position()
-                    _capture_and_save(slot_folder, actual_pos)
+                    _capture_frame(current_main_nm, self.motion.get_position())
 
                 yield
                 if self._check_stop():
@@ -833,12 +930,7 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                 )
 
                 if focus_mode == "focus_stack":
-                    actual_xy = self.motion.get_position()
-                    stack_folder = slot_folder / f"stack_{current_main_nm}"
-                    stack_folder.mkdir(parents=True, exist_ok=True)
-                    captured = _capture_z_stack(actual_xy, stack_folder)
-                    if captured > 0 and self._focus_stack_config is not None:
-                        self._enqueue_focus_stack(post_processing, stack_folder, slot_folder)
+                    _capture_frame(current_main_nm, self.motion.get_position())
                 else:
                     info(f"[TreeCoreImaging] Reverse sweep — descent autofocus at {current_main_nm} nm")
                     lift_z = focused_z_nm + int(_REACQUIRE_LIFT_MM * _NM_PER_MM)
@@ -849,16 +941,34 @@ class TreeCoreImagingRoutine(AutomationRoutine):
                     if self._check_stop():
                         return
 
-                    actual_pos = self.motion.get_position()
                     info(f"[TreeCoreImaging] Reverse sweep position: {current_main_nm} nm  Z={focused_z_nm / _NM_PER_MM:.3f} mm")
-                    _capture_and_save(slot_folder, actual_pos)
+                    _capture_frame(current_main_nm, self.motion.get_position())
 
                 yield
 
+            if stitch_enabled:
+                for save_done in pending_saves:
+                    save_done.wait(timeout=capture_timeout_s)
+                if self._image_calibration_scale:
+                    cal_folder = (slot_folder if self._calibration_scale_per_slot else self._output_folder) / "calibration_slide"
+                else:
+                    cal_folder = None
+                self._enqueue_stitch(
+                    post_processing,
+                    slot_folder,
+                    slot_frames,
+                    axis,
+                    cal_folder,
+                    stitch_overlap,
+                )
+
             yield
 
-        if focus_mode == "focus_stack" and self._focus_stack_config is not None and post_processing is not None:
-            self._set_status("Waiting for focus stacking to finish", 99, 100)
+        queued_post_processing = stitch_enabled or (
+            focus_mode == "focus_stack" and self._focus_stack_config is not None
+        )
+        if queued_post_processing and post_processing is not None:
+            self._set_status("Waiting for post-processing to finish", 99, 100)
             post_processing.wait_for_queue(check_stop=self._check_stop)
 
         self._set_status("Complete", 100, 100)
@@ -867,18 +977,78 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         yield
 
     # ------------------------------------------------------------------
-    # Focus stack helper
+    # Step distance
     # ------------------------------------------------------------------
+
+    def _resolve_step_nm(
+        self,
+        tca: TreeCoreAutomationSettings,
+        mv: MachineVisionManager,
+        axis: str,
+    ) -> int | None:
+        """Distance between frames: an explicit overlap wins, then an explicit
+        or saved distance, then the saved overlap.  None aborts the run."""
+        overlap = self._image_overlap
+        if overlap is None:
+            distance_nm = self._step_distance_nm if self._step_distance_nm is not None else tca.step_distance_nm
+            if distance_nm > 0:
+                return distance_nm
+            overlap = tca.image_overlap
+
+        if not mv.is_calibrated:
+            error("[TreeCoreImaging] No step distance set and no camera calibration to derive one from — aborting")
+            return None
+        if not 0.0 <= overlap < 1.0:
+            error(f"[TreeCoreImaging] Overlap {overlap} is outside [0, 1) — aborting")
+            return None
+
+        geometry = mv.calibration.stage_axis_imaging(axis)
+        step_nm = geometry.step_for_overlap(overlap)
+        info(f"[TreeCoreImaging] FOV={geometry.fov_nm:.0f} nm  overlap={overlap:.0%}  step={step_nm} nm")
+        return step_nm
+
+    # ------------------------------------------------------------------
+    # Post-processing helpers
+    # ------------------------------------------------------------------
+
+    def _enqueue_stitch(
+        self,
+        post_processing: PostProcessingManager | None,
+        slot_folder: Path,
+        frames: list[StitchFrame],
+        axis: str,
+        calibration_slide_folder: Path | None,
+        overlap: float | None,
+    ) -> None:
+        if post_processing is None:
+            error("[TreeCoreImaging] No post_processing manager available — skipping stitching")
+            return
+        if len(frames) < 2:
+            warning(f"[TreeCoreImaging] Only {len(frames)} frame(s) in {slot_folder.name} — skipping stitching")
+            return
+
+        # Queued behind this slot's focus stacks; it also waits on each of
+        # them so stitching never starts on a partial set.
+        routine = TreeCoreStitchRoutine(
+            settings=post_processing.settings,
+            tree_core_folder=slot_folder,
+            frames=frames,
+            axis=axis,
+            calibration_slide_folder=calibration_slide_folder,
+            overlap=overlap,
+        )
+        post_processing.queue_routine(routine)
+        info(f"[TreeCoreImaging] Queued stitching of {len(frames)} frame(s) for {slot_folder.name}")
 
     def _enqueue_focus_stack(
         self,
         post_processing: PostProcessingManager | None,
         stack_folder: Path,
         output_folder: Path,
-    ) -> None:
+    ) -> QueuedFocusStackRoutine | None:
         if post_processing is None:
             error("[TreeCoreImaging] No post_processing manager available — skipping focus stack")
-            return
+            return None
 
         cfg = self._focus_stack_config
         stacked_folder = output_folder / "focus_stacked"
@@ -895,3 +1065,4 @@ class TreeCoreImagingRoutine(AutomationRoutine):
         )
         post_processing.queue_routine(routine)
         info(f"[TreeCoreImaging] Queued focus stack — output: {output_path}")
+        return routine

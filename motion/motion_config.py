@@ -6,6 +6,8 @@ from typing import Any
 
 from common.generic_config import ConfigManager
 
+AXES: tuple[str, ...] = ("x", "y", "z")
+
 # Default jog-step presets in nanometres (0.04 mm, 0.4 mm, 2.0 mm, 10.0 mm).
 _DEFAULT_STEP_PRESETS_NM: list[int] = [40_000, 400_000, 2_000_000, 10_000_000]
 
@@ -76,9 +78,39 @@ class TreeCoreAutomationSettings:
 
     image_name_template: str = "Y{y}_X{x}_Z{z}"
 
+    # Distance the stage moves between frames.  0 derives it from
+    # image_overlap and the camera calibration.
+    step_distance_nm: int = 0
+
+    # Fractional overlap between neighbouring frames.  Kept in step with
+    # step_distance_nm through the camera calibration's field of view, so it
+    # is only meaningful once the camera has been calibrated.
+    image_overlap: float = 0.4
+
+    # Stitch each core's frames into one image once they are all captured
+    # (and focus stacked, in focus stack mode).
+    stitch_enabled: bool = True
+
+    # The stitching overlap normally follows from the step distance and the
+    # camera calibration (or is measured from the images).  When True,
+    # stitch_overlap is used instead.
+    stitch_overlap_override: bool = False
+    stitch_overlap: float = 0.4
+
     # Imaging mode: "optimal_focus" uses autofocus at each position;
     # "focus_stack" captures a Z-stack and stacks the result.
     focus_mode: str = "optimal_focus"
+
+    # When True the calibration slide is imaged during the run.
+    calibration_scale_enabled: bool = False
+
+    # Calibration slide imaging: "single" captures one photo (no DPI
+    # measurement); "stitched" walks the scale bar and measures DPI.
+    calibration_scale_mode: str = "stitched"
+
+    # When True the calibration slide is imaged before every slot instead of
+    # once after all slots are complete.
+    calibration_scale_per_slot: bool = False
 
     # Focus stack parameters (used when focus_mode == "focus_stack").
     z_step_nm: int = 200_000
@@ -229,6 +261,20 @@ class AutomationSettings:
     settle_z_ms: int = 10
     settle_travel_ms: int = 200
 
+    # Rolling move+settle overhead samples (most recent last, capped at
+    # MAX_OVERHEAD_TIME_SAMPLES) learned from completed scans. The configured
+    # settle_*_ms values alone understate real per-stack/per-slice overhead
+    # since they don't include actual stage move time, which isn't knowable
+    # ahead of time (depends on distance and hardware) - these samples fill
+    # that gap for time estimates.
+    xy_overhead_time_samples_s: list[float] = field(default_factory=list)
+    """Seconds spent moving + settling into a stack's XY position, per stack."""
+    z_overhead_time_samples_s: list[float] = field(default_factory=list)
+    """Seconds spent moving + settling to a Z slice, per slice."""
+
+    # Unannotated so dataclass()/asdict() don't treat this as a per-instance field.
+    MAX_OVERHEAD_TIME_SAMPLES = 20
+
     @property
     def overlap_x(self) -> int:
         return int(round(self.overlap_x_pct))
@@ -237,12 +283,52 @@ class AutomationSettings:
     def overlap_y(self) -> int:
         return int(round(self.overlap_y_pct))
 
+    def get_xy_overhead_time_s(self, fallback_s: float) -> float:
+        """Mean recorded XY move+settle overhead per stack.
+
+        Returns *fallback_s* (typically the configured settle time) when no
+        samples have been recorded yet.
+        """
+        if not self.xy_overhead_time_samples_s:
+            return fallback_s
+        return sum(self.xy_overhead_time_samples_s) / len(self.xy_overhead_time_samples_s)
+
+    def record_xy_overhead_time_s(self, value_s: float) -> None:
+        """Record a stack's XY move+settle overhead, keeping only the most
+        recent ``MAX_OVERHEAD_TIME_SAMPLES`` samples.
+        """
+        self.xy_overhead_time_samples_s.append(value_s)
+        if len(self.xy_overhead_time_samples_s) > self.MAX_OVERHEAD_TIME_SAMPLES:
+            del self.xy_overhead_time_samples_s[: len(self.xy_overhead_time_samples_s) - self.MAX_OVERHEAD_TIME_SAMPLES]
+
+    def get_z_overhead_time_s(self, fallback_s: float) -> float:
+        """Mean recorded Z move+settle overhead per slice.
+
+        Returns *fallback_s* (typically the configured settle time) when no
+        samples have been recorded yet.
+        """
+        if not self.z_overhead_time_samples_s:
+            return fallback_s
+        return sum(self.z_overhead_time_samples_s) / len(self.z_overhead_time_samples_s)
+
+    def record_z_overhead_time_s(self, value_s: float) -> None:
+        """Record a Z slice's move+settle overhead, keeping only the most
+        recent ``MAX_OVERHEAD_TIME_SAMPLES`` samples.
+        """
+        self.z_overhead_time_samples_s.append(value_s)
+        if len(self.z_overhead_time_samples_s) > self.MAX_OVERHEAD_TIME_SAMPLES:
+            del self.z_overhead_time_samples_s[: len(self.z_overhead_time_samples_s) - self.MAX_OVERHEAD_TIME_SAMPLES]
+
 
 @dataclass
 class MotionSystemSettings:
     FIRMWARE_NAME: str = "Marlin"
     MACHINE_TYPE: str = "Ender-3"
     baud_rate: int = 115200
+    # Serial port chosen in settings; empty string means auto-detect.
+    com_port: str = ""
+    # Port the controller last connected on, probed first during auto-detect.
+    last_com_port: str = ""
     max_x: int = 220  # Maximum X dimension in mm
     max_y: int = 235  # Maximum Y dimension in mm
     max_z: int = 220   # Maximum Z dimension in mm
@@ -258,6 +344,19 @@ class MotionSystemSettings:
     invert_x: bool = False  # Invert X direction in the navigation widget
     invert_y: bool = False  # Invert Y direction in the navigation widget
     invert_z: bool = False  # Invert Z direction in the navigation widget
+
+    # Axes that are physically present and may be moved.
+    x_enabled: bool = True
+    y_enabled: bool = True
+    z_enabled: bool = True
+
+    # Axes included in a home sequence (only applies to enabled axes).
+    home_x: bool = True
+    home_y: bool = True
+    home_z: bool = True
+
+    # Run the home sequence automatically after connecting.
+    home_on_startup: bool = True
 
     # Starting height: Z position (nanometres) to move to after every home sequence.
     # 0 means stay at the homed position (no post-home move).
@@ -293,6 +392,15 @@ class MotionSystemSettings:
     z_stack_area_scan: AreaScanSettings = field(
         default_factory=AreaScanSettings
     )
+
+    @property
+    def enabled_axes(self) -> tuple[str, ...]:
+        return tuple(a for a in AXES if getattr(self, f"{a}_enabled"))
+
+    @property
+    def homing_axes(self) -> tuple[str, ...]:
+        """Enabled axes that are included in the home sequence."""
+        return tuple(a for a in self.enabled_axes if getattr(self, f"home_{a}"))
 
     def validate(self) -> None:
         """
@@ -343,6 +451,14 @@ class MotionSystemSettings:
             raise ValueError("z_stack_scan.workers must be between 1 and 16")
         if self.tree_core_automation.focus_mode not in ("optimal_focus", "focus_stack"):
             raise ValueError("tree_core_automation.focus_mode must be 'optimal_focus' or 'focus_stack'")
+        if self.tree_core_automation.calibration_scale_mode not in ("single", "stitched"):
+            raise ValueError("tree_core_automation.calibration_scale_mode must be 'single' or 'stitched'")
+        if self.tree_core_automation.step_distance_nm < 0:
+            raise ValueError("tree_core_automation.step_distance_nm must not be negative")
+        if not (0.0 <= self.tree_core_automation.image_overlap < 1.0):
+            raise ValueError("tree_core_automation.image_overlap must be in [0, 1)")
+        if not (0.0 < self.tree_core_automation.stitch_overlap < 1.0):
+            raise ValueError("tree_core_automation.stitch_overlap must be in (0, 1)")
         if self.tree_core_automation.z_step_nm <= 0:
             raise ValueError("tree_core_automation.z_step_nm must be positive")
         if not (1.0 <= self.tree_core_automation.sharpness <= 8.0):

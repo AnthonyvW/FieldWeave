@@ -7,7 +7,7 @@ from typing import Any
 from common.generic_config import ConfigManager
 from common.logger import info
 
-FIELDWEAVE_VERSION = "1.3.0"
+FIELDWEAVE_VERSION = "1.4.0"
 
 
 @dataclass
@@ -35,8 +35,45 @@ class PostProcessingSettings:
         default_factory=StitchAndMeasureSettings
     )
 
+    max_concurrent_focus_stacks: int = 3
+    """
+    How many queued post-processing routines (e.g. focus stacks) the manager
+    runs at once. Higher values finish a backlog faster at the cost of more
+    simultaneous CPU/RAM use; each stack's own ``workers`` setting controls
+    parallelism within a single stack independently of this.
+    """
+
     def validate(self) -> None:
         self.stitch_and_measure.validate()
+        if self.max_concurrent_focus_stacks < 1:
+            raise ValueError("max_concurrent_focus_stacks must be >= 1")
+
+
+@dataclass
+class SavedCamera:
+    """Identity of a camera, stored so the same physical device can be reopened on the next run."""
+
+    camera_type: str
+    device_id: str
+    display_name: str
+    model: str | None = None
+    vid: int | None = None
+    pid: int | None = None
+
+    def validate(self) -> None:
+        if not self.camera_type:
+            raise ValueError("camera_type must be a non-empty string")
+
+
+@dataclass
+class CameraManagerSettings:
+    """Settings for the camera manager."""
+
+    last_camera: SavedCamera | None = None
+
+    def validate(self) -> None:
+        if self.last_camera is not None:
+            self.last_camera.validate()
 
 
 @dataclass
@@ -49,11 +86,15 @@ class FieldWeaveSettings:
     post_processing: PostProcessingSettings = field(
         default_factory=PostProcessingSettings
     )
+    camera_manager: CameraManagerSettings = field(
+        default_factory=CameraManagerSettings
+    )
 
     def validate(self) -> None:
         if not isinstance(self.version, str) or not self.version:
             raise ValueError("version must be a non-empty string")
         self.post_processing.validate()
+        self.camera_manager.validate()
 
 
 class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
@@ -105,11 +146,30 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
         stitch_settings = StitchAndMeasureSettings(
             **{k: v for k, v in sm_data.items() if k in sm_fields}
         )
-        post_settings = PostProcessingSettings(stitch_and_measure=stitch_settings)
+        post_settings = PostProcessingSettings(
+            stitch_and_measure=stitch_settings,
+            max_concurrent_focus_stacks=pp_data.get(
+                "max_concurrent_focus_stacks", PostProcessingSettings.max_concurrent_focus_stacks
+            ),
+        )
+
+        cm_data: dict[str, Any] = data.get("camera_manager") or {}
+        last_camera_data: dict[str, Any] | None = cm_data.get("last_camera")
+        last_camera: SavedCamera | None = None
+        if last_camera_data and last_camera_data.get("camera_type"):
+            last_camera = SavedCamera(
+                camera_type=str(last_camera_data["camera_type"]),
+                device_id=str(last_camera_data.get("device_id", "")),
+                display_name=str(last_camera_data.get("display_name", "")),
+                model=last_camera_data.get("model"),
+                vid=last_camera_data.get("vid"),
+                pid=last_camera_data.get("pid"),
+            )
 
         settings = FieldWeaveSettings(
             version=data.get("version", FieldWeaveSettings.version),
             post_processing=post_settings,
+            camera_manager=CameraManagerSettings(last_camera=last_camera),
         )
 
         if migrated:
@@ -120,6 +180,7 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
 
     def to_dict(self, settings: FieldWeaveSettings) -> dict[str, Any]:
         sm = settings.post_processing.stitch_and_measure
+        last_camera = settings.camera_manager.last_camera
         return {
             "version": settings.version,
             "post_processing": {
@@ -129,6 +190,17 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
                     "crop_borders": sm.crop_borders,
                     "auto_rotate": sm.auto_rotate,
                     "save_debug_overlay": sm.save_debug_overlay,
+                },
+                "max_concurrent_focus_stacks": settings.post_processing.max_concurrent_focus_stacks,
+            },
+            "camera_manager": {
+                "last_camera": None if last_camera is None else {
+                    "camera_type": last_camera.camera_type,
+                    "device_id": last_camera.device_id,
+                    "display_name": last_camera.display_name,
+                    "model": last_camera.model,
+                    "vid": last_camera.vid,
+                    "pid": last_camera.pid,
                 },
             },
         }

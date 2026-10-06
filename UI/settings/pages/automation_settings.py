@@ -37,7 +37,7 @@ from motion.motion_config import MotionSystemSettings, MotionSystemSettingsManag
 from UI.settings.pages.automation.general_settings import GeneralSettingsWidget
 from UI.settings.pages.automation.z_stack_settings import ZStackSettingsWidget
 from UI.settings.pages.automation.area_scan_settings import AreaScanSettingsWidget
-from UI.settings.pages.automation.tree_core_settings import TreeCoreSettingsWidget
+from UI.settings.pages.automation.tree_core_settings import TreeCoreSettingsWidget, fs_float_stored
 from UI.settings.pages.shared import NM_PER_MM
 
 
@@ -228,10 +228,8 @@ class AutomationSettingsWidget(QWidget):
         self._recheck_unsaved()
 
     def _on_tree_core_fs_float(self, key: str, value: float) -> None:
-        nm_keys = {"z_near_plane_nm", "z_far_plane_nm", "z_step_nm"}
-        stored = round(value * NM_PER_MM) if key in nm_keys else value
         self._tree_core.apply_fs_float_to_live(key, value)
-        self._tree_core.mark_fs_field(key, stored)
+        self._tree_core.mark_fs_field(key, fs_float_stored(key, value))
         self._recheck_unsaved()
 
     def _on_tree_core_fs_int(self, key: str, value: int) -> None:

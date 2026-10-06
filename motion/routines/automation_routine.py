@@ -41,6 +41,8 @@ from typing import Any, TYPE_CHECKING, Callable, Generator
 
 from common.app_context import get_app_context
 from common.logger import info, error, warning, debug
+from common.sleep_inhibitor import get_sleep_inhibitor
+from motion.requirements import NO_REQUIREMENTS, MotionRequirements
 
 if TYPE_CHECKING:
     from motion.motion_controller_manager import MotionControllerManager
@@ -85,7 +87,11 @@ class AutomationRoutine(ABC):
 
     Subclasses must implement  `steps`, which is a generator that yields
     between logical steps.  The runner thread advances the generator, honouring
-    pause / stop requests between each yield.
+    pause / stop requests between each yield.  A faulted motion controller is
+    treated the same as a manual pause (see  `_wait_for_runnable`) so a
+    routine never keeps issuing moves - which silently no-op while faulted -
+    as if nothing were wrong.  The system is also kept from sleeping for as
+    long as the routine runs (see :mod:`common.sleep_inhibitor`).
 
     Set the class-level :attr:`job_name` (or override it in ``__init__``) to
     give the routine a human-readable display name.  During execution call
@@ -105,6 +111,9 @@ class AutomationRoutine(ABC):
 
     #: Human-readable name shown in the status bar. Override in subclasses.
     job_name: str = "-"
+
+    #: Axes the routine moves and which of them must be homed. Override in subclasses.
+    requirements: MotionRequirements = NO_REQUIREMENTS
 
     def __init__(self, motion: MotionControllerManager) -> None:
         self.motion = motion
@@ -335,6 +344,10 @@ class AutomationRoutine(ABC):
     def _run(self) -> None:
         info(f"[{type(self).__name__}] Starting")
 
+        # Keep the OS from sleeping for as long as this routine runs -
+        # released in the finally block below, however the routine exits.
+        get_sleep_inhibitor().acquire(f"FieldWeave: {self.job_name}")
+
         # Drop the camera's internal frame buffering for the duration of this
         # routine. Cameras that queue frames before delivering them (e.g.
         # Amscope's frontend/backend deques) can otherwise hand back a stale
@@ -370,8 +383,9 @@ class AutomationRoutine(ABC):
                     info(f"[{type(self).__name__}] Stopped")
                     break
 
-                # Honour pause — block until resumed or stopped
-                self._pause_event.wait()
+                # Honour pause (and an automatic pause on controller fault) —
+                # block until resumed or stopped
+                self._wait_for_runnable()
                 if self._stop_event.is_set():
                     info(f"[{type(self).__name__}] Stopped while paused")
                     break
@@ -386,7 +400,7 @@ class AutomationRoutine(ABC):
                 # Re-check pause immediately after the step completes.
                 # Without this, a pause issued during a step is not honoured
                 # until after the *next* step has already run.
-                self._pause_event.wait()
+                self._wait_for_runnable()
                 if self._stop_event.is_set():
                     info(f"[{type(self).__name__}] Stopped while paused")
                     break
@@ -396,6 +410,8 @@ class AutomationRoutine(ABC):
             import traceback
             error(traceback.format_exc())
         finally:
+            get_sleep_inhibitor().release()
+
             if camera is not None and prior_realtime_mode is not None:
                 try:
                     camera.set_realtime_mode(prior_realtime_mode, wait=True)
@@ -424,6 +440,34 @@ class AutomationRoutine(ABC):
                 except Exception as exc:
                     warning(f"[{type(self).__name__}] on_complete raised: {exc}")
 
+    def _wait_for_runnable(self) -> None:
+        """Block while paused, and treat a faulted motion controller as an
+        automatic pause that only a manual Resume can clear.
+
+        Move commands silently no-op while the controller is faulted (see
+        ``MotionController._enqueue``), so without this a routine would race
+        through its remaining steps as if nothing were wrong - moving
+        nowhere, capturing images at stale positions - instead of stopping
+        to let the user notice and fix the fault. Resuming is never done
+        automatically: even after the fault clears, the routine waits for an
+        explicit Resume, since blindly continuing motion right after a fault
+        (e.g. a stage whose position is no longer trustworthy) isn't safe to
+        assume. If the user resumes while the fault is still present, this
+        immediately re-pauses rather than letting a step run.
+        """
+        while True:
+            if self._stop_event.is_set():
+                return
+            if self.motion.is_faulted and self._pause_event.is_set():
+                warning(f"[{type(self).__name__}] Motion controller faulted - pausing until resumed")
+                self._set_activity("Paused: motion controller faulted - resolve the fault, then Resume")
+                self._pause_event.clear()
+            self._pause_event.wait()
+            if self._stop_event.is_set():
+                return
+            if not self.motion.is_faulted:
+                return
+
     # ------------------------------------------------------------------
     # Helpers available to subclasses
     # ------------------------------------------------------------------
@@ -435,3 +479,14 @@ class AutomationRoutine(ABC):
         cannot simply yield (e.g. a loop inside a single step).
         """
         return self._stop_event.is_set()
+
+    def _check_fault(self) -> bool:
+        """Return True if the motion controller is currently faulted.
+
+        Useful for long blocking operations inside a step (e.g. a loop
+        inside a single step) that should bail out early on a fault rather
+        than waiting for the next yield point. The base run loop already
+        pauses automatically between steps via  `_wait_for_runnable`;
+        this is for subclasses that want to react sooner.
+        """
+        return self.motion.is_faulted

@@ -76,6 +76,7 @@ class MotionControllerManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._restart_lock = threading.Lock()
         self._controller: MotionController | None = None
         self._active_routine: AutomationRoutine | None = None
         self._last_routine_result: RoutineResult | None = None
@@ -83,6 +84,8 @@ class MotionControllerManager:
         self._state_listeners: list[MotionStateCallback] = []
         self._routine_state_listeners: list[RoutineStateCallback] = []
         self._interaction_listeners: list[InteractionCallback] = []
+        # Held here as well as on the controller so they survive a restart.
+        self._message_listeners: list[Callable[[str, bool], None]] = []
 
         # Track the last known state so we only fire listeners on actual changes.
         self._last_known_state: str = MotionState.CONNECTING
@@ -100,10 +103,12 @@ class MotionControllerManager:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _start(self) -> None:
+    def _start(self, config: MotionSystemSettings | None = None) -> None:
         """Instantiate and start the controller (non-blocking)."""
         with self._lock:
-            self._controller = MotionController()
+            self._controller = MotionController(config)
+            for listener in self._message_listeners:
+                self._controller.add_message_listener(listener)
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
         """
@@ -129,9 +134,17 @@ class MotionControllerManager:
                 self._controller = None
 
     def restart(self) -> None:
-        """Shut down any existing controller and start a fresh one."""
-        self.shutdown()
-        self._start()
+        """Shut down any existing controller and reconnect using its current settings.
+
+        Blocks while the old controller releases the serial port, so call it
+        off the UI thread.
+        """
+        # Carry the live settings over so unsaved edits from other settings
+        # pages are not replaced by the on-disk copy.
+        with self._restart_lock:
+            config = self.settings
+            self.shutdown()
+            self._start(config)
 
     # ------------------------------------------------------------------
     # State-change listeners
@@ -207,11 +220,17 @@ class MotionControllerManager:
 
     def _poll_state_loop(self) -> None:
         """Poll the controller state every 250 ms and fire listeners on change."""
+        polled_ctrl: MotionController | None = None
         while True:
             time.sleep(0.25)
             ctrl = self._controller
             new_state = ctrl.get_state() if ctrl is not None else MotionState.FAILED
-            if new_state != self._last_known_state:
+            # A restarted controller can fail within one poll interval, so its
+            # first state is always emitted even if it matches the previous one.
+            is_new_ctrl = ctrl is not None and ctrl is not polled_ctrl
+            if ctrl is not None:
+                polled_ctrl = ctrl
+            if new_state != self._last_known_state or is_new_ctrl:
                 self._last_known_state = new_state
                 self._emit_state(new_state)
 
@@ -248,6 +267,9 @@ class MotionControllerManager:
             raise RuntimeError(
                 "A routine is already running. Call stop_routine() first."
             )
+        unmet = routine.requirements.describe_problems(self)
+        if unmet:
+            raise RuntimeError(f"{routine.job_name}: {unmet}")
         self._active_routine = routine
         routine.on_state_changed = self._emit_routine_state
         routine.on_complete = self._on_routine_complete
@@ -355,6 +377,12 @@ class MotionControllerManager:
         self._get_controller().reset_fault()
 
     @property
+    def homed_axes(self) -> frozenset[str]:
+        """Axes that have completed a home sequence on the current connection."""
+        ctrl = self._controller
+        return ctrl.homed_axes if ctrl is not None else frozenset()
+
+    @property
     def is_faulted(self) -> bool:
         return self.get_state() == MotionState.FAULTED
 
@@ -367,6 +395,12 @@ class MotionControllerManager:
         if ctrl is None:
             return MotionState.FAILED
         return ctrl.get_state()
+
+    @property
+    def connection_error(self) -> str | None:
+        """Why the current controller failed to connect, or None."""
+        ctrl = self._controller
+        return ctrl.connection_error if ctrl is not None else None
 
     @property
     def settings(self) -> MotionSystemSettings | None:
@@ -391,9 +425,16 @@ class MotionControllerManager:
 
     def add_message_listener(self, listener: Callable[[str, bool], None]) -> None:
         """Subscribe to controller messages.  Signature: (text: str, log: bool) -> None."""
-        self._get_controller().add_message_listener(listener)
+        self._message_listeners.append(listener)
+        ctrl = self._controller
+        if ctrl is not None:
+            ctrl.add_message_listener(listener)
 
     def remove_message_listener(self, listener: Callable[[str, bool], None]) -> None:
+        try:
+            self._message_listeners.remove(listener)
+        except ValueError:
+            pass
         ctrl = self._controller
         if ctrl is not None:
             ctrl.remove_message_listener(listener)

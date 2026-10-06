@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,36 +27,17 @@ def _nm_to_mm(nm: int) -> float:
 
 
 class NavigationGroupSettingsWidget(SettingsGroupBase):
-    """Navigation behaviour group: axis inversion, jog-step presets, starting height."""
+    """Navigation behaviour group: jog-step presets and starting height."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Navigation", parent)
-        self._w: dict[str, NoScrollDoubleSpinBox | QCheckBox | QPushButton] = {}
+        self._w: dict[str, NoScrollDoubleSpinBox | QPushButton] = {}
         self._saved: dict[str, object] = {}
         self._build()
 
     def _build(self) -> None:
         vbox = QVBoxLayout(self)
         vbox.setSpacing(12)
-
-        invert_box = QGroupBox("Axis Inversion")
-        invert_form = QFormLayout(invert_box)
-        invert_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-
-        for axis in ("x", "y", "z"):
-            key = f"invert_{axis}"
-            check = QCheckBox()
-            check.setToolTip(
-                f"Invert the {axis.upper()} axis direction in the navigation widget.\n"
-                "Enable if the on-screen arrow moves the stage in the wrong direction."
-            )
-            self._w[key] = check
-            invert_form.addRow(
-                self._register_label(key, QLabel(f"Invert {axis.upper()}:")),
-                check,
-            )
-
-        vbox.addWidget(invert_box)
 
         presets_box = QGroupBox("Jog-Step Presets")
         presets_form = QFormLayout(presets_box)
@@ -134,14 +112,7 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
 
         vbox.addWidget(starting_height_box)
 
-    def connect_signals(self, on_float, on_check, on_set_height, on_reset_height) -> None:
-        for axis in ("x", "y", "z"):
-            key = f"invert_{axis}"
-            check: QCheckBox = self._w[key]  # type: ignore[assignment]
-            check.checkStateChanged.connect(
-                lambda state, k=key: on_check(k, state == Qt.CheckState.Checked)
-            )
-
+    def connect_signals(self, on_float, on_set_height, on_reset_height) -> None:
         for i in range(1, 5):
             key = f"preset_{i}"
             spin: NoScrollDoubleSpinBox = self._w[key]  # type: ignore[assignment]
@@ -155,12 +126,8 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
 
     def populate(self, s: MotionSystemSettings) -> None:
         for key, w in self._w.items():
-            if isinstance(w, (NoScrollDoubleSpinBox, QCheckBox)):
+            if isinstance(w, NoScrollDoubleSpinBox):
                 w.blockSignals(True)
-
-        for axis in ("x", "y", "z"):
-            check: QCheckBox = self._w[f"invert_{axis}"]  # type: ignore[assignment]
-            check.setChecked(getattr(s, f"invert_{axis}", False))
 
         defaults_nm = [_mm_to_nm(mm) for mm in _DEFAULT_PRESETS_MM]
         presets_nm = list(getattr(s, "step_presets", defaults_nm))
@@ -173,7 +140,7 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
         height_spin.setValue(_nm_to_mm(getattr(s, "starting_height_nm", 0)))
 
         for key, w in self._w.items():
-            if isinstance(w, (NoScrollDoubleSpinBox, QCheckBox)):
+            if isinstance(w, NoScrollDoubleSpinBox):
                 w.blockSignals(False)
 
     def snapshot(self, s: MotionSystemSettings) -> None:
@@ -182,9 +149,6 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
         presets_nm = (presets_nm + defaults_nm)[:4]
 
         self._saved = {
-            "invert_x":       getattr(s, "invert_x", False),
-            "invert_y":       getattr(s, "invert_y", False),
-            "invert_z":       getattr(s, "invert_z", False),
             "preset_1":       _nm_to_mm(presets_nm[0]),
             "preset_2":       _nm_to_mm(presets_nm[1]),
             "preset_3":       _nm_to_mm(presets_nm[2]),
@@ -203,9 +167,6 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
         elif key == "starting_height":
             s.starting_height_nm = _mm_to_nm(value)  # type: ignore[attr-defined]
 
-    def apply_check_to_live(self, key: str, value: bool, s: MotionSystemSettings) -> None:
-        setattr(s, key, value)
-
     def set_height_from_current_position(self) -> None:
         motion = get_app_context().motion
         if motion is None:
@@ -223,16 +184,7 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
         changed = isinstance(saved, float) and abs(saved - current_value) > 1e-9
         self.mark_label(key, changed)
 
-    def mark_check_field(self, key: str, current_value: bool) -> None:
-        self.mark_label(key, self._saved.get(key) != current_value)
-
     def has_changes(self) -> bool:
-        for axis in ("x", "y", "z"):
-            key = f"invert_{axis}"
-            check: QCheckBox = self._w[key]  # type: ignore[assignment]
-            if self._saved.get(key) != check.isChecked():
-                return True
-
         for i in range(1, 5):
             key = f"preset_{i}"
             spin: NoScrollDoubleSpinBox = self._w[key]  # type: ignore[assignment]

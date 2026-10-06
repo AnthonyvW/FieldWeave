@@ -6,7 +6,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import numpy as np
 import tifffile
@@ -24,7 +24,17 @@ TILE_SIZE = 512
 # finer tile it was standing in for had even finished decoding.
 CACHE_TILES = 512
 PREVIEW_MAX = 1400
-DEFAULT_MAX_WORKERS = max(2, (os.cpu_count() or 2) - 2)
+# Every tile decode's actual file read is serialized through one lock per
+# source (see _PyramidTiffBackend._file_lock) -- only the CPU-bound
+# decompression after the read benefits from more threads. Sizing this off
+# CPU count assumes the workload parallelizes freely, which the read side
+# doesn't: more workers than the lock can usefully keep busy just means
+# more threads queued waiting their turn, and logged decode times bore
+# this out (individual segment reads growing from single-digit ms under
+# light load to multiple *seconds* under heavy concurrent load, on a
+# machine with plenty of cores to spare). Capped well below what
+# cpu_count - 2 gives on anything but a low-core machine.
+DEFAULT_MAX_WORKERS = min(4, max(2, (os.cpu_count() or 2) - 2))
 
 
 class FrameSource(ABC):
@@ -191,9 +201,45 @@ class _PyramidTiffBackend(_ReducedSource):
         levels = []
         for level_series in series.levels:
             page = level_series.pages[0]
+            # Indexing self._tf.pages[index] again later (as opposed to
+            # keeping this direct reference) can trigger tifffile's own
+            # lazy page-parsing -- re-reading the page's IFD structure from
+            # the file -- guarded by tifffile's own internal file lock, a
+            # different lock than _file_lock below. Every tile decode did
+            # exactly that (_decode_level_box indexed self._tf.pages fresh
+            # each time), so concurrent decode threads could race two
+            # uncoordinated locks doing raw file I/O against the same
+            # shared, stateful file handle -- reproduced directly as
+            # exceptions (a corrupted IFD parse, a failed decompression)
+            # and, short of an exception, exactly the kind of silent
+            # cross-contamination that would explain valid-but-wrong-
+            # location tile content. Keeping the resolved page object
+            # itself in the level table instead means every later access
+            # is a plain attribute read, never a fresh lookup.
+            # TiffPage.decode and TiffPage.chunked are both
+            # functools.cached_property, computed lazily on first access --
+            # tifffile's own docs on init_decode() warn that computing
+            # decode isn't thread-safe, and chunked (used directly in
+            # _decode_tiled_region to turn a tile's row/column into its
+            # linear index into the file's tile-offset table) is exactly
+            # the same kind of lazily-cached, uncoordinated computation.
+            # Racing to compute *that* doesn't fail loudly -- it can hand
+            # back a mismatched tile grid, quietly reading and placing a
+            # different tile's bytes at another's position. Both get
+            # computed and cached here instead, on this single init
+            # thread, before any concurrent decode can reach the page.
+            # init_decode() (newer tifffile) is just decode's property
+            # access wrapped in a name that says why; older versions never
+            # added the wrapper, so fall back to the access it wraps.
+            init_decode = getattr(page, "init_decode", None)
+            if init_decode is not None:
+                init_decode()
+            else:
+                page.decode  # noqa: B018
+            page.chunked  # noqa: B018
             level_h, level_w = level_series.shape[0], level_series.shape[1]
             levels.append({
-                "page_index": page.index,
+                "page": page,
                 "width": level_w,
                 "height": level_h,
                 "scale_x": self.source_width / level_w,
@@ -209,7 +255,7 @@ class _PyramidTiffBackend(_ReducedSource):
         )
         if level0 is None:
             return False
-        return self._tf.pages[level0["page_index"]].is_tiled
+        return level0["page"].is_tiled
 
     def _pick_level(self, requested_scale: float) -> dict | None:
         chosen = None
@@ -284,7 +330,7 @@ class _PyramidTiffBackend(_ReducedSource):
             return arr
 
     def _decode_level_box(self, file_level: dict, region_box: tuple[int, int, int, int]) -> np.ndarray:
-        page = self._tf.pages[file_level["page_index"]]
+        page = file_level["page"]
         req_left, req_top, req_right, req_bottom = region_box
         clipped = (
             max(0, req_left), max(0, req_top),
@@ -377,7 +423,8 @@ def _detect_reduced_source(
     tf = None
     try:
         tf = tifffile.TiffFile(filename)
-        if tf.series[0].is_pyramidal:
+        series = tf.series[0]
+        if series.is_pyramidal:
             return _PyramidTiffBackend(tf, source_width, source_height)
         tf.close()
     except (OSError, ValueError, KeyError):
@@ -415,6 +462,7 @@ class LargeImageSource(FrameSource):
         self.source_height = 0
         self.preview: np.ndarray | None = None
         self._version = 0
+        self.open_error: str | None = None
 
         self._reduced_source: _ReducedSource | None = None
         self._resident: Image.Image | None = None
@@ -423,6 +471,25 @@ class LargeImageSource(FrameSource):
 
         self._tile_cache: OrderedDict[tuple[int, int, int], np.ndarray] = OrderedDict()
         self._pending: set[tuple[int, int, int]] = set()
+        # Futures for entries in _pending that haven't started running yet —
+        # see region()'s cancellation of requests a newer call supersedes.
+        self._pending_futures: dict[tuple[int, int, int], Future] = {}
+        # (level, tile keys) region()'s most recent call actually needs, as
+        # a single tuple so it updates atomically. Future.cancel() in
+        # _cancel_stale_requests only stops a request that hasn't started
+        # running yet; _decode_tile checks this too, right before paying
+        # for the actual decode, to also catch one that already got a
+        # worker thread (common with enough workers available) before
+        # going stale. Both only ever invalidate a *same-level* pending
+        # request outside the needed set -- a pending request at any other
+        # level is left alone regardless, since it's a still-useful cached
+        # ancestor placeholder for whatever level is current now, or will
+        # be wanted again the moment its own level is current again, not
+        # something this call superseded.
+        # Plain attribute, not lock-guarded: only ever wholesale-replaced
+        # (never mutated in place), so a reader on another thread always
+        # sees one complete (level, keys) pair, never a mix of two.
+        self._current_needed: tuple[int, frozenset[tuple[int, int, int]]] = (-1, frozenset())
         self._cache_lock = threading.Lock()
 
         self._closed = False
@@ -464,7 +531,8 @@ class LargeImageSource(FrameSource):
             else:
                 self._load_resident()
                 self.preview = self._build_preview_from_resident()
-        except Exception:
+        except Exception as exc:
+            self.open_error = f"{type(exc).__name__}: {exc}"
             return False
 
         return True
@@ -542,11 +610,39 @@ class LargeImageSource(FrameSource):
         tx1 = int((right - 1) // tile_source_size)
         ty1 = int((bottom - 1) // tile_source_size)
 
+        # A continuous zoom/pan gesture calls region() many times in quick
+        # succession, each for a shifted box — without this, every tile
+        # requested by an earlier call but not yet started kept sitting in
+        # the executor's queue even once no longer visible, so the tiles
+        # actually on screen now had to wait behind a growing backlog of
+        # stale work from moments ago. Cancelling whatever's no longer
+        # needed at this same level keeps the queue limited to what the
+        # current call actually wants. Only stops requests that haven't
+        # started decoding yet; _current_needed (below) is what catches one
+        # that already has, before it pays for the actual decode.
+        needed_keys = frozenset((level, tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1))
+        self._current_needed = (level, needed_keys)
+        self._cancel_stale_requests(level, needed_keys)
+
         for ty in range(ty0, ty1 + 1):
             for tx in range(tx0, tx1 + 1):
                 self._composite_tile(out, level, tx, ty, edge_x, edge_y)
 
         return out
+
+    def _cancel_stale_requests(self, level: int, needed_keys: frozenset[tuple[int, int, int]]) -> None:
+        with self._cache_lock:
+            stale_keys = [
+                key for key in self._pending_futures
+                if key[0] == level and key not in needed_keys
+            ]
+        for key in stale_keys:
+            with self._cache_lock:
+                future = self._pending_futures.get(key)
+            if future is not None and future.cancel():
+                with self._cache_lock:
+                    self._pending.discard(key)
+                    self._pending_futures.pop(key, None)
 
     # ------------------------------------------------------------------
     # Tile cache
@@ -582,7 +678,15 @@ class LargeImageSource(FrameSource):
             if key in self._tile_cache or key in self._pending:
                 return
             self._pending.add(key)
-        self._executor.submit(self._decode_tile, key)
+        future = self._executor.submit(self._decode_tile, key)
+        with self._cache_lock:
+            # Recorded only for _cancel_stale_requests to find while this
+            # is still pending -- _decode_tile pops it back out on
+            # completion. A tile fast enough to have already finished (and
+            # already removed itself from _pending) by the time we get the
+            # lock back has nothing left to cancel, so skip adding it.
+            if key in self._pending:
+                self._pending_futures[key] = future
 
     def _decode_tile(self, key: tuple[int, int, int]) -> None:
         """
@@ -596,8 +700,23 @@ class LargeImageSource(FrameSource):
         this key stuck in ``_pending`` forever: request_tile's dedup
         check would then skip it on every future call, and that tile
         could never be decoded for the rest of the session.
+
+        Also bails out here, before paying for any decode work, if *key*
+        has gone stale since it was submitted — region()'s cancellation of
+        not-yet-started requests can't reach one that already got a worker
+        thread, which happens often enough with several workers available
+        that without this second check here too, a fast zoom/pan gesture
+        still left plenty of now-irrelevant decodes running to completion
+        and competing for the shared file lock with the ones that matter.
         """
         level, tx, ty = key
+        needed_level, needed_keys = self._current_needed
+        if level == needed_level and key not in needed_keys:
+            with self._cache_lock:
+                self._pending.discard(key)
+                self._pending_futures.pop(key, None)
+            return
+
         scale = 2 ** level
         tile_source_size = TILE_SIZE * scale
         left = tx * tile_source_size
@@ -619,6 +738,7 @@ class LargeImageSource(FrameSource):
 
         with self._cache_lock:
             self._pending.discard(key)
+            self._pending_futures.pop(key, None)
             if array is not None:
                 self._tile_cache[key] = array
                 self._tile_cache.move_to_end(key)

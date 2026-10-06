@@ -141,21 +141,19 @@ class ClickToMoveOverlay(Overlay):
         cal_px = cal.image_width / 2 + offset_x * (cal.image_width / full_width)
         cal_py = cal.image_height / 2 + offset_y * (cal.image_height / full_height)
 
-        dx_ticks, dy_ticks = cal.pixel_to_world_delta(cal_px, cal_py)
+        dx_nm, dy_nm = cal.pixel_to_world_delta(cal_px, cal_py)
 
-        # pixel_to_world_delta returns ticks (0.01 mm = 10 000 nm).
-        _NM_PER_TICK = 10_000
         current = ctx.motion.get_position()
         target = Position(
-            x=current.x + int(round(dx_ticks * _NM_PER_TICK)),
-            y=current.y + int(round(dy_ticks * _NM_PER_TICK)),
+            x=current.x + int(round(dx_nm)),
+            y=current.y + int(round(dy_nm)),
             z=current.z,
         )
 
         info(
             f"ClickToMove: full=({full_px:.1f}, {full_py:.1f})  "
             f"cal=({cal_px:.1f}, {cal_py:.1f})  "
-            f"delta=({dx_ticks:.2f}, {dy_ticks:.2f}) ticks  "
+            f"delta=({dx_nm:.0f}, {dy_nm:.0f}) nm  "
             f"target=({target.x}, {target.y}) nm"
         )
 

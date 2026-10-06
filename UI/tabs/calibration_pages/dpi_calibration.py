@@ -26,6 +26,7 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.measurements.units import MeasurementUnit, dpi_from_measurement
 from UI.widgets.navigation_widget import NavigationWidget
+from UI.widgets.requirements_banner import RequirementsBanner
 from UI.widgets.preview_overlay.interaction_mode import CALIBRATION_LINE_MODE, PreviewModeSpec, ModeToken
 from UI.widgets.preview_overlay.measurement_customize_menu import block_wheel
 from common.app_context import get_app_context, open_settings
@@ -203,10 +204,15 @@ class DpiCalibrationWidget(QWidget):
         layout.addWidget(self._description_label)
         layout.addStretch()
 
+        banner = RequirementsBanner(InspectionCalibrationScaleRoutine.requirements)
+        layout.addWidget(banner)
+
         start_btn = QPushButton("Start Calibration")
         start_btn.setObjectName("CalStartCalibration")
         start_btn.setMinimumHeight(45)
+        start_btn.setEnabled(banner.available)
         start_btn.clicked.connect(self.calibration_started)
+        banner.availability_changed.connect(start_btn.setEnabled)
         layout.addWidget(start_btn)
 
     def refresh(self) -> None:

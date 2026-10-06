@@ -2,7 +2,7 @@
 
 [![Windows](https://custom-icon-badges.demolab.com/badge/Windows-0078D6?logo=windows11&logoColor=white)](#)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](#)
-![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.14-blue?logo=python&logoColor=white)
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/AnthonyvW)
 [![Ko-fi](https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/procerand)
 [![Discord](https://img.shields.io/badge/Chat-Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/nZh4uWUV4b)
@@ -88,6 +88,7 @@ Have a specific feature your lab needs? [Commission a feature](https://www.field
 * **Hardware**: A [compatible 3D printer](#3d-printer-compatibility) modified for imaging purposes, a light, and a [compatible camera](#confirmed-compatible-cameras). The 3D printer may also require an additional cable to connect your PC to the printer. Note that this modification will likely void the warranty if you disconnect any cables, so test the 3D printer to ensure the motion system works before doing this.
   * For the light I recommend using the [Amscope 144 led ring light](https://www.amazon.com/dp/B00JZJO7YC). If you use this, make sure to 3D print the light pads to prevent scratching the lens.
   * If using an Amscope camera, I highly recommend using this ([100x Microscope Lens for Raspberry Pi](https://www.amazon.com/100X-Microscope-Lens-Magnification-Compatible/dp/B0C1CC79TX)) industrial lens as it provides minimal distortion around the edges.
+    * If going for a higher end camera such as an Amscope MU2003, we recommend the Laowa 100mm f/2.8 2x Ultra Macro APO with an EF to C adapter. However, this will require a custom mount and a better motion system than what comes on a stock Ender 3 3D printer in order to withstand the increased weight.
   * Not required, but is recommended is a thumbscrew for holding the camera in place. I use thumbscrews from [this 16 piece set](https://www.amazon.com/dp/B0DQPM68KJ) from Amazon.
   * For the automated DPI calibration to work, a compatible micrometer calibration slide is required. It is confirmed to work with the [Amscope MR400 Stage Micrometer Calibration Slide with 4-Scales](https://amscope.com/products/mr400). I am interested in adding support for additional scales.
   * If you do not have access to a 3D printer capable of printing in at least 2 colors and wish to image tree core samples, then a roll of red electrical tape to denote the center of slots.
@@ -112,7 +113,7 @@ Before using FieldWeave, your 3D printer must be modified to mount the camera sy
 Before modifying your printer, you must 3D print the following components:
 
 - **Camera Mount** - Ender 3 Camera Mount.3mf – Attaches to the existing print head carriage  
-- **High Resolution Camera Mount Files** - high_magnification folder
+- **High Magnification Camera Mount Files** - high_magnification folder
   * These are only for if you are going with the high magnification version of FieldWeave.
   * MicroscopeObjectiveMount.3mf - Attaches to print head carriage
   * Light Baffles.3mf - Insert to objective mount after screwing the mount in.
@@ -222,8 +223,9 @@ FieldWeave supports USB cameras through a modular driver architecture.
 | Camera Model            | Notes                       |
 |-------------------------|-----------------------------|
 | Amscope MU500           | Fully tested and supported  |
-| Amscope MU1000          | Fully tested, the automatic DPI calibration might not work due to it being tested at a lower resolution than this camera's max resolution |
-| Amscope MU1000 HS       | Fully tested, the automatic DPI calibration might not work due to it being tested at a lower resolution than this camera's max resolution |
+| Amscope MU1000          | Fully tested, the automatic DPI calibration does not work at this camera's max resolution |
+| Amscope MU1000 HS       | Fully tested, the automatic DPI calibration does not work at this camera's max resolution |
+| Amscope MU2003          | Fully tested, the automatic DPI calibration does not work. In addition, it needs a custom mount and higher quality lenses compared to the cameras above. I recommend the Laowa 100mm f/2.8 2x Ultra Macro APO lens with an EF to C adapter. |
 | Generic USB Camera      | This was tested with 2 different USB cameras and is supported  |
 | Other Amscope Cameras   | They should work, but are not tested. Camera mount might need to be modfied for them to fit. |
 

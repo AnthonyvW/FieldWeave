@@ -600,19 +600,27 @@ class ZoomPreviewOverlay(Overlay):
         version is always 0 and has no effect, unchanged from before.
 
         Also decimates the crop by a cheap array stride before copying it,
-        down to roughly twice *rect*'s own resolution, when the crop is
-        much larger than that. Without it, a crop taken early in a zoom
-        (still most of a gigapixel-scale loaded image) was being copied
-        and smooth-scaled down from its full source resolution on every
-        single frame, when only a small fraction of those source pixels
-        could ever appear in *rect* anyway. The stride shrinks toward 1 as
-        zoom increases and the crop approaches rect's own size, so full
-        source detail is still used once it actually matters.
+        down to roughly *rect*'s own resolution, when the crop is much
+        larger than that. Without it, a crop taken early in a zoom (still
+        most of a gigapixel-scale loaded image) was being copied and
+        smooth-scaled down from its full source resolution on every single
+        frame, when only a small fraction of those source pixels could ever
+        appear in *rect* anyway. The stride shrinks toward 1 as zoom
+        increases and the crop approaches rect's own size, so full source
+        detail is still used once it actually matters.
+
+        Deliberately matches rect 1:1 rather than requesting extra headroom
+        for smoother scaling (an earlier version asked for roughly twice
+        rect's resolution): each halving of the stride quadruples the
+        source-pixel area, and therefore roughly quadruples the number of
+        LargeImageSource tiles a pyramid source has to decode to fill it —
+        a real cost for a source backed by on-demand tile decode, unlike a
+        live camera frame already fully resident in memory.
         """
         x0, y0, crop_w, crop_h = self._crop
 
-        step_x = max(1, crop_w // max(1, rect.width() * 2))
-        step_y = max(1, crop_h // max(1, rect.height() * 2))
+        step_x = max(1, crop_w // max(1, rect.width()))
+        step_y = max(1, crop_h // max(1, rect.height()))
         step = min(step_x, step_y)
 
         crop_arr = np.ascontiguousarray(self._frame.region((x0, y0, x0 + crop_w, y0 + crop_h), step))

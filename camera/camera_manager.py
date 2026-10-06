@@ -20,6 +20,7 @@ from camera.camera_enumerator import (
     AmscopeEnumerator,
     GenericUSBEnumerator,
 )
+from common.fieldweaveConfig import SavedCamera
 from common.logger import info, error, warning, exception, debug
 
 
@@ -93,6 +94,10 @@ class CameraManager(QObject):
 
         # Latest numpy frame written by the USB capture thread; read by poll timer on main thread
         self._pending_usb_frame: np.ndarray | None = None
+
+        # Set by CaptureControlWidget while a loaded image (not the live
+        # feed) is what's actually on screen -- see set_preview_delivery_paused.
+        self._preview_delivery_paused = False
 
         self._is_streaming = False
         self._last_enumerated_count: int | None = None
@@ -194,6 +199,54 @@ class CameraManager(QObject):
     def get_cameras_by_type(self, camera_type: CameraType) -> list[CameraInfo]:
         return [cam for cam in self._available_cameras if cam.camera_type == camera_type]
 
+    @staticmethod
+    def saved_camera_from_info(camera_info: CameraInfo) -> SavedCamera:
+        metadata = camera_info.metadata or {}
+        return SavedCamera(
+            camera_type=camera_info.camera_type.value,
+            device_id=camera_info.device_id,
+            display_name=camera_info.display_name,
+            model=camera_info.model,
+            vid=metadata.get("vid"),
+            pid=metadata.get("pid"),
+        )
+
+    def find_saved_camera(self, saved: SavedCamera) -> CameraInfo | None:
+        """Return the available camera matching *saved*, or None if it isn't connected."""
+        candidates = [
+            cam for cam in self._available_cameras
+            if cam.camera_type.value == saved.camera_type
+        ]
+
+        # USB device ids are OpenCV indices that shift as devices are added,
+        # so VID/PID is the only stable identity for them.
+        if saved.vid is not None and saved.pid is not None:
+            for cam in candidates:
+                metadata = cam.metadata or {}
+                if metadata.get("vid") == saved.vid and metadata.get("pid") == saved.pid:
+                    return cam
+            return None
+
+        for cam in candidates:
+            if cam.device_id == saved.device_id and cam.display_name == saved.display_name:
+                return cam
+
+        if saved.camera_type != CameraType.GENERIC_USB.value:
+            for cam in candidates:
+                if cam.device_id == saved.device_id:
+                    return cam
+
+        # Amscope ids embed the USB port path, so a camera moved to another
+        # port is still recognised as long as its name/model is unambiguous.
+        same_name = [
+            cam for cam in candidates
+            if cam.display_name == saved.display_name and cam.model == saved.model
+        ]
+        if len(same_name) == 1:
+            return same_name[0]
+
+        return None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -220,6 +273,12 @@ class CameraManager(QObject):
         info(f"Opening camera: {camera_info.display_name}")
 
         def _on_open_complete(success: bool, _result: object) -> None:
+            # The result is delivered via a queued signal, so the user may have
+            # switched cameras (closing this one) before it arrives.
+            if self._active_camera is not threaded_camera:
+                debug(f"Ignoring open result for {camera_info}: camera was closed before it finished opening")
+                return
+
             if not success:
                 error(f"Failed to open camera: {camera_info}")
                 threaded_camera.stop_thread(wait=False)
@@ -341,6 +400,22 @@ class CameraManager(QObject):
         info(f"Streaming started ({width}x{height})")
         self.streaming_started.emit(width, height)
         return True
+
+    def set_preview_delivery_paused(self, paused: bool) -> None:
+        """
+        Skip processing incoming preview frames entirely while nothing is
+        displaying them -- called by CaptureControlWidget alongside
+        CameraPreview.overlays.loaded_image_enabled.
+
+        Hardware capture keeps running (stopping/restarting streaming for
+        every mode switch risks reconnect delay and losing exposure/focus
+        state), but _usb_frame_callback drops each frame before paying for
+        its BGR->RGB conversion -- previously done on every frame the SDK
+        pushed regardless of whether the live feed was even on screen, which
+        competed for CPU with tile decoding while a loaded pyramid image was
+        being viewed.
+        """
+        self._preview_delivery_paused = paused
 
     def stop_streaming(self) -> bool:
         if not self._is_streaming:
@@ -471,9 +546,11 @@ class CameraManager(QObject):
         Only writes plain data — no signals, no GUI calls.
         The poll timer on the main thread drains _pending_usb_frame.
         """
-        import cv2  # noqa: PLC0415
         if not isinstance(context, CameraManager):
             return
+        if context._preview_delivery_paused:
+            return
+        import cv2  # noqa: PLC0415
         context._pending_usb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     @Slot()
@@ -535,7 +612,7 @@ class CameraManager(QObject):
             self._handle_disconnected()
 
     def _handle_image_event(self) -> None:
-        if not self._active_camera:
+        if not self._active_camera or self._preview_delivery_paused:
             return
 
         base_camera = self._active_camera.underlying_camera

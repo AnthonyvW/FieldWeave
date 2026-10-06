@@ -19,6 +19,7 @@ from UI.widgets.automation.focus_stack_widget import FocusStackWidget
 from UI.widgets.automation.area_scan_widget import AreaScanWidget
 from UI.widgets.automation.tree_core_widget import TreeCoreWidget
 from UI.widgets.automation.inspection_calibration_scale_widget import InspectionCalibrationScaleWidget
+from UI.widgets.requirements_banner import RequirementsBanner
 
 
 class _ArrowComboBox(QComboBox):
@@ -161,6 +162,9 @@ class AutomationWidget(QWidget):
         divider.setStyleSheet("background: rgb(210, 210, 210);")
         outer_layout.addWidget(divider)
 
+        self._requirements_banner = RequirementsBanner()
+        outer_layout.addWidget(self._requirements_banner)
+
         # ---- Stacked content area ----
         self._stack = _CollapsibleStack()
         self._sub_widgets: list[QWidget] = [
@@ -176,6 +180,7 @@ class AutomationWidget(QWidget):
 
         outer_layout.addWidget(self._stack)
         self._stack.setCurrentIndex(0)
+        self._requirements_banner.set_requirements(self._sub_widgets[0].requirements)
 
     def _setup_poll_timer(self) -> None:
         """Start a timer that syncs button state with the manager's routine state."""
@@ -196,6 +201,11 @@ class AutomationWidget(QWidget):
         self._pause_btn.setEnabled(running)
         self._stop_btn.setEnabled(running)
 
+        # Never lock a page mid-run: its own pause/stop controls must stay usable.
+        current = self._stack.currentWidget()
+        if current is not None:
+            current.setEnabled(running or self._requirements_banner.available)
+
         if not running:
             # Reset pause visual state when no routine is active.
             self._paused = False
@@ -208,6 +218,8 @@ class AutomationWidget(QWidget):
 
     def _on_mode_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+        self._requirements_banner.set_requirements(self._sub_widgets[index].requirements)
+        self._sync_button_state()
 
     def _on_pause_clicked(self) -> None:
         self._paused = self._pause_btn.isChecked()
