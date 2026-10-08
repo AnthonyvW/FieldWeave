@@ -12,6 +12,7 @@ from PySide6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush
 from common.logger import info, error, warning, debug
 from common.app_context import get_app_context
 from common.setting_types import FileFormat
+from common.unique_path import unique_path
 from motion.routines.autofocus.autofocus_routine import Autofocus
 from motion.routines.autofocus.autofocus_descent_routine import AutofocusDescent
 from motion.routines.autofocus.autofocus_fine_routine import AutofocusFine
@@ -887,8 +888,8 @@ class CameraControlsWidget(QWidget):
         else:
             filename = f"{Path(filename).stem}.{extension}"
 
-        return self._current_folder / filename
-    
+        return unique_path(self._current_folder / filename)
+
     @Slot()
     def _take_photo(self) -> None:
         ctx = get_app_context()
