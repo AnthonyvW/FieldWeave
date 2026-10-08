@@ -7,7 +7,7 @@ from typing import Any
 from common.generic_config import ConfigManager
 from common.logger import info
 
-FIELDWEAVE_VERSION = "1.4.0"
+FIELDWEAVE_VERSION = "1.4.1"
 
 
 @dataclass
@@ -77,6 +77,18 @@ class CameraManagerSettings:
 
 
 @dataclass
+class UpdateSettings:
+    """Settings for update checks and version switching."""
+
+    include_prereleases: bool = False
+    """When True, GitHub pre-releases (betas) are offered as updates and in the version picker."""
+
+    def validate(self) -> None:
+        if not isinstance(self.include_prereleases, bool):
+            raise ValueError("include_prereleases must be a bool")
+
+
+@dataclass
 class FieldWeaveSettings:
     """FieldWeave application settings"""
 
@@ -89,12 +101,14 @@ class FieldWeaveSettings:
     camera_manager: CameraManagerSettings = field(
         default_factory=CameraManagerSettings
     )
+    updates: UpdateSettings = field(default_factory=UpdateSettings)
 
     def validate(self) -> None:
         if not isinstance(self.version, str) or not self.version:
             raise ValueError("version must be a non-empty string")
         self.post_processing.validate()
         self.camera_manager.validate()
+        self.updates.validate()
 
 
 class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
@@ -166,10 +180,15 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
                 pid=last_camera_data.get("pid"),
             )
 
+        updates_data: dict[str, Any] = data.get("updates") or {}
+
         settings = FieldWeaveSettings(
             version=data.get("version", FieldWeaveSettings.version),
             post_processing=post_settings,
             camera_manager=CameraManagerSettings(last_camera=last_camera),
+            updates=UpdateSettings(
+                include_prereleases=bool(updates_data.get("include_prereleases", False)),
+            ),
         )
 
         if migrated:
@@ -202,5 +221,8 @@ class FieldWeaveSettingsManager(ConfigManager[FieldWeaveSettings]):
                     "vid": last_camera.vid,
                     "pid": last_camera.pid,
                 },
+            },
+            "updates": {
+                "include_prereleases": settings.updates.include_prereleases,
             },
         }

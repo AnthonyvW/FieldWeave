@@ -5,13 +5,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QWidget,
+    QDialog,
     QGroupBox,
     QLabel,
+    QMessageBox,
     QPushButton,
 )
 
 from common.app_context import get_fieldweave_version, get_app_context
 from UI.widgets.changelog_dialog import ChangelogDialog
+from UI.widgets.version_dialog import VersionDialog
 
 WEBSITE_URL = "https://www.fieldweave.com/"
 GITHUB_REPO_URL = "https://github.com/AnthonyvW/FieldWeave"
@@ -83,6 +86,49 @@ def _changelog_row(parent: QWidget) -> QWidget:
     return row
 
 
+def _change_version_row(parent: QWidget) -> QWidget:
+    row = QWidget()
+    row_layout = QHBoxLayout(row)
+    row_layout.setContentsMargins(0, 0, 0, 0)
+
+    button = QPushButton("Change Version")
+    row_layout.addWidget(button)
+    row_layout.addStretch()
+
+    def on_click() -> None:
+        context = get_app_context()
+        updater = context.updater
+        notifier = context.update_notifier
+        if updater is None or notifier is None:
+            return
+
+        if updater.is_busy():
+            QMessageBox.information(parent, "Please Wait", "An update check or install is already in progress.")
+            return
+
+        if not updater.can_install():
+            QMessageBox.warning(parent, "Version Change Unavailable", "FieldWeave is not running from a git checkout, so it cannot switch versions.")
+            return
+
+        releases = updater.available_releases
+        if not releases:
+            QMessageBox.information(
+                parent,
+                "No Versions Available",
+                "No releases are available. If the update check has not finished or failed, try 'Check for Updates' first.",
+            )
+            return
+
+        dialog = VersionDialog(releases, get_fieldweave_version(), updater.include_prereleases, parent)
+        dialog.prereleases_toggled.connect(context.set_include_prereleases)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_tag:
+            notifier.install_release(dialog.selected_tag)
+
+    button.clicked.connect(on_click)
+
+    return row
+
+
 def about_page() -> QWidget:
     w = QWidget()
     layout = QVBoxLayout(w)
@@ -97,6 +143,7 @@ def about_page() -> QWidget:
     top_layout.addWidget(_link_label(f'Visit FieldWeave\'s Website at <a href="{WEBSITE_URL}">{WEBSITE_URL}</a>'))
     top_layout.addWidget(_link_label(f'View the source on <a href="{GITHUB_REPO_URL}">GitHub</a>'))
     top_layout.addWidget(_check_updates_row(w))
+    top_layout.addWidget(_change_version_row(w))
     top_layout.addWidget(_changelog_row(w))
     layout.addWidget(top)
 

@@ -31,6 +31,7 @@ from common.logger import info, error, warning
 from common.pyramid_tiff import PyramidConversion, PyramidJob
 from common.read_metadata import extract_dpi, read_metadata
 from common.setting_types import FileFormat
+from common.unique_path import unique_path
 from UI.widgets.measurements.units import MeasurementUnit, dpi_from_measurement
 from UI.widgets.preview_overlay.large_image_source import LargeImageSource
 
@@ -1078,7 +1079,7 @@ class CaptureControlWidget(QWidget):
         else:
             filename = f"{Path(filename).stem}.{extension}"
 
-        return self._current_folder / filename
+        return unique_path(self._current_folder / filename)
 
     # ------------------------------------------------------------------
     # Capture availability

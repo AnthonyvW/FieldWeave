@@ -45,6 +45,14 @@ class UpdateNotifier(QWidget):
             self._manual = False
         return started
 
+    def install_release(self, tag: str) -> bool:
+        """Install a specific release chosen by the user. Returns False if busy or unable to start."""
+        self._prompted = True
+        started = self._updater.start_update(tag)
+        if not self._poll_timer.isActive():
+            self._poll_timer.start()
+        return started
+
     def _poll(self) -> None:
         status = self._updater.status
 
@@ -93,8 +101,8 @@ class UpdateNotifier(QWidget):
     def _show_restart_message(self) -> None:
         reply = QMessageBox.question(
             self.parentWidget(),
-            "Update Complete",
-            "FieldWeave has been updated. Restart now to apply it?",
+            "Version Changed",
+            f"FieldWeave has been switched to version {self._updater.target_version}. Restart now to apply it?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
 
@@ -104,8 +112,8 @@ class UpdateNotifier(QWidget):
     def _show_update_failed_message(self) -> None:
         QMessageBox.warning(
             self.parentWidget(),
-            "Update Failed",
-            f"The update could not be completed:\n{self._updater.error_message}",
+            "Version Change Failed",
+            f"The version change could not be completed:\n{self._updater.error_message}",
         )
 
     def _show_updating_dialog(self) -> None:
@@ -116,8 +124,8 @@ class UpdateNotifier(QWidget):
         # active even after the dialog is closed, freezing the whole app.
         dialog = QMessageBox(self.parentWidget())
         dialog.setIcon(QMessageBox.Icon.Information)
-        dialog.setWindowTitle("Updating")
-        dialog.setText("FieldWeave is updating. Do not close the program.")
+        dialog.setWindowTitle("Changing Version")
+        dialog.setText("FieldWeave is changing versions. Do not close the program.")
         dialog.setStandardButtons(QMessageBox.StandardButton.NoButton)
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint)

@@ -838,10 +838,11 @@ class SlotCalibrationStepsWidget(QWidget):
 
         pos = motion.get_position()
 
-        axis_val = pos.y if (tca.axis == "y") else pos.x
-        self._pending_slot_positions[index] = axis_val
-        self._slot_position_labels[index].setText(f"{axis_val / _NM_PER_MM:.3f} mm")
-        self._slot_position_spins[index].setValue(axis_val / _NM_PER_MM)
+        # Slot positions are stored on the cross axis, perpendicular to tca.axis.
+        cross_nm = pos.x if (tca.axis == "y") else pos.y
+        self._pending_slot_positions[index] = cross_nm
+        self._slot_position_labels[index].setText(f"{cross_nm / _NM_PER_MM:.3f} mm")
+        self._slot_position_spins[index].setValue(cross_nm / _NM_PER_MM)
         self._set_status(f"Slot {index + 1} position staged.")
 
     def _on_set_slot_offset_clicked(self, index: int) -> None:

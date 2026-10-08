@@ -193,6 +193,20 @@ class AppContext:
         self._settings = settings
         return True
 
+    def set_include_prereleases(self, include: bool) -> None:
+        """Persist the beta-release preference and apply it to the updater."""
+        if self._updater is not None:
+            self._updater.set_include_prereleases(include)
+
+        if self._settings is None or self._settings_manager is None:
+            return
+        if self._settings.updates.include_prereleases == include:
+            return
+
+        self._settings.updates.include_prereleases = include
+        if not self._settings_manager.save(self._settings):
+            error("Failed to save beta release preference")
+
     @property
     def settings_manager(self) -> FieldWeaveSettingsManager | None:
         return self._settings_manager
@@ -345,7 +359,8 @@ class AppContext:
     def _initialize_updater(self) -> None:
         if self._updater is not None:
             return
-        self._updater = Updater()
+        include_prereleases = self._settings.updates.include_prereleases if self._settings else False
+        self._updater = Updater(include_prereleases=include_prereleases)
 
     # ------------------------------------------------------------------
     # Cleanup
