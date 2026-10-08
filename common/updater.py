@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -27,8 +28,17 @@ from common.logger import info, warning, error
 _ERROR_MESSAGE_LIMIT = 500
 _GITHUB_OWNER = "AnthonyvW"
 _GITHUB_REPO = "FieldWeave"
-_LATEST_RELEASE_URL = f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/releases/latest"
+_RELEASES_URL = f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/releases?per_page=100"
 _GITHUB_REQUEST_TIMEOUT = 10
+
+
+@dataclass(frozen=True)
+class ReleaseInfo:
+    tag: str
+    version: str
+    title: str
+    notes: str
+    prerelease: bool
 
 
 class UpdateStatus:
@@ -56,8 +66,9 @@ def _parse_version(version: str) -> tuple[int, ...]:
 
 
 class Updater:
-    def __init__(self, repo_dir: Path | None = None) -> None:
+    def __init__(self, repo_dir: Path | None = None, include_prereleases: bool = False) -> None:
         self._repo_dir = repo_dir or Path.cwd()
+        self._include_prereleases = include_prereleases
         self._lock = threading.Lock()
 
         self._status: str = UpdateStatus.IDLE
@@ -66,6 +77,8 @@ class Updater:
         self._release_title: str = ""
         self._release_notes: str = ""
         self._error_message: str = ""
+        self._releases: list[ReleaseInfo] = []
+        self._target_tag: str = ""
 
         self._check_thread: threading.Thread | None = None
         self._update_thread: threading.Thread | None = None
@@ -99,6 +112,30 @@ class Updater:
         with self._lock:
             return self._error_message
 
+    @property
+    def available_releases(self) -> list[ReleaseInfo]:
+        """All published releases from the last successful check, newest first."""
+        with self._lock:
+            return list(self._releases)
+
+    @property
+    def target_version(self) -> str:
+        """Version of the release most recently requested via start_update()."""
+        with self._lock:
+            return self._target_tag.lstrip("vV")
+
+    @property
+    def include_prereleases(self) -> bool:
+        with self._lock:
+            return self._include_prereleases
+
+    def set_include_prereleases(self, include: bool) -> None:
+        with self._lock:
+            self._include_prereleases = include
+
+    def can_install(self) -> bool:
+        return self._is_git_checkout()
+
     def is_busy(self) -> bool:
         with self._lock:
             return self._status in (UpdateStatus.CHECKING, UpdateStatus.UPDATING)
@@ -117,8 +154,12 @@ class Updater:
         self._check_thread.start()
         return True
 
-    def start_update(self) -> bool:
-        """Kick off a background checkout of the last-checked release, then a dependency install. Returns False if already busy."""
+    def start_update(self, tag: str | None = None) -> bool:
+        """
+        Kick off a background checkout of a release, then a dependency install.
+        Defaults to the latest release from the last check; pass a tag to
+        install a specific release. Returns False if already busy.
+        """
         if self.is_busy():
             return False
 
@@ -126,12 +167,15 @@ class Updater:
             self._fail_update("Not running from a git checkout - update unavailable")
             return False
 
-        with self._lock:
-            tag = self._release_tag
+        if tag is None:
+            with self._lock:
+                tag = self._release_tag
         if not tag:
             self._fail_update("No release found to update to - run a check first")
             return False
 
+        with self._lock:
+            self._target_tag = tag
         self._set_status(UpdateStatus.UPDATING)
         self._update_thread = threading.Thread(target=self._run_update, args=(tag,), daemon=True)
         self._update_thread.start()
@@ -147,23 +191,42 @@ class Updater:
 
     def _run_check(self) -> None:
         try:
-            release = self._fetch_latest_release()
+            raw_releases = self._fetch_releases()
         except (URLError, HTTPError, ValueError, OSError) as exc:
             self._fail_check(f"Could not reach GitHub - {exc}")
             return
 
-        tag = release.get("tag_name", "")
-        if not tag:
-            self._fail_check("Latest release has no tag")
+        releases = sorted(
+            (
+                ReleaseInfo(
+                    tag=raw["tag_name"],
+                    version=raw["tag_name"].lstrip("vV"),
+                    title=raw.get("name") or raw["tag_name"],
+                    notes=raw.get("body") or "",
+                    prerelease=bool(raw.get("prerelease")),
+                )
+                for raw in raw_releases
+                if raw.get("tag_name") and not raw.get("draft")
+            ),
+            key=lambda r: (_parse_version(r.version), not r.prerelease),
+            reverse=True,
+        )
+
+        include_prereleases = self.include_prereleases
+        latest = next((r for r in releases if include_prereleases or not r.prerelease), None)
+        if latest is None:
+            self._fail_check("No published releases found")
             return
 
-        latest_version = tag.lstrip("vV")
+        tag = latest.tag
+        latest_version = latest.version
 
         with self._lock:
+            self._releases = releases
             self._latest_version = latest_version
             self._release_tag = tag
-            self._release_title = release.get("name") or tag
-            self._release_notes = release.get("body") or ""
+            self._release_title = latest.title
+            self._release_notes = latest.notes
             self._status = (
                 UpdateStatus.UPDATE_AVAILABLE
                 if _parse_version(latest_version) > _parse_version(FIELDWEAVE_VERSION)
@@ -192,9 +255,9 @@ class Updater:
     # GitHub API
     # ------------------------------------------------------------------
 
-    def _fetch_latest_release(self) -> dict:
+    def _fetch_releases(self) -> list[dict]:
         request = urllib.request.Request(
-            _LATEST_RELEASE_URL,
+            _RELEASES_URL,
             headers={
                 "Accept": "application/vnd.github+json",
                 "User-Agent": f"FieldWeave-Updater/{FIELDWEAVE_VERSION}",
