@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -63,6 +64,30 @@ def _parse_version(version: str) -> tuple[int, ...]:
             digits += char
         parts.append(int(digits) if digits else 0)
     return tuple(parts)
+
+
+def _is_certificate_error(exc: BaseException) -> bool:
+    reason = getattr(exc, "reason", None)
+    return isinstance(exc, ssl.SSLCertVerificationError) or isinstance(reason, ssl.SSLCertVerificationError)
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """
+    Networks that intercept TLS (e.g. university proxies) re-sign traffic with a
+    CA that lives in the OS trust store but not in Python's default bundle, so
+    prefer the OS store and fall back to certifi's bundle.
+    """
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except ImportError:
+        pass
+
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
 
 
 class Updater:
@@ -193,7 +218,13 @@ class Updater:
         try:
             raw_releases = self._fetch_releases()
         except (URLError, HTTPError, ValueError, OSError) as exc:
-            self._fail_check(f"Could not reach GitHub - {exc}")
+            if _is_certificate_error(exc):
+                self._fail_check(
+                    "TLS certificate verification failed. A network proxy or antivirus may be "
+                    f"intercepting HTTPS traffic - {exc}"
+                )
+            else:
+                self._fail_check(f"Could not reach GitHub - {exc}")
             return
 
         releases = sorted(
@@ -263,7 +294,7 @@ class Updater:
                 "User-Agent": f"FieldWeave-Updater/{FIELDWEAVE_VERSION}",
             },
         )
-        with urllib.request.urlopen(request, timeout=_GITHUB_REQUEST_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=_GITHUB_REQUEST_TIMEOUT, context=_build_ssl_context()) as response:
             return json.loads(response.read().decode("utf-8"))
 
     # ------------------------------------------------------------------
