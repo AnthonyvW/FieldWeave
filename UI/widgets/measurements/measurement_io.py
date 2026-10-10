@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from UI.widgets.measurements.measurement_data import (
+    MeasurementData,
+    data_from_dict,
+    data_to_dict,
+)
 from UI.widgets.measurements.measurement_kind import MeasurementKindRegistry, Point2D
 from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.units import MeasurementUnit
@@ -12,7 +17,8 @@ from UI.widgets.measurements.units import MeasurementUnit
 # Bumped whenever the document shape changes in a way old readers can't
 # already tolerate (deserialize_measurements already drops unknown meta
 # keys and skips unknown/malformed entries, so most additions — a new
-# kind, a new MeasurementMeta field — don't need a bump at all).
+# kind, a new MeasurementMeta field, the optional per-entry "data" — don't
+# need a bump at all).
 FORMAT_VERSION = 1
 
 
@@ -22,13 +28,14 @@ class _MeasurementLike(Protocol):
     kind: str
     points: tuple[Point2D, ...]
     meta: MeasurementMeta
+    data: MeasurementData
 
 
 @dataclass
 class DeserializeResult:
-    """Entries as plain (kind, points, meta) tuples — the caller wraps each into its own Measurement type — plus any warnings for entries that were skipped or fell back to defaults rather than crashing the load."""
+    """Entries as plain (kind, points, meta, data) tuples — the caller wraps each into its own Measurement type — plus any warnings for entries that were skipped or fell back to defaults rather than crashing the load."""
 
-    entries: list[tuple[str, tuple[Point2D, ...], MeasurementMeta]] = field(default_factory=list)
+    entries: list[tuple[str, tuple[Point2D, ...], MeasurementMeta, MeasurementData]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -50,14 +57,18 @@ def _meta_from_dict(data: dict) -> MeasurementMeta:
     return MeasurementMeta(**fields)
 
 
+def _measurement_to_dict(m: _MeasurementLike) -> dict:
+    entry = {"kind": m.kind, "points": [list(p) for p in m.points], "meta": _meta_to_dict(m.meta)}
+    if not m.data.is_empty:
+        entry["data"] = data_to_dict(m.data)
+    return entry
+
+
 def serialize_measurements(measurements: list[_MeasurementLike]) -> dict:
     """A plain, JSON-serializable document of *measurements* — see deserialize_measurements for the read side."""
     return {
         "format_version": FORMAT_VERSION,
-        "measurements": [
-            {"kind": m.kind, "points": [list(p) for p in m.points], "meta": _meta_to_dict(m.meta)}
-            for m in measurements
-        ],
+        "measurements": [_measurement_to_dict(m) for m in measurements],
     }
 
 
@@ -103,7 +114,9 @@ def deserialize_measurements(data: dict, registry: MeasurementKindRegistry) -> D
             result.warnings.append(f"Entry {i} ({kind}): malformed meta ({exc}), using defaults.")
             meta = DEFAULT_META
 
-        result.entries.append((kind, points, meta))
+        data = data_from_dict(entry.get("data"), len(points), f"Entry {i} ({kind})", result.warnings)
+
+        result.entries.append((kind, points, meta, data))
 
     return result
 

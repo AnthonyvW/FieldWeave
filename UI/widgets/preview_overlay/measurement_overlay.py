@@ -28,6 +28,7 @@ from UI.widgets.measurements.measurement_io import (
     save_measurements_to_file,
     serialize_measurements,
 )
+from UI.widgets.measurements.measurement_data import EMPTY_DATA, MeasurementData, drop_point
 from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
 from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.measurement_style import (
@@ -123,6 +124,7 @@ class Measurement(NamedTuple):
     kind: str
     points: tuple[tuple[float, float], ...]
     meta: MeasurementMeta = DEFAULT_META
+    data: MeasurementData = EMPTY_DATA
 
 
 class MeasurementOverlay(Overlay):
@@ -697,7 +699,9 @@ class MeasurementOverlay(Overlay):
         self._near_point_index = None
         if points:
             measurement = self.measurements[m_index]
-            self.measurements[m_index] = Measurement(measurement.kind, tuple(points), measurement.meta)
+            self.measurements[m_index] = measurement._replace(
+                points=tuple(points), data=drop_point(measurement.data, p_index)
+            )
         else:
             self.measurements.pop(m_index)
         return True
@@ -3747,7 +3751,7 @@ class MeasurementOverlayController:
         measurements = self._overlay.measurements
         if replace:
             measurements.clear()
-        measurements.extend(Measurement(kind, points, meta) for kind, points, meta in result.entries)
+        measurements.extend(Measurement(*entry) for entry in result.entries)
         self._repaint()
         return result
 
@@ -3767,6 +3771,6 @@ class MeasurementOverlayController:
         measurements = self._overlay.measurements
         if replace:
             measurements.clear()
-        measurements.extend(Measurement(kind, points, meta) for kind, points, meta in result.entries)
+        measurements.extend(Measurement(*entry) for entry in result.entries)
         self._repaint()
         return result
