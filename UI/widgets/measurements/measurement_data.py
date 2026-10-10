@@ -39,6 +39,21 @@ EMPTY_DATA = MeasurementData({}, ())
 SEGMENT_BREAK = "fw.segment_break"
 
 
+# Per-point attribute FieldWeave also interprets: a hex color that draws a
+# marker on that point and colors its label text.
+POINT_COLOR = "fw.color"
+
+
+def point_colors(data: MeasurementData, point_count: int) -> list[str]:
+    """One entry per point: its color, or "" when it has none."""
+    colors = [""] * point_count
+    for i, attrs in enumerate(data.point_attrs[:point_count]):
+        value = attrs.get(POINT_COLOR)
+        if isinstance(value, str):
+            colors[i] = value
+    return colors
+
+
 def break_indices(data: MeasurementData, point_count: int) -> frozenset[int]:
     """Indices (never 0) of the points that start a new run."""
     return frozenset(

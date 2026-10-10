@@ -40,6 +40,7 @@ from UI.widgets.measurements.measurement_data import (
     MeasurementData,
     break_indices,
     drop_point,
+    point_colors,
     render_point_label,
     segment_runs,
 )
@@ -1681,6 +1682,15 @@ class MeasurementOverlay(Overlay):
                     style=point_style,
                 )
 
+        for point, color in zip(points, point_colors(data, len(points))):
+            if color:
+                self._draw_point_marker(
+                    painter, rect, point, scale_x, scale_y,
+                    line_color=self._resolve_color(color, line_color), line_width=line_width,
+                    outline_color=outline_color, outline_width=outline_width,
+                    style=point_style,
+                )
+
     # Unit-shape vertex offsets (each axis independently in [-1, 1], so a
     # per-axis radius multiply keeps the shape undistorted under a
     # non-uniform zoom exactly the way the "dot"/"circle" styles' rx/ry
@@ -2523,8 +2533,9 @@ class MeasurementOverlay(Overlay):
         font.setPixelSize(max(1, round(base_size)))
         font.setBold(True)
         text_color = self._resolve_color(meta.tag_text_color, OVERLAY_LINE_COLOR)
+        colors = point_colors(measurement.data, len(measurement.points))
         offset = OVERLAY_POINT_RADIUS + 4.0
-        for point, text in zip(measurement.points, texts):
+        for point, text, color in zip(measurement.points, texts, colors):
             if not text:
                 continue
             anchor = self._to_point(rect, point)
@@ -2533,7 +2544,7 @@ class MeasurementOverlay(Overlay):
             if scale_x > 0 and scale_y > 0:
                 painter.scale(1.0 / scale_x, 1.0 / scale_y)
             painter.setFont(font)
-            painter.setPen(QPen(text_color))
+            painter.setPen(QPen(self._resolve_color(color, text_color)))
             painter.drawText(QRectF(offset, -offset - 14.0, 40.0, 16.0), Qt.AlignmentFlag.AlignLeft, text)
             painter.restore()
 

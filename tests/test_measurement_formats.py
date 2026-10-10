@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from UI.widgets.measurements import dendroelevator_io
-from UI.widgets.measurements.measurement_data import SEGMENT_BREAK, MeasurementData
+from UI.widgets.measurements.measurement_data import POINT_COLOR, SEGMENT_BREAK, MeasurementData
 from UI.widgets.measurements.measurement_formats import (
     DENDROELEVATOR,
     FIELDWEAVE,
@@ -116,14 +116,29 @@ def test_import_flags_start_points_as_segment_breaks_but_not_the_first():
     assert data.attrs["dendro.forward_direction"] is False
 
 
-def test_import_maps_annotations_to_text_measurements():
+def test_import_maps_annotations_to_points_labelled_with_their_year():
     kind, points, meta, data = _import().entries[1]
 
-    assert kind == "Text"
+    assert kind == "Point"
     assert points[0] == pytest.approx((8800 / WIDTH, 300 / HEIGHT))
-    assert meta.title == "Marker ring"
+    assert meta.title == "2017"
+    assert meta.description == "Marker ring"
+    assert meta.line_color == "#00ff00"
     assert meta.tag_background_color == "#00ff00"
     assert data.attrs["dendro.year"] == 2017
+
+
+def test_import_colors_decade_rings_red_and_the_rest_blue():
+    doc = _dendro_doc()
+    doc["points"][1]["year"] = 2020
+    doc["points"][2]["year"] = 2019
+
+    data = _import(doc).entries[0][3]
+
+    assert data.point_attrs[1][POINT_COLOR] == "#ff1c22"
+    assert data.point_attrs[2][POINT_COLOR] == "#1c7bff"
+    assert POINT_COLOR not in data.point_attrs[0]
+    assert POINT_COLOR not in data.point_attrs[3]
 
 
 def test_import_needs_the_image_size():
@@ -227,14 +242,20 @@ def test_export_needs_a_dpi_unless_the_file_recorded_one():
     assert missing.document is None
 
 
-def test_export_skips_text_annotations_without_a_year():
+def test_export_skips_points_without_a_year():
     measurements = _as_measurements(_import())
-    measurements.append(Measurement("Text", ((0.5, 0.5),), DEFAULT_META._replace(title="note")))
+    measurements.append(Measurement("Point", ((0.5, 0.5),), DEFAULT_META._replace(title="note")))
 
     result = dendroelevator_io.save(measurements, CTX)
 
     assert len(result.document["annotations"]) == 1
     assert any("without a year" in w for w in result.warnings)
+
+
+def test_export_does_not_write_the_derived_ring_colors():
+    out = dendroelevator_io.save(_as_measurements(_import()), CTX).document
+
+    assert all(POINT_COLOR not in point for point in out["points"])
 
 
 def test_fieldweave_files_start_with_a_header_naming_the_app_version():
@@ -270,8 +291,8 @@ def test_read_handles_a_byte_order_mark_and_each_format(tmp_path):
     from_dendro = read_measurement_file(dendro, DEFAULT_REGISTRY, CTX)
     from_native = read_measurement_file(native, DEFAULT_REGISTRY, CTX)
 
-    assert [e[0] for e in from_dendro.entries] == ["Arbitrary Line", "Text"]
-    assert [e[0] for e in from_native.entries] == ["Arbitrary Line", "Text"]
+    assert [e[0] for e in from_dendro.entries] == ["Arbitrary Line", "Point"]
+    assert [e[0] for e in from_native.entries] == ["Arbitrary Line", "Point"]
     assert from_native.entries[0][3] == from_dendro.entries[0][3]
 
 
@@ -329,7 +350,7 @@ def test_controller_import_replaces_current_measurements(tmp_path):
 
     result = controller.import_measurements_from_file(str(path))
 
-    assert [m.kind for m in overlay.measurements] == ["Arbitrary Line", "Text"]
+    assert [m.kind for m in overlay.measurements] == ["Arbitrary Line", "Point"]
     assert result.warnings == []
 
 

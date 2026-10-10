@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 from statistics import median
 
-from UI.widgets.measurements.measurement_data import SEGMENT_BREAK, MeasurementData, break_indices
+from UI.widgets.measurements.measurement_data import POINT_COLOR, SEGMENT_BREAK, MeasurementData, break_indices
 from UI.widgets.measurements.measurement_io import DeserializeResult, ExportResult, FormatContext, MeasurementLike
 from UI.widgets.measurements.measurement_kind import MeasurementKindRegistry, Point2D
 from UI.widgets.measurements.measurement_meta import DEFAULT_META
@@ -22,8 +22,11 @@ _SCALE_TOLERANCE = 0.01
 _WIDTH_DECIMALS = 5
 
 LINE_KIND = "Arbitrary Line"
-TEXT_KIND = "Text"
+POINT_KIND = "Point"
 
+# Dendroelevator marks every tenth year's ring red and the rest blue.
+_DECADE_COLOR = "#ff1c22"
+_YEAR_COLOR = "#1c7bff"
 _DEFAULT_ANNOTATION_COLOR = "#ff1c22"
 _DEFAULT_VIEW = {
     "brightness": "100",
@@ -101,6 +104,7 @@ def _point_attrs(raw: dict, index: int) -> dict:
     year = raw.get("year")
     if _is_number(year):
         attrs[f"{_ATTR_PREFIX}year"] = int(year)
+        attrs[POINT_COLOR] = _DECADE_COLOR if int(year) % 10 == 0 else _YEAR_COLOR
     if isinstance(raw.get("earlywood"), bool):
         attrs[f"{_ATTR_PREFIX}earlywood"] = raw["earlywood"]
     for flag in ("start", "break", "skip"):
@@ -173,8 +177,8 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
     if ctx.image_dims is None:
         result.warnings.append("Open the image these measurements were made on before importing a Dendroelevator file.")
         return result
-    if LINE_KIND not in registry or TEXT_KIND not in registry:
-        result.warnings.append("This build has no line or text measurement kind to import Dendroelevator data into.")
+    if LINE_KIND not in registry or POINT_KIND not in registry:
+        result.warnings.append("This build has no line or point measurement kind to import Dendroelevator data into.")
         return result
 
     width, height = ctx.image_dims
@@ -250,17 +254,23 @@ def _load_annotations(
             continue
         text = raw.get("text")
         color = raw.get("color")
+        year = raw.get("year")
         attrs: dict = {}
-        if _is_number(raw.get("year")):
-            attrs[f"{_ATTR_PREFIX}year"] = int(raw["year"])
+        if _is_number(year):
+            attrs[f"{_ATTR_PREFIX}year"] = int(year)
         extras = {k: v for k, v in raw.items() if k not in _ANNOTATION_KEYS}
         if extras:
             attrs[f"{_ATTR_PREFIX}annotation_extras"] = json.dumps(extras)
+        color_hex = color if isinstance(color, str) else ""
+        # A marker whose year is its label (tinted like the marker) and whose
+        # note text appears on hover, which is how Dendroelevator shows it.
         meta = DEFAULT_META._replace(
-            title=text if isinstance(text, str) else "",
-            tag_background_color=color if isinstance(color, str) else "",
+            title=str(int(year)) if _is_number(year) else "",
+            description=text if isinstance(text, str) else "",
+            line_color=color_hex,
+            tag_background_color=color_hex,
         )
-        result.entries.append((TEXT_KIND, (to_fraction(*lat_lng),), meta, MeasurementData(attrs, ())))
+        result.entries.append((POINT_KIND, (to_fraction(*lat_lng),), meta, MeasurementData(attrs, ())))
 
 
 # ----------------------------------------------------------------------
@@ -388,7 +398,7 @@ def _save_annotations(
     annotations: dict = {}
     skipped = 0
     for m in measurements:
-        if m.kind != TEXT_KIND or not m.points:
+        if m.kind != POINT_KIND or not m.points:
             continue
         year = m.data.attrs.get(f"{_ATTR_PREFIX}year")
         if not _is_number(year):
@@ -397,14 +407,14 @@ def _save_annotations(
         fx, fy = m.points[0]
         entry = {
             "code": [],
-            "text": m.meta.title,
+            "text": m.meta.description,
             "year": int(year),
-            "color": m.meta.tag_background_color or _DEFAULT_ANNOTATION_COLOR,
+            "color": m.meta.line_color or m.meta.tag_background_color or _DEFAULT_ANNOTATION_COLOR,
             "latLng": {"lat": -fy * height / scale, "lng": fx * width / scale},
             "description": [],
         }
         entry.update(_json_attr(m.data.attrs, "annotation_extras"))
         annotations[str(len(annotations))] = entry
     if skipped:
-        result.warnings.append(f"{skipped} text annotation(s) without a year were not exported.")
+        result.warnings.append(f"{skipped} point(s) without a year were not exported as annotations.")
     return annotations

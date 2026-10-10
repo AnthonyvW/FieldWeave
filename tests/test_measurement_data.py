@@ -9,6 +9,7 @@ from PySide6.QtCore import QPointF
 
 from UI.widgets.measurements.measurement_data import (
     EMPTY_DATA,
+    POINT_COLOR,
     SEGMENT_BREAK,
     MeasurementData,
     break_indices,
@@ -331,3 +332,38 @@ def test_customize_menu_shows_and_edits_the_point_label_template():
     menu.open_for(0, "Radius Circle", DEFAULT_META, QPoint(0, 0))
 
     assert menu._point_label_edit.isHidden()
+
+
+def test_colored_points_get_a_marker_and_uncolored_ones_do_not():
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QImage, QPainter
+
+    overlay = _overlay()
+    data = MeasurementData({}, ({}, {POINT_COLOR: "#ff0000"}, {}))
+    image = QImage(1000, 100, QImage.Format.Format_ARGB32)
+    image.fill(0)
+    painter = QPainter(image)
+    overlay._draw_measurement(
+        painter, QRect(0, 0, 1000, 100), "Arbitrary Line", ((0.1, 0.5), (0.3, 0.5), (0.5, 0.5)), 1.0, 1.0, 1.0, None,
+        data=data, line_width=0.5, outline_width=0.0,
+    )
+    painter.end()
+
+    marked = image.pixelColor(300, 50)
+    assert marked.alpha() > 0 and marked.red() > 200 and marked.blue() < 50
+    assert image.pixelColor(100, 40).alpha() == 0
+
+
+def test_point_labels_take_the_points_color():
+    image = _draw_labels(
+        "Arbitrary Line", "{dendro.year}", MeasurementData({}, ({}, {"dendro.year": 2018, POINT_COLOR: "#0000ff"}, {}))
+    )
+
+    reds = blues = 0
+    for x in range(300, 350):
+        for y in range(0, 60):
+            pixel = image.pixelColor(x, y)
+            if pixel.alpha() > 0:
+                reds += pixel.red() > 150
+                blues += pixel.blue() > 150
+    assert blues > 0 and reds == 0
