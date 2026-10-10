@@ -21,10 +21,17 @@ from UI.widgets.measurements.lines import (
     CALIBRATION_KIND, arrow_dims, arrow_head_path, bracket_path, circle_head_path, circle_head_radius,
     diamond_head_path, open_arrow_barbs_path,
 )
+from UI.widgets.measurements.measurement_formats import (
+    FIELDWEAVE,
+    MeasurementFormat,
+    read_measurement_file,
+    write_measurement_file,
+)
 from UI.widgets.measurements.measurement_io import (
     DeserializeResult,
+    ExportResult,
+    FormatContext,
     deserialize_measurements,
-    load_measurements_from_file,
     save_measurements_to_file,
     serialize_measurements,
 )
@@ -2067,6 +2074,16 @@ class MeasurementOverlay(Overlay):
         """
         return full_dims if self._loaded_active else (self._live_reference_dims or full_dims)
 
+    def reference_dims(self) -> tuple[int, int] | None:
+        """Pixel size of the image the placed measurements sit on (see _reference_dims), or None before a frame is loaded."""
+        if self._zoom_handler is None:
+            return None
+        return self._reference_dims(self._zoom_handler.current_frame_dims())
+
+    @property
+    def loaded_image_active(self) -> bool:
+        return self._loaded_active
+
     def _draw_draft_label(
         self,
         painter: QPainter,
@@ -3809,8 +3826,16 @@ class MeasurementOverlayController:
         self._repaint()
         return result
 
-    def export_measurements_to_file(self, path: str) -> None:
-        save_measurements_to_file(path, self._overlay.measurements)
+    def format_context(self) -> FormatContext:
+        return FormatContext(self._overlay.reference_dims(), self._overlay.dpi)
+
+    @property
+    def loaded_image_active(self) -> bool:
+        return self._overlay.loaded_image_active
+
+    def export_measurements_to_file(self, path: str, fmt: MeasurementFormat = FIELDWEAVE) -> ExportResult:
+        """Write the active source's measurements in *fmt*. Nothing is written when the format can't represent them — see ExportResult."""
+        return write_measurement_file(path, fmt, self._overlay.measurements, self.format_context())
 
     @property
     def has_loaded_measurements(self) -> bool:
@@ -3821,9 +3846,15 @@ class MeasurementOverlayController:
         save_measurements_to_file(path, self._overlay.loaded_measurements)
 
     def import_measurements_from_file(self, path: str, *, replace: bool = True) -> DeserializeResult:
-        result = load_measurements_from_file(path, DEFAULT_REGISTRY)
+        """
+        Load a measurement file in whichever supported format it turns out
+        to be (see measurement_formats.detect_format). With *replace*, the
+        current measurements are only cleared once the file actually
+        yielded some, so a wrong or unreadable file can't wipe them.
+        """
+        result = read_measurement_file(path, DEFAULT_REGISTRY, self.format_context())
         measurements = self._overlay.measurements
-        if replace:
+        if replace and result.entries:
             measurements.clear()
         measurements.extend(Measurement(*entry) for entry in result.entries)
         self._repaint()

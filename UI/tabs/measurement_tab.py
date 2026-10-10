@@ -14,6 +14,7 @@ from UI.tabs.base_tab import CameraWithSidebarPage
 from UI.widgets.collapsible_section import CollapsibleSection
 from UI.widgets.capture_control_widget import CaptureControlWidget
 from UI.widgets.measurements_widget import MeasurementsWidget
+from UI.widgets.measurements.measurement_formats import FIELDWEAVE, FORMATS, format_for_filter
 from UI.widgets.measurements.measurement_meta import MeasurementMeta
 from UI.widgets.preview_overlay.interaction_mode import MEASUREMENT_MODE, ModeToken
 
@@ -185,16 +186,28 @@ class MeasurementTab(CameraWithSidebarPage):
         if preview is None:
             return
         stem = self._capture_control.default_export_stem()
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Measurements", str(self._capture_control.current_folder / f"{stem}.json"), "Measurement files (*.json)"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Measurements",
+            str(self._capture_control.current_folder / f"{stem}.json"),
+            ";;".join(fmt.file_filter for fmt in FORMATS),
+            FIELDWEAVE.file_filter,
         )
         if not path:
             return
         if not path.lower().endswith(".json"):
             path += ".json"
-        preview.overlays.measurement.export_measurements_to_file(path)
+        result = preview.overlays.measurement.export_measurements_to_file(path, format_for_filter(selected_filter))
+        for issue in result.warnings:
+            warning(f"[MeasurementExport] {issue}")
         ctx = get_app_context()
-        if ctx.toast is not None:
+        if ctx.toast is None:
+            return
+        if result.document is None:
+            ctx.toast.warning(result.warnings[0] if result.warnings else "Nothing was exported", title="Nothing Exported")
+        elif result.warnings:
+            ctx.toast.warning(f"{path}\n{result.warnings[0]}", title="Measurements Exported With Notes")
+        else:
             ctx.toast.success(path, title="Measurements Exported")
 
     def _on_import_measurements_clicked(self) -> None:
@@ -207,12 +220,36 @@ class MeasurementTab(CameraWithSidebarPage):
         if not path:
             return
         result = preview.overlays.measurement.import_measurements_from_file(path)
-        for issue in result.warnings:
+        issues = list(result.warnings)
+        dpi_issue = self._apply_imported_dpi(result.dpi)
+        if dpi_issue is not None:
+            issues.append(dpi_issue)
+        for issue in issues:
             warning(f"[MeasurementImport] {issue}")
         ctx = get_app_context()
         if ctx.toast is None:
             return
-        if result.warnings:
-            ctx.toast.warning(f"{len(result.entries)} loaded, {len(result.warnings)} skipped — see log", title="Import Completed With Issues")
+        if issues:
+            ctx.toast.warning(f"{len(result.entries)} loaded, {len(issues)} issue(s) — see log", title="Import Completed With Issues")
         else:
             ctx.toast.success(f"{len(result.entries)} measurement(s) loaded", title="Measurements Imported")
+
+    def _apply_imported_dpi(self, imported_dpi: float | None) -> str | None:
+        """
+        Use the scale a file recorded only where that can't clobber anything:
+        a loaded image that has no DPI yet. Otherwise return a note when it
+        disagrees with the DPI already in effect, since that points at the
+        wrong image — and never touch the live camera's calibrated DPI.
+        """
+        if imported_dpi is None:
+            return None
+        controller = get_app_context().camera_preview.overlays.measurement
+        current = controller.dpi
+        if current is None:
+            if controller.loaded_image_active:
+                self._capture_control.submit_dpi_value(imported_dpi)
+                return None
+            return f"The file records {imported_dpi:,.0f} DPI; set it in the DPI panel to measure in real units."
+        if abs(current - imported_dpi) / imported_dpi > 0.01:
+            return f"The file records {imported_dpi:,.0f} DPI but the image is set to {current:,.0f}."
+        return None

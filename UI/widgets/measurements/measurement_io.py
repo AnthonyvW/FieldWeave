@@ -13,6 +13,12 @@ from UI.widgets.measurements.measurement_data import (
 from UI.widgets.measurements.measurement_kind import MeasurementKindRegistry, Point2D
 from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.units import MeasurementUnit
+from common.fieldweaveConfig import FIELDWEAVE_VERSION
+
+# Marks a file as one FieldWeave wrote, stored first under HEADER_KEY so it
+# is the first thing a reader (or a person opening the file) sees.
+HEADER_KEY = "fieldweave"
+FILE_TYPE = "measurements"
 
 # Bumped whenever the document shape changes in a way old readers can't
 # already tolerate (deserialize_measurements already drops unknown meta
@@ -22,7 +28,7 @@ from UI.widgets.measurements.units import MeasurementUnit
 FORMAT_VERSION = 1
 
 
-class _MeasurementLike(Protocol):
+class MeasurementLike(Protocol):
     """What serialize_measurements needs from each entry — Measurement itself satisfies this structurally, without measurement_io needing to import it (and risk a cycle back from measurement_overlay.py)."""
 
     kind: str
@@ -36,6 +42,25 @@ class DeserializeResult:
     """Entries as plain (kind, points, meta, data) tuples — the caller wraps each into its own Measurement type — plus any warnings for entries that were skipped or fell back to defaults rather than crashing the load."""
 
     entries: list[tuple[str, tuple[Point2D, ...], MeasurementMeta, MeasurementData]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    # The image scale the file itself recorded, for formats that carry one —
+    # the caller decides whether to apply it.
+    dpi: float | None = None
+
+
+@dataclass(frozen=True)
+class FormatContext:
+    """What a foreign format needs to know about the image the measurements sit on: its pixel size (for converting to and from its own coordinates) and its DPI."""
+
+    image_dims: tuple[int, int] | None
+    dpi: float | None
+
+
+@dataclass
+class ExportResult:
+    """The document to write, or None when nothing could be exported (then *warnings* says why)."""
+
+    document: dict | None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -57,17 +82,31 @@ def _meta_from_dict(data: dict) -> MeasurementMeta:
     return MeasurementMeta(**fields)
 
 
-def _measurement_to_dict(m: _MeasurementLike) -> dict:
+def _measurement_to_dict(m: MeasurementLike) -> dict:
     entry = {"kind": m.kind, "points": [list(p) for p in m.points], "meta": _meta_to_dict(m.meta)}
     if not m.data.is_empty:
         entry["data"] = data_to_dict(m.data)
     return entry
 
 
-def serialize_measurements(measurements: list[_MeasurementLike]) -> dict:
+def file_header() -> dict:
+    return {"type": FILE_TYPE, "app_version": FIELDWEAVE_VERSION, "format_version": FORMAT_VERSION}
+
+
+def is_fieldweave_document(data: object) -> bool:
+    """True for a file FieldWeave wrote — recognized by its header, or, for files from before the header existed, by a top-level "measurements" list."""
+    if not isinstance(data, dict):
+        return False
+    header = data.get(HEADER_KEY)
+    if isinstance(header, dict) and header.get("type") == FILE_TYPE:
+        return True
+    return isinstance(data.get("measurements"), list)
+
+
+def serialize_measurements(measurements: list[MeasurementLike]) -> dict:
     """A plain, JSON-serializable document of *measurements* — see deserialize_measurements for the read side."""
     return {
-        "format_version": FORMAT_VERSION,
+        HEADER_KEY: file_header(),
         "measurements": [_measurement_to_dict(m) for m in measurements],
     }
 
@@ -121,14 +160,14 @@ def deserialize_measurements(data: dict, registry: MeasurementKindRegistry) -> D
     return result
 
 
-def save_measurements_to_file(path: str | Path, measurements: list[_MeasurementLike]) -> None:
+def save_measurements_to_file(path: str | Path, measurements: list[MeasurementLike]) -> None:
     document = serialize_measurements(measurements)
     Path(path).write_text(json.dumps(document, indent=2), encoding="utf-8")
 
 
 def load_measurements_from_file(path: str | Path, registry: MeasurementKindRegistry) -> DeserializeResult:
     try:
-        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        document = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         return DeserializeResult(warnings=[f"Could not read {path}: {exc}"])
     if not isinstance(document, dict):
