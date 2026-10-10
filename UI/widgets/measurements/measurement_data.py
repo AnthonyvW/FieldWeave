@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 AttrValue = str | int | float | bool | None
 Attrs = dict[str, AttrValue]
+Point = tuple[float, float]
 
 
 class MeasurementData(NamedTuple):
@@ -30,6 +31,32 @@ class MeasurementData(NamedTuple):
 
 
 EMPTY_DATA = MeasurementData({}, ())
+
+# The one per-point attribute FieldWeave itself interprets: true on a point
+# means the line does not connect the previous point to it, so a polyline
+# splits into separate runs there.
+SEGMENT_BREAK = "fw.segment_break"
+
+
+def break_indices(data: MeasurementData, point_count: int) -> frozenset[int]:
+    """Indices (never 0) of the points that start a new run."""
+    return frozenset(
+        i for i, attrs in enumerate(data.point_attrs[:point_count]) if i > 0 and attrs.get(SEGMENT_BREAK) is True
+    )
+
+
+def segment_runs(points: tuple[Point, ...], data: MeasurementData) -> list[tuple[Point, ...]]:
+    """*points* split into the separately-connected runs *data* describes — a single run holding every point when nothing is flagged."""
+    breaks = break_indices(data, len(points))
+    if not breaks:
+        return [points]
+    runs: list[tuple[Point, ...]] = []
+    start = 0
+    for i in sorted(breaks):
+        runs.append(points[start:i])
+        start = i
+    runs.append(points[start:])
+    return runs
 
 
 def drop_point(data: MeasurementData, index: int) -> MeasurementData:

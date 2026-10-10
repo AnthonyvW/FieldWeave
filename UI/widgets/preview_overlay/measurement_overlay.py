@@ -28,7 +28,13 @@ from UI.widgets.measurements.measurement_io import (
     save_measurements_to_file,
     serialize_measurements,
 )
-from UI.widgets.measurements.measurement_data import EMPTY_DATA, MeasurementData, drop_point
+from UI.widgets.measurements.measurement_data import (
+    EMPTY_DATA,
+    MeasurementData,
+    break_indices,
+    drop_point,
+    segment_runs,
+)
 from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
 from UI.widgets.measurements.measurement_meta import DEFAULT_META, MeasurementMeta
 from UI.widgets.measurements.measurement_style import (
@@ -731,8 +737,11 @@ class MeasurementOverlay(Overlay):
                     self._near_point_index = p_index
                     return index
             if entry.category == "line":
-                for a, b in zip(screen_points, screen_points[1:]):
-                    if self._distance_to_segment(cursor, a, b) <= OVERLAY_ENDPOINT_HIT_RADIUS:
+                breaks = break_indices(measurement.data, len(screen_points))
+                for i in range(1, len(screen_points)):
+                    if i in breaks:
+                        continue
+                    if self._distance_to_segment(cursor, screen_points[i - 1], screen_points[i]) <= OVERLAY_ENDPOINT_HIT_RADIUS:
                         return index
             elif entry.category == "circle" and full_dims is not None:
                 edge_points = self._circle_edge_screen_points(
@@ -1247,7 +1256,7 @@ class MeasurementOverlay(Overlay):
                 cap_size=meta.cap_size_scale, fill_color=self._resolve_fill(meta),
                 indicator_enabled=meta.indicator_enabled, indicator_color=indicator_color,
                 indicator_opacity=meta.indicator_opacity, indicator_dash_style=meta.indicator_dash_style,
-                midpoint_style=meta.midpoint_style, point_style=meta.point_style,
+                midpoint_style=meta.midpoint_style, point_style=meta.point_style, data=measurement.data,
             )
             entry = DEFAULT_REGISTRY.get(measurement.kind)
             if entry is not None and entry.category == "angle" and meta.indicator_enabled:
@@ -1531,17 +1540,22 @@ class MeasurementOverlay(Overlay):
         indicator_dash_style: str = "dash",
         midpoint_style: str = "none",
         point_style: str = "dot",
+        data: MeasurementData = EMPTY_DATA,
     ) -> None:
         entry = DEFAULT_REGISTRY.get(kind)
         if entry is None:
             return
         if entry.category == "line":
-            self._draw_polyline(
-                painter, rect, points, stroke_scale, dashed=dashed,
-                line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
-                dash_style=dash_style, start_cap=start_cap, end_cap=end_cap, cap_size=cap_size,
-                midpoint_style=midpoint_style,
-            )
+            runs = segment_runs(points, data)
+            for run_index, run in enumerate(runs):
+                self._draw_polyline(
+                    painter, rect, run, stroke_scale, dashed=dashed,
+                    line_color=line_color, line_width=line_width, outline_color=outline_color, outline_width=outline_width,
+                    dash_style=dash_style,
+                    start_cap=start_cap if run_index == 0 else "curved",
+                    end_cap=end_cap if run_index == len(runs) - 1 else "curved",
+                    cap_size=cap_size, midpoint_style=midpoint_style,
+                )
         elif entry.category == "circle" and full_dims is not None:
             self._draw_circle(
                 painter, rect, kind, points, stroke_scale, full_dims,
@@ -1988,7 +2002,9 @@ class MeasurementOverlay(Overlay):
         if meta.hidden:
             return
         dims = self._reference_dims(full_dims)
-        text_and_anchor = self._measurement_label(measurement.kind, measurement.points, meta, full_dims, dims)
+        text_and_anchor = self._measurement_label(
+            measurement.kind, measurement.points, meta, full_dims, dims, measurement.data
+        )
         if text_and_anchor is None:
             return
         text, anchor = text_and_anchor
@@ -2081,6 +2097,7 @@ class MeasurementOverlay(Overlay):
         meta: MeasurementMeta,
         full_dims: tuple[int, int] | None,
         dims: tuple[int, int] | None,
+        data: MeasurementData = EMPTY_DATA,
     ) -> tuple[str, tuple[float, float]] | None:
         """
         Text and anchor for *kind*'s tag: its title (only if one was
@@ -2111,7 +2128,7 @@ class MeasurementOverlay(Overlay):
         decimals = meta.decimal_places
 
         if entry.category == "line":
-            suffix = self._length_suffix(points, dims, unit, decimals)
+            suffix = self._length_suffix(points, dims, unit, decimals, data)
             anchor = self._midpoint(points)
         elif entry.category == "circle":
             if full_dims is None:
@@ -2284,10 +2301,11 @@ class MeasurementOverlay(Overlay):
         full_dims: tuple[int, int] | None,
         unit: MeasurementUnit,
         decimals: int = 2,
+        data: MeasurementData = EMPTY_DATA,
     ) -> str | None:
         if full_dims is None or not self._can_measure(unit):
             return None
-        length_px = self._polyline_length_px(points, full_dims)
+        length_px = sum(self._polyline_length_px(run, full_dims) for run in segment_runs(points, data))
         if length_px <= 0:
             return None
         return format_length(length_px, self.dpi or 1.0, unit, decimals)
