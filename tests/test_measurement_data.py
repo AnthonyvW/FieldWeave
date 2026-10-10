@@ -9,12 +9,10 @@ from PySide6.QtCore import QPointF
 
 from UI.widgets.measurements.measurement_data import (
     EMPTY_DATA,
-    POINT_COLOR,
     SEGMENT_BREAK,
     MeasurementData,
     break_indices,
     drop_point,
-    render_point_label,
     segment_runs,
 )
 from UI.widgets.measurements.measurement_io import (
@@ -235,135 +233,3 @@ def test_draw_leaves_the_gap_undrawn():
     assert image.pixelColor(150, 50).alpha() > 0
     assert image.pixelColor(850, 50).alpha() > 0
     assert image.pixelColor(500, 50).alpha() == 0
-
-
-def test_point_label_fills_attributes_and_index():
-    data = MeasurementData({}, ({}, {"dendro.year": 2018}, {"dendro.year": 2017.0, "x": True}))
-
-    assert render_point_label("{dendro.year}", 1, data) == "2018"
-    assert render_point_label("{index}: {dendro.year}", 2, data) == "3: 2017"
-    assert render_point_label("{x}", 2, data) == "true"
-
-
-def test_point_label_is_blank_when_the_attribute_is_missing():
-    data = MeasurementData({}, ({}, {"dendro.year": 2018}))
-
-    assert render_point_label("{dendro.year}", 0, data) == ""
-    assert render_point_label("{dendro.year}", 5, data) == ""
-    assert render_point_label("{dendro.year}", 0, EMPTY_DATA) == ""
-
-
-def test_point_label_template_round_trips_in_meta():
-    meta = DEFAULT_META._replace(point_label_template="{dendro.year}")
-    doc = serialize_measurements([Measurement("Arbitrary Line", POINTS, meta)])
-
-    result = deserialize_measurements(json.loads(json.dumps(doc)), DEFAULT_REGISTRY)
-
-    assert result.entries[0][2].point_label_template == "{dendro.year}"
-
-
-def _draw_labels(kind: str, template: str, data: MeasurementData):
-    from PySide6.QtCore import QRect
-    from PySide6.QtGui import QImage, QPainter
-
-    overlay = _overlay()
-    meta = DEFAULT_META._replace(point_label_template=template, tag_text_color="#ff0000")
-    measurement = Measurement(kind, POINTS, meta, data)
-    image = QImage(1000, 100, QImage.Format.Format_ARGB32)
-    image.fill(0)
-    painter = QPainter(image)
-    overlay._draw_measurement_label(painter, QRect(0, 0, 1000, 100), 0, measurement, 1.0, 1.0, None)
-    painter.end()
-    return image
-
-
-def _has_ink(image, x_center: int) -> bool:
-    return any(
-        image.pixelColor(x, y).alpha() > 0 for x in range(x_center, x_center + 50) for y in range(0, 60)
-    )
-
-
-def test_line_draws_labels_only_for_points_that_have_the_data():
-    data = MeasurementData({}, ({}, {"dendro.year": 2018}, {}))
-
-    image = _draw_labels("Arbitrary Line", "{dendro.year}", data)
-
-    assert not _has_ink(image, 100)
-    assert _has_ink(image, 300)
-    assert not _has_ink(image, 500)
-
-
-def test_line_without_a_template_draws_no_point_labels():
-    data = MeasurementData({}, ({}, {"dendro.year": 2018}, {}))
-
-    image = _draw_labels("Arbitrary Line", "", data)
-
-    assert not any(_has_ink(image, x) for x in (100, 300, 500))
-
-
-def test_count_falls_back_to_numbers_without_a_template_and_uses_it_with_one():
-    data = MeasurementData({}, ({}, {"dendro.year": 2018}, {}))
-
-    numbered = _draw_labels("Count", "", data)
-    templated = _draw_labels("Count", "{dendro.year}", data)
-
-    assert all(_has_ink(numbered, x) for x in (100, 300, 500))
-    assert not _has_ink(templated, 100)
-    assert _has_ink(templated, 300)
-
-
-def test_customize_menu_shows_and_edits_the_point_label_template():
-    from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QApplication
-
-    from UI.widgets.preview_overlay.measurement_customize_menu import MeasurementCustomizeMenu
-
-    QApplication.instance() or QApplication([])
-    menu = MeasurementCustomizeMenu()
-    menu.open_for(0, "Arbitrary Line", DEFAULT_META._replace(point_label_template="{index}"), QPoint(0, 0))
-
-    assert menu._point_label_edit.text() == "{index}"
-    assert not menu._point_label_edit.isHidden()
-
-    menu._point_label_edit.setText("{dendro.year}")
-
-    assert menu._current_meta().point_label_template == "{dendro.year}"
-
-    menu.open_for(0, "Radius Circle", DEFAULT_META, QPoint(0, 0))
-
-    assert menu._point_label_edit.isHidden()
-
-
-def test_colored_points_get_a_marker_and_uncolored_ones_do_not():
-    from PySide6.QtCore import QRect
-    from PySide6.QtGui import QImage, QPainter
-
-    overlay = _overlay()
-    data = MeasurementData({}, ({}, {POINT_COLOR: "#ff0000"}, {}))
-    image = QImage(1000, 100, QImage.Format.Format_ARGB32)
-    image.fill(0)
-    painter = QPainter(image)
-    overlay._draw_measurement(
-        painter, QRect(0, 0, 1000, 100), "Arbitrary Line", ((0.1, 0.5), (0.3, 0.5), (0.5, 0.5)), 1.0, 1.0, 1.0, None,
-        data=data, line_width=0.5, outline_width=0.0,
-    )
-    painter.end()
-
-    marked = image.pixelColor(300, 50)
-    assert marked.alpha() > 0 and marked.red() > 200 and marked.blue() < 50
-    assert image.pixelColor(100, 40).alpha() == 0
-
-
-def test_point_labels_take_the_points_color():
-    image = _draw_labels(
-        "Arbitrary Line", "{dendro.year}", MeasurementData({}, ({}, {"dendro.year": 2018, POINT_COLOR: "#0000ff"}, {}))
-    )
-
-    reds = blues = 0
-    for x in range(300, 350):
-        for y in range(0, 60):
-            pixel = image.pixelColor(x, y)
-            if pixel.alpha() > 0:
-                reds += pixel.red() > 150
-                blues += pixel.blue() > 150
-    assert blues > 0 and reds == 0

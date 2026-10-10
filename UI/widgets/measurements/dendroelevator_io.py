@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 from statistics import median
 
-from UI.widgets.measurements.measurement_data import POINT_COLOR, SEGMENT_BREAK, MeasurementData, break_indices
+from UI.widgets.measurements.measurement_data import SEGMENT_BREAK, MeasurementData, break_indices
 from UI.widgets.measurements.measurement_io import DeserializeResult, ExportResult, FormatContext, MeasurementLike
 from UI.widgets.measurements.measurement_kind import MeasurementKindRegistry, Point2D
 from UI.widgets.measurements.measurement_meta import DEFAULT_META
@@ -29,7 +29,7 @@ _WIDTH_DECIMALS = 5
 LINE_KIND = "Arbitrary Line"
 POINT_KIND = "Point"
 
-# Dendroelevator marks every tenth year's ring red and the rest blue.
+# Dendroelevator draws every tenth year's ring red and the rest blue.
 _DECADE_COLOR = "#ff1c22"
 _YEAR_COLOR = "#1c7bff"
 _DEFAULT_ANNOTATION_COLOR = "#ff1c22"
@@ -57,6 +57,10 @@ _TOP_LEVEL_KEYS = {
 }
 _ATTR_PREFIX = "dendro."
 _POINT_EXTRA_PREFIX = "dendro.extra."
+_RING_INDEX = f"{_ATTR_PREFIX}ring_index"
+_RING_YEAR = f"{_ATTR_PREFIX}ring_year"
+_POINT_INDEX = f"{_ATTR_PREFIX}index"
+_YEAR = f"{_ATTR_PREFIX}year"
 
 
 def sniff(doc: object) -> bool:
@@ -71,24 +75,36 @@ def _is_scalar(value: object) -> bool:
     return value is None or isinstance(value, (str, bool)) or _is_number(value)
 
 
-def _ring_lengths(xy: list[tuple[float, float]], years: list[int | None], breaks: frozenset[int]) -> dict[int, float]:
+def _path_length(xy: list[tuple[float, float]], breaks: frozenset[int]) -> float:
+    """Length walked along *xy*, leaving out the jump into any point that starts a new run."""
+    return sum(
+        math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]) for i in range(1, len(xy)) if i not in breaks
+    )
+
+
+def _ring_chains(years: list[int | None], forward: bool) -> list[tuple[int, int, int | None]]:
     """
-    Width of each ring, keyed the way Dendroelevator's ptWidths is: the
-    length walked since the previous year point, excluding the jump into a
-    point that starts a new run — so a ring crossing a core break sums the
-    measured stretches on either side and skips the gap between them. It is
-    filed under year + 1, the ring whose far edge the year point marks.
+    The rings, as (first point index, last point index, ring year): each ring
+    is the stretch of the measuring path between two consecutive year points.
+    A ring's year is that of the year point it starts from along the path, so
+    the stretch ending at year point Y is ring Y + 1 when measuring toward
+    older wood (the file studied, where ptWidths confirms it) and Y - 1 when
+    measuring the other way. The stretch before the first year point is the
+    ring that point closes off; anything after the last one is a ring with no
+    year.
     """
-    lengths: dict[int, float] = {}
-    walked = 0.0
-    for i, point in enumerate(xy):
-        if i and i not in breaks:
-            walked += math.hypot(point[0] - xy[i - 1][0], point[1] - xy[i - 1][1])
-        year = years[i]
-        if year is not None:
-            lengths[year + 1] = walked
-            walked = 0.0
-    return lengths
+    step = -1 if forward else 1
+    chains: list[tuple[int, int, int | None]] = []
+    start = 0
+    for index, year in enumerate(years):
+        if year is None:
+            continue
+        if index > start:
+            chains.append((start, index, year + step))
+        start = index
+    if len(years) - 1 > start:
+        chains.append((start, len(years) - 1, None))
+    return chains
 
 
 # ----------------------------------------------------------------------
@@ -104,18 +120,17 @@ def _parse_lat_lng(raw: object) -> tuple[float, float] | None:
     return (lat, lng) if math.isfinite(lat) and math.isfinite(lng) else None
 
 
-def _point_attrs(raw: dict, index: int) -> dict:
-    attrs: dict = {}
+def _point_attrs(raw: dict, file_index: int, run_index: int) -> dict:
+    attrs: dict = {_POINT_INDEX: file_index}
     year = raw.get("year")
     if _is_number(year):
-        attrs[f"{_ATTR_PREFIX}year"] = int(year)
-        attrs[POINT_COLOR] = _DECADE_COLOR if int(year) % 10 == 0 else _YEAR_COLOR
+        attrs[_YEAR] = int(year)
     if isinstance(raw.get("earlywood"), bool):
         attrs[f"{_ATTR_PREFIX}earlywood"] = raw["earlywood"]
     for flag in ("start", "break", "skip"):
         if raw.get(flag) is True:
             attrs[f"{_ATTR_PREFIX}{flag}"] = True
-    if raw.get("start") is True and index > 0:
+    if raw.get("start") is True and run_index > 0:
         attrs[SEGMENT_BREAK] = True
     for key, value in raw.items():
         if key not in _POINT_KEYS and _is_scalar(value):
@@ -132,28 +147,6 @@ def _snap_to_power_of_two(value: float) -> float:
     return nearest if abs(value - nearest) / nearest <= _POWER_OF_TWO_SNAP else value
 
 
-def _fit_scale(
-    doc: dict, xy_units: list[tuple[float, float]], years: list[int | None], breaks: frozenset[int]
-) -> float | None:
-    """
-    The file's unit scale in pixels, recovered from its own numbers: each
-    ring's width in mm times ppm is its length in pixels, and the same
-    length measured in the file's lat/lng units gives pixels per unit.
-    Snapped to a power of two when within 1% of one, since the file's rounding
-    would otherwise leave it a few parts per million off.
-    """
-    widths = _tw_series(doc)
-    ppm = doc.get("ppm")
-    if widths is None or not _is_number(ppm) or ppm <= 0:
-        return None
-    implied = [
-        widths[year] * ppm / length
-        for year, length in _ring_lengths(xy_units, years, breaks).items()
-        if year in widths and length > 0
-    ]
-    return _snap_to_power_of_two(median(implied)) if implied else None
-
-
 def _tw_series(doc: dict) -> dict[int, float] | None:
     tw = (doc.get("ptWidths") or {}).get("tw") if isinstance(doc.get("ptWidths"), dict) else None
     if not isinstance(tw, dict):
@@ -164,6 +157,34 @@ def _tw_series(doc: dict) -> dict[int, float] | None:
     if not all(_is_number(v) for v in xs + ys):
         return None
     return {int(x): float(y) for x, y in zip(xs, ys)}
+
+
+def _fit_scale(
+    doc: dict,
+    xy_units: list[tuple[float, float]],
+    chains: list[tuple[int, int, int | None]],
+    breaks: frozenset[int],
+) -> float | None:
+    """
+    The file's unit scale in pixels, recovered from its own numbers: a ring's
+    width in mm times ppm is its length in pixels, and the same ring measured
+    in the file's lat/lng units gives pixels per unit. Snapped to a power of
+    two when within 1% of one, since the file's rounding would otherwise leave
+    it a few parts per million off.
+    """
+    widths = _tw_series(doc)
+    ppm = doc.get("ppm")
+    if widths is None or not _is_number(ppm) or ppm <= 0:
+        return None
+    implied = []
+    for first, last, ring_year in chains:
+        if ring_year not in widths:
+            continue
+        local_breaks = frozenset(b - first for b in breaks if first < b <= last)
+        length = _path_length(xy_units[first:last + 1], local_breaks)
+        if length > 0:
+            implied.append(widths[ring_year] * ppm / length)
+    return _snap_to_power_of_two(median(implied)) if implied else None
 
 
 def _sample_name(doc: dict) -> str:
@@ -184,6 +205,24 @@ def _extras(doc: dict) -> dict:
     return extras
 
 
+def _sample_attrs(doc: dict, scale: float, ppm: object, has_dpi: bool) -> dict:
+    """What describes the sample as a whole; every ring carries a copy, so export can read it from whichever rings are left."""
+    attrs: dict = {
+        f"{_ATTR_PREFIX}name": _sample_name(doc),
+        f"{_ATTR_PREFIX}scale": scale,
+        f"{_ATTR_PREFIX}extras": json.dumps(_extras(doc)),
+    }
+    for source, key in (
+        ("year", "series_year"), ("forwardDirection", "forward_direction"), ("subAnnual", "sub_annual"),
+        ("earlywood", "earlywood"), ("index", "index"),
+    ):
+        if _is_scalar(doc.get(source)):
+            attrs[f"{_ATTR_PREFIX}{key}"] = doc[source]
+    if has_dpi:
+        attrs[f"{_ATTR_PREFIX}ppm"] = ppm
+    return attrs
+
+
 def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> DeserializeResult:
     result = DeserializeResult()
     if ctx.image_dims is None:
@@ -195,28 +234,31 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
 
     width, height = ctx.image_dims
     ppm = doc.get("ppm")
-    if _is_number(ppm) and ppm > 0:
+    has_dpi = _is_number(ppm) and ppm > 0
+    if has_dpi:
         result.dpi = ppm * _MM_PER_INCH
     else:
         result.warnings.append("Missing or invalid ppm: the image scale was not imported.")
 
     lat_lngs: list[tuple[float, float]] = []
-    point_attrs: list[dict] = []
-    years: list[int | None] = []
+    raws: list[dict] = []
+    file_indices: list[int] = []
     for i, raw in enumerate(doc["points"]):
         lat_lng = _parse_lat_lng(raw.get("latLng")) if isinstance(raw, dict) else None
         if lat_lng is None:
             result.warnings.append(f"Point {i}: missing or malformed latLng, skipped.")
             continue
-        attrs = _point_attrs(raw, len(lat_lngs))
         lat_lngs.append(lat_lng)
-        point_attrs.append(attrs)
-        year = attrs.get(f"{_ATTR_PREFIX}year")
-        years.append(year if isinstance(year, int) else None)
+        raws.append(raw)
+        file_indices.append(i)
 
+    years = [int(r["year"]) if _is_number(r.get("year")) else None for r in raws]
+    forward = doc.get("forwardDirection") is True
+    chains = _ring_chains(years, forward)
+    start_flags = frozenset(i for i, r in enumerate(raws) if i > 0 and r.get("start") is True)
     xy_units = [(lng, -lat) for lat, lng in lat_lngs]
-    breaks = break_indices(MeasurementData({}, tuple(point_attrs)), len(lat_lngs))
-    scale = _fit_scale(doc, xy_units, years, breaks)
+
+    scale = _fit_scale(doc, xy_units, chains, start_flags)
     if scale is None:
         scale = float(_next_power_of_two(max(width, height)))
         result.warnings.append(
@@ -226,29 +268,29 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
     def to_fraction(lat: float, lng: float) -> Point2D:
         return lng * scale / width, -lat * scale / height
 
-    points = [to_fraction(lat, lng) for lat, lng in lat_lngs]
-
-    if points:
-        name = _sample_name(doc)
-        attrs = {
-            f"{_ATTR_PREFIX}name": name,
-            f"{_ATTR_PREFIX}scale": scale,
-            f"{_ATTR_PREFIX}extras": json.dumps(_extras(doc)),
-        }
-        for source, key in (
-            ("year", "series_year"), ("forwardDirection", "forward_direction"), ("subAnnual", "sub_annual"),
-            ("earlywood", "earlywood"), ("index", "index"),
-        ):
-            if _is_scalar(doc.get(source)):
-                attrs[f"{_ATTR_PREFIX}{key}"] = doc[source]
-        if result.dpi is not None:
-            attrs[f"{_ATTR_PREFIX}ppm"] = ppm
-        meta = DEFAULT_META._replace(
-            title=name, unit=MeasurementUnit.MM, point_label_template=f"{{{_ATTR_PREFIX}year}}"
+    sample_attrs = _sample_attrs(doc, scale, ppm, has_dpi)
+    for ring_index, (first, last, ring_year) in enumerate(chains):
+        point_attrs = tuple(
+            _point_attrs(raws[i], file_indices[i], i - first) for i in range(first, last + 1)
         )
-        result.entries.append((LINE_KIND, tuple(points), meta, MeasurementData(attrs, tuple(point_attrs))))
-    else:
-        result.warnings.append("The file has no usable points.")
+        attrs = dict(sample_attrs)
+        attrs[_RING_INDEX] = ring_index
+        if ring_year is not None:
+            attrs[_RING_YEAR] = ring_year
+        color = ""
+        if ring_year is not None:
+            color = _DECADE_COLOR if ring_year % 10 == 0 else _YEAR_COLOR
+        meta = DEFAULT_META._replace(
+            title=str(ring_year) if ring_year is not None else "",
+            unit=MeasurementUnit.MM,
+            line_color=color,
+            tag_background_color=color,
+        )
+        points = tuple(to_fraction(*lat_lngs[i]) for i in range(first, last + 1))
+        result.entries.append((LINE_KIND, points, meta, MeasurementData(attrs, point_attrs)))
+
+    if not chains:
+        result.warnings.append("The file has no ring to import: it needs at least two usable points.")
 
     _load_annotations(doc, to_fraction, result)
 
@@ -288,7 +330,7 @@ def _load_annotations(
         year = raw.get("year")
         attrs: dict = {}
         if _is_number(year):
-            attrs[f"{_ATTR_PREFIX}year"] = int(year)
+            attrs[_YEAR] = int(year)
         extras = {k: v for k, v in raw.items() if k not in _ANNOTATION_KEYS}
         if extras:
             attrs[f"{_ATTR_PREFIX}annotation_extras"] = json.dumps(extras)
@@ -325,8 +367,9 @@ def _json_attr(attrs: dict, key: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _has_years(measurement: MeasurementLike) -> bool:
-    return measurement.kind == LINE_KIND and any(f"{_ATTR_PREFIX}year" in a for a in measurement.data.point_attrs)
+def _is_ring(measurement: MeasurementLike) -> bool:
+    index = measurement.data.attrs.get(_RING_INDEX)
+    return measurement.kind == LINE_KIND and isinstance(index, int) and not isinstance(index, bool)
 
 
 def _save_date() -> dict:
@@ -339,16 +382,13 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
     if ctx.image_dims is None:
         result.warnings.append("No image is open, so there is no pixel size to export against.")
         return result
-    rings = [m for m in measurements if _has_years(m)]
+    rings = sorted((m for m in measurements if _is_ring(m)), key=lambda m: m.data.attrs[_RING_INDEX])
     if not rings:
         result.warnings.append(
-            "Nothing to export: Dendroelevator files hold a line of ring-boundary points that carry years, and none is placed."
+            "Nothing to export: Dendroelevator files hold the ring lines made by importing one, and none is placed."
         )
         return result
-    if len(rings) > 1:
-        result.warnings.append("Several year-labelled lines are placed; only the first was exported.")
-    ring = rings[0]
-    attrs = ring.data.attrs
+    attrs = rings[0].data.attrs
 
     ppm = ctx.dpi / _MM_PER_INCH if ctx.dpi else None
     recorded_ppm = attrs.get(f"{_ATTR_PREFIX}ppm")
@@ -364,37 +404,49 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
     scale = float(recorded_scale) if _is_number(recorded_scale) and recorded_scale > 0 else float(
         _next_power_of_two(max(width, height))
     )
-    breaks = break_indices(ring.data, len(ring.points))
 
-    points = []
-    xy_px: list[tuple[float, float]] = []
-    years: list[int | None] = []
-    for i, (fx, fy) in enumerate(ring.points):
-        point_attrs = ring.data.point_attrs[i] if i < len(ring.data.point_attrs) else {}
-        x_px, y_px = fx * width, fy * height
-        xy_px.append((x_px, y_px))
-        raw: dict = {
-            "skip": point_attrs.get(f"{_ATTR_PREFIX}skip") is True,
-            "break": point_attrs.get(f"{_ATTR_PREFIX}break") is True,
-            "start": point_attrs.get(f"{_ATTR_PREFIX}start") is True or i in breaks,
-            "latLng": {"lat": -y_px / scale, "lng": x_px / scale},
-        }
-        year = point_attrs.get(f"{_ATTR_PREFIX}year")
-        if isinstance(year, int) and not isinstance(year, bool):
-            raw["year"] = year
-        years.append(raw.get("year"))
-        if isinstance(point_attrs.get(f"{_ATTR_PREFIX}earlywood"), bool):
-            raw["earlywood"] = point_attrs[f"{_ATTR_PREFIX}earlywood"]
-        for key, value in point_attrs.items():
-            if key.startswith(_POINT_EXTRA_PREFIX):
-                raw[key[len(_POINT_EXTRA_PREFIX):]] = value
-        points.append(raw)
+    # Neighbouring rings share the year point between them, so each file point
+    # is collected once, from the first ring that holds it.
+    collected: dict[int, dict] = {}
+    lengths_mm: dict[int, float] = {}
+    unindexed = 0
+    for ring in rings:
+        xy_px = [(fx * width, fy * height) for fx, fy in ring.points]
+        for i, (x_px, y_px) in enumerate(xy_px):
+            point_attrs = ring.data.point_attrs[i] if i < len(ring.data.point_attrs) else {}
+            file_index = point_attrs.get(_POINT_INDEX)
+            if not isinstance(file_index, int):
+                unindexed += 1
+                continue
+            if file_index in collected:
+                continue
+            raw: dict = {
+                "skip": point_attrs.get(f"{_ATTR_PREFIX}skip") is True,
+                "break": point_attrs.get(f"{_ATTR_PREFIX}break") is True,
+                "start": point_attrs.get(f"{_ATTR_PREFIX}start") is True or point_attrs.get(SEGMENT_BREAK) is True,
+                "latLng": {"lat": -y_px / scale, "lng": x_px / scale},
+            }
+            year = point_attrs.get(_YEAR)
+            if isinstance(year, int) and not isinstance(year, bool):
+                raw["year"] = year
+            if isinstance(point_attrs.get(f"{_ATTR_PREFIX}earlywood"), bool):
+                raw["earlywood"] = point_attrs[f"{_ATTR_PREFIX}earlywood"]
+            for key, value in point_attrs.items():
+                if key.startswith(_POINT_EXTRA_PREFIX):
+                    raw[key[len(_POINT_EXTRA_PREFIX):]] = value
+            collected[file_index] = raw
+        ring_year = ring.data.attrs.get(_RING_YEAR)
+        if isinstance(ring_year, int) and not isinstance(ring_year, bool):
+            breaks = break_indices(ring.data, len(xy_px))
+            lengths_mm[ring_year] = lengths_mm.get(ring_year, 0.0) + _path_length(xy_px, breaks) / ppm
+    if unindexed:
+        result.warnings.append(f"{unindexed} ring point(s) had no position in the original file and were left out.")
 
-    lengths_mm = {year: length / ppm for year, length in _ring_lengths(xy_px, years, breaks).items()}
+    points = [collected[i] for i in sorted(collected)]
+    years = [p["year"] for p in points if "year" in p]
     tw_years = sorted(lengths_mm)
-    name = attrs.get(f"{_ATTR_PREFIX}name") or ring.meta.title or "FieldWeave measurement"
+    name = attrs.get(f"{_ATTR_PREFIX}name") or "FieldWeave measurement"
     series_year = attrs.get(f"{_ATTR_PREFIX}series_year")
-    known_years = [y for y in years if y is not None]
 
     ptwidths = {
         "tw": {
@@ -408,11 +460,11 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
 
     document: dict = {
         "SaveDate": _save_date(),
-        "year": int(series_year) if _is_number(series_year) else (min(known_years) - 1 if known_years else None),
+        "year": int(series_year) if _is_number(series_year) else (min(years) - 1 if years else None),
         "forwardDirection": _bool_attr(attrs, "forward_direction", False),
         "subAnnual": _bool_attr(attrs, "sub_annual", False),
         "earlywood": _bool_attr(attrs, "earlywood", True),
-        "index": int(attrs["dendro.index"]) if _is_number(attrs.get("dendro.index")) else 0,
+        "index": int(attrs[f"{_ATTR_PREFIX}index"]) if _is_number(attrs.get(f"{_ATTR_PREFIX}index")) else 0,
         "points": points,
         "annotations": _save_annotations(measurements, width, height, scale, result),
         "ppm": ppm,
@@ -434,7 +486,7 @@ def _save_annotations(
     for m in measurements:
         if m.kind != POINT_KIND or not m.points:
             continue
-        year = m.data.attrs.get(f"{_ATTR_PREFIX}year")
+        year = m.data.attrs.get(_YEAR)
         if not _is_number(year):
             skipped += 1
             continue

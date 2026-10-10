@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from UI.widgets.measurements import dendroelevator_io
-from UI.widgets.measurements.measurement_data import POINT_COLOR, SEGMENT_BREAK, MeasurementData
+from UI.widgets.measurements.measurement_data import SEGMENT_BREAK, MeasurementData
 from UI.widgets.measurements.measurement_formats import (
     DENDROELEVATOR,
     FIELDWEAVE,
@@ -93,31 +93,71 @@ def _as_measurements(result) -> list[Measurement]:
     return [Measurement(*entry) for entry in result.entries]
 
 
-def test_import_maps_points_into_image_fractions():
+def _rings(result):
+    return [e for e in result.entries if e[0] == "Arbitrary Line"]
+
+
+def test_import_makes_one_ordinary_line_per_ring():
     result = _import()
 
-    kind, points, meta, data = result.entries[0]
-    assert kind == "Arbitrary Line"
-    assert points[1] == pytest.approx((8900 / WIDTH, 100 / HEIGHT))
-    assert meta.point_label_template == "{dendro.year}"
-    assert meta.title == "My Sample"
+    assert [e[0] for e in result.entries] == ["Arbitrary Line"] * 3 + ["Point"]
+    assert all(kind in DEFAULT_REGISTRY for kind, *_ in result.entries)
+    assert [e[3].attrs["dendro.ring_year"] for e in _rings(result)] == [2019, 2018, 2017]
     assert result.dpi == pytest.approx(DPI)
     assert result.warnings == []
 
 
-def test_import_flags_start_points_as_segment_breaks_but_not_the_first():
-    data = _import().entries[0][3]
+def test_each_ring_runs_between_its_two_year_points_and_is_titled_with_its_year():
+    first, second, third = _rings(_import())
 
-    flagged = [i for i, attrs in enumerate(data.point_attrs) if attrs.get(SEGMENT_BREAK)]
-    assert flagged == [3, 5]
-    assert data.point_attrs[1]["dendro.year"] == 2018
-    assert data.point_attrs[4]["dendro.break"] is True
-    assert data.attrs["dendro.index"] == 92
-    assert data.attrs["dendro.forward_direction"] is False
+    flat = lambda points: [c for point in points for c in point]
+    assert flat(first[1]) == pytest.approx([9000 / WIDTH, 100 / HEIGHT, 8900 / WIDTH, 100 / HEIGHT])
+    assert flat(second[1]) == pytest.approx([8900 / WIDTH, 100 / HEIGHT, 8700 / WIDTH, 100 / HEIGHT])
+    assert [m[2].title for m in (first, second, third)] == ["2019", "2018", "2017"]
+    assert first[2].unit.value == "mm"
+
+
+def test_a_ring_crossing_a_core_break_keeps_its_runs_apart():
+    ring = _rings(_import())[2]
+
+    flagged = [i for i, attrs in enumerate(ring[3].point_attrs) if attrs.get(SEGMENT_BREAK)]
+    assert len(ring[1]) == 5
+    assert flagged == [1, 3]
+    assert ring[3].point_attrs[2]["dendro.break"] is True
+    assert ring[3].point_attrs[0]["dendro.year"] == 2017
+
+
+def test_rings_carry_the_sample_wide_data():
+    attrs = _rings(_import())[1][3].attrs
+
+    assert attrs["dendro.index"] == 92
+    assert attrs["dendro.forward_direction"] is False
+    assert attrs["dendro.name"] == "My Sample"
+
+
+def test_decade_rings_are_red_and_the_rest_blue():
+    doc = _dendro_doc()
+    doc["points"][2]["year"] = 2019
+
+    first, second, third = _rings(_import(doc))
+
+    assert first[3].attrs["dendro.ring_year"] == 2019
+    assert (first[2].line_color, first[2].tag_background_color) == ("#1c7bff", "#1c7bff")
+    assert second[3].attrs["dendro.ring_year"] == 2020
+    assert (second[2].line_color, second[2].tag_background_color) == ("#ff1c22", "#ff1c22")
+
+
+def test_measuring_the_other_way_shifts_each_rings_year_down():
+    doc = _dendro_doc()
+    doc["forwardDirection"] = True
+
+    ring_years = [e[3].attrs["dendro.ring_year"] for e in _rings(_import(doc))]
+
+    assert ring_years == [2017, 2016, 2015]
 
 
 def test_import_maps_annotations_to_points_labelled_with_their_year():
-    kind, points, meta, data = _import().entries[1]
+    kind, points, meta, data = _import().entries[3]
 
     assert kind == "Point"
     assert points[0] == pytest.approx((8800 / WIDTH, 300 / HEIGHT))
@@ -126,19 +166,6 @@ def test_import_maps_annotations_to_points_labelled_with_their_year():
     assert meta.line_color == "#00ff00"
     assert meta.tag_background_color == "#00ff00"
     assert data.attrs["dendro.year"] == 2017
-
-
-def test_import_colors_decade_rings_red_and_the_rest_blue():
-    doc = _dendro_doc()
-    doc["points"][1]["year"] = 2020
-    doc["points"][2]["year"] = 2019
-
-    data = _import(doc).entries[0][3]
-
-    assert data.point_attrs[1][POINT_COLOR] == "#ff1c22"
-    assert data.point_attrs[2][POINT_COLOR] == "#1c7bff"
-    assert POINT_COLOR not in data.point_attrs[0]
-    assert POINT_COLOR not in data.point_attrs[3]
 
 
 def test_import_needs_the_image_size():
@@ -160,12 +187,9 @@ def test_import_takes_its_scale_from_the_file_not_the_image_size():
 def test_import_snaps_a_scale_near_a_power_of_two_to_it():
     doc = _dendro_doc()
     side = 8192
-    for point in doc["points"]:
-        point["latLng"] = {"lat": point["latLng"]["lat"] * SCALE / side, "lng": point["latLng"]["lng"] * SCALE / side}
-    doc["annotations"]["0"]["latLng"] = {
-        "lat": doc["annotations"]["0"]["latLng"]["lat"] * SCALE / side,
-        "lng": doc["annotations"]["0"]["latLng"]["lng"] * SCALE / side,
-    }
+    for item in [p["latLng"] for p in doc["points"]] + [doc["annotations"]["0"]["latLng"]]:
+        item["lat"] *= SCALE / side
+        item["lng"] *= SCALE / side
     doc["ppm"] = PPM * 1.0004
 
     result = _import(doc, FormatContext((12000, HEIGHT), DPI))
@@ -174,13 +198,10 @@ def test_import_snaps_a_scale_near_a_power_of_two_to_it():
 
 
 def test_import_into_an_image_narrower_than_the_files_scale_keeps_pixel_positions():
-    # A file whose unit scale is 2**17 loaded onto a narrower, unpadded image.
     side = 131072
     doc = _dendro_doc()
     for point, (x, y, _) in zip(doc["points"], _PIXELS):
         point["latLng"] = {"lat": -y / side, "lng": x / side}
-    scaled = {"x": [2017, 2018, 2019], "y": [2.0, 2.0, 1.0], "name": "My Sample_tw"}
-    doc["ptWidths"] = {"tw": scaled}
     doc["annotations"] = {}
 
     result = _import(doc, FormatContext((119747, 5810), DPI))
@@ -205,15 +226,26 @@ def test_import_warns_when_points_fall_outside_the_image():
     assert any("outside the loaded" in w for w in result.warnings)
 
 
-def test_import_skips_points_without_coordinates_and_keeps_the_rest_aligned():
+def test_import_skips_points_without_coordinates_and_keeps_each_rings_data_aligned():
     doc = _dendro_doc()
     del doc["points"][2]["latLng"]
 
     result = _import(doc)
 
-    kind, points, meta, data = result.entries[0]
-    assert len(points) == 6 == len(data.point_attrs)
     assert any("Point 2" in w for w in result.warnings)
+    for kind, points, meta, data in _rings(result):
+        assert len(points) == len(data.point_attrs)
+
+
+def test_points_after_the_last_year_become_a_ring_without_a_year():
+    doc = _dendro_doc()
+    doc["points"].append({"skip": False, "break": False, "start": False, "latLng": _lat_lng(7300, 100)})
+
+    rings = _rings(_import(doc))
+
+    assert len(rings) == 4
+    assert "dendro.ring_year" not in rings[3][3].attrs
+    assert rings[3][2].title == ""
 
 
 def test_round_trip_reproduces_the_file():
@@ -246,27 +278,42 @@ def test_round_trip_reproduces_the_file():
 
 def test_export_recomputes_widths_after_a_point_moves():
     measurements = _as_measurements(_import())
-    line = measurements[0]
-    moved = list(line.points)
-    moved[2] = (8600 / WIDTH, 100 / HEIGHT)
-    measurements[0] = line._replace(points=tuple(moved))
+    ring = measurements[1]
+    moved = list(ring.points)
+    moved[1] = (8600 / WIDTH, 100 / HEIGHT)
+    measurements[1] = ring._replace(points=tuple(moved))
 
     out = dendroelevator_io.save(measurements, CTX).document
 
-    assert dict(zip(out["ptWidths"]["tw"]["x"], out["ptWidths"]["tw"]["y"]))[2018] == pytest.approx(3.0)
+    widths = dict(zip(out["ptWidths"]["tw"]["x"], out["ptWidths"]["tw"]["y"]))
+    assert widths[2018] == pytest.approx(3.0)
+    assert widths[2017] == pytest.approx(2.0)
 
 
-def test_export_marks_a_fieldweave_made_break_as_a_start():
-    data = MeasurementData({}, ({}, {"dendro.year": 2018}, {SEGMENT_BREAK: True}, {"dendro.year": 2017}))
-    line = Measurement("Arbitrary Line", ((0.1, 0.5), (0.2, 0.5), (0.4, 0.5), (0.5, 0.5)), DEFAULT_META, data)
+def test_export_keeps_the_points_of_the_rings_that_remain():
+    measurements = _as_measurements(_import())
+    del measurements[1]
 
-    out = dendroelevator_io.save([line], CTX).document
+    out = dendroelevator_io.save(measurements, CTX).document
+
+    assert [p.get("year") for p in out["points"]] == [None, 2018, 2017, None, None, None, 2016]
+    assert out["ptWidths"]["tw"]["x"] == [2017, 2019]
+
+
+def test_export_marks_a_break_made_in_fieldweave_as_a_start():
+    attrs = {"dendro.ring_index": 0, "dendro.ring_year": 2018}
+    point_attrs = tuple({"dendro.index": i} for i in range(4))
+    point_attrs = point_attrs[:2] + ({"dendro.index": 2, SEGMENT_BREAK: True},) + point_attrs[3:]
+    ring = Measurement(
+        "Arbitrary Line", ((0.1, 0.5), (0.2, 0.5), (0.4, 0.5), (0.5, 0.5)), DEFAULT_META, MeasurementData(attrs, point_attrs)
+    )
+
+    out = dendroelevator_io.save([ring], CTX).document
 
     assert [p["start"] for p in out["points"]] == [False, False, True, False]
-    assert out["year"] == 2016
 
 
-def test_export_without_a_year_labelled_line_writes_nothing():
+def test_export_without_ring_lines_writes_nothing():
     plain = Measurement("Arbitrary Line", ((0.1, 0.5), (0.2, 0.5)), DEFAULT_META)
 
     result = dendroelevator_io.save([plain], CTX)
@@ -284,13 +331,13 @@ def test_export_needs_a_dpi_unless_the_file_recorded_one():
     assert reused.document["ppm"] == PPM
     assert any("reused" in w for w in reused.warnings)
 
-    line = measurements[0]
-    attrs = {k: v for k, v in line.data.attrs.items() if k != "dendro.ppm"}
-    stripped = line._replace(data=MeasurementData(attrs, line.data.point_attrs))
+    stripped = [
+        m._replace(data=MeasurementData({k: v for k, v in m.data.attrs.items() if k != "dendro.ppm"}, m.data.point_attrs))
+        if m.kind == "Arbitrary Line" else m
+        for m in measurements
+    ]
 
-    missing = dendroelevator_io.save([stripped], no_dpi)
-
-    assert missing.document is None
+    assert dendroelevator_io.save(stripped, no_dpi).document is None
 
 
 def test_export_skips_points_without_a_year():
@@ -301,12 +348,6 @@ def test_export_skips_points_without_a_year():
 
     assert len(result.document["annotations"]) == 1
     assert any("without a year" in w for w in result.warnings)
-
-
-def test_export_does_not_write_the_derived_ring_colors():
-    out = dendroelevator_io.save(_as_measurements(_import()), CTX).document
-
-    assert all(POINT_COLOR not in point for point in out["points"])
 
 
 def test_fieldweave_files_start_with_a_header_naming_the_app_version():
@@ -342,9 +383,9 @@ def test_read_handles_a_byte_order_mark_and_each_format(tmp_path):
     from_dendro = read_measurement_file(dendro, DEFAULT_REGISTRY, CTX)
     from_native = read_measurement_file(native, DEFAULT_REGISTRY, CTX)
 
-    assert [e[0] for e in from_dendro.entries] == ["Arbitrary Line", "Point"]
-    assert [e[0] for e in from_native.entries] == ["Arbitrary Line", "Point"]
-    assert from_native.entries[0][3] == from_dendro.entries[0][3]
+    assert [e[0] for e in from_dendro.entries] == ["Arbitrary Line"] * 3 + ["Point"]
+    assert [e[0] for e in from_native.entries] == ["Arbitrary Line"] * 3 + ["Point"]
+    assert [e[3] for e in from_native.entries] == [e[3] for e in from_dendro.entries]
 
 
 def test_read_reports_unreadable_and_unrecognized_files(tmp_path):
@@ -401,7 +442,7 @@ def test_controller_import_replaces_current_measurements(tmp_path):
 
     result = controller.import_measurements_from_file(str(path))
 
-    assert [m.kind for m in overlay.measurements] == ["Arbitrary Line", "Point"]
+    assert [m.kind for m in overlay.measurements] == ["Arbitrary Line"] * 3 + ["Point"]
     assert result.warnings == []
 
 
