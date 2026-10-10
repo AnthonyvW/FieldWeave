@@ -43,8 +43,13 @@ class ImageAppearance:
     )
 
     _SHARPEN_SIGMA: float = 1.5
-    _EMBOSS_KERNEL = np.array([[-2, -1, 0], [-1, 1, 1], [0, 1, 2]], dtype=np.float32)
+    # Zero-sum so a flat area contributes nothing. A kernel that sums to 1
+    # also passes the local brightness through, which lifts the whole image.
+    _EMBOSS_KERNEL = np.array([[-2, -1, 0], [-1, 0, 1], [0, 1, 2]], dtype=np.float32)
+    _EMBOSS_GAIN: float = 2.0
     _EDGE_GAIN: float = 3.0
+    # Mean |gradient| at which auto treats an image as fully detailed.
+    _AUTO_DETAIL_FULL: float = 80.0
 
     def __init__(self) -> None:
         self.brightness = 0
@@ -94,8 +99,9 @@ class ImageAppearance:
 
         if self.emboss:
             gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)
-            relief = cv2.filter2D(gray, -1, self._EMBOSS_KERNEL, delta=128)
-            out = self._blend(out, cv2.cvtColor(relief, cv2.COLOR_GRAY2RGB), self.emboss)
+            relief = cv2.filter2D(gray, cv2.CV_16S, self._EMBOSS_KERNEL)
+            relief = (relief * np.float32(self.emboss / 100.0 * self._EMBOSS_GAIN)).astype(np.int16)
+            out = np.clip(out.astype(np.int16) + relief[..., None], 0, 255).astype(np.uint8)
 
         if self.edge_detect:
             gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)
@@ -110,14 +116,16 @@ class ImageAppearance:
         return np.ascontiguousarray(out)
 
     @staticmethod
-    def auto_levels(arr: np.ndarray) -> tuple[int, int]:
+    def auto_adjust(arr: np.ndarray) -> dict[str, int]:
         """
-        Brightness and contrast slider values that stretch the 1st-99th
-        luma percentiles of *arr* to the full range.
+        Slider values suited to *arr*: brightness and contrast that stretch
+        its 1st-99th luma percentiles to the full range, then sharpness,
+        emboss and edge detect scaled up the less detail the stretched
+        image has.
 
-        Inverts the mapping in ``_tone_table``, so applying the returned
-        values reproduces the stretch. Percentiles rather than min/max keep
-        a few hot or dead pixels from defeating it.
+        Brightness and contrast invert the mapping in ``_tone_table``, so
+        applying them reproduces the stretch. Percentiles rather than
+        min/max keep a few hot or dead pixels from defeating it.
         """
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
         low, high = np.percentile(gray[::2, ::2], (1, 99))
@@ -125,10 +133,25 @@ class ImageAppearance:
         gain = 255.0 / spread
         offset = (128.0 - (low + high) / 2.0) * gain
         contrast = (gain - 1.0) * 50.0 if gain > 1.0 else (gain - 1.0) * 100.0
-        return (
-            int(round(max(-100.0, min(100.0, offset / 2.55)))),
-            int(round(max(-100.0, min(100.0, contrast)))),
-        )
+        brightness = int(round(max(-100.0, min(100.0, offset / 2.55))))
+        contrast = int(round(max(-100.0, min(100.0, contrast))))
+
+        leveled = ImageAppearance()
+        leveled.set_value("brightness", brightness)
+        leveled.set_value("contrast", contrast)
+        stretched = cv2.cvtColor(leveled.apply(arr), cv2.COLOR_RGB2GRAY)
+        grad_x = cv2.Sobel(stretched, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(stretched, cv2.CV_32F, 0, 1, ksize=3)
+        detail = min(1.0, float(np.mean(np.abs(grad_x) + np.abs(grad_y))) / ImageAppearance._AUTO_DETAIL_FULL)
+        flatness = 1.0 - detail
+
+        return {
+            "brightness": brightness,
+            "contrast": contrast,
+            "sharpness": int(round(10 + 50 * flatness)),
+            "emboss": int(round(30 * flatness)),
+            "edge_detect": int(round(20 * flatness)),
+        }
 
     def apply_pixmap(self, pixmap: QPixmap) -> QPixmap:
         image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
@@ -243,7 +266,7 @@ class AppearanceButton(QPushButton):
         buttons.setSpacing(6)
         auto = QPushButton("Auto", menu)
         auto.setObjectName("AppearanceAutoButton")
-        auto.setToolTip("Set brightness and contrast to stretch the current image to the full range.")
+        auto.setToolTip("Pick brightness, contrast, sharpness, emboss and edge detect for the current image.")
         auto.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         auto.clicked.connect(self.auto_requested)
         reset = QPushButton("Reset", menu)

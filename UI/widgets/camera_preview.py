@@ -1132,8 +1132,7 @@ class CameraPreview(QFrame):
             arr = None if source is None else source.preview
         if arr is None:
             return
-        brightness, contrast = self._appearance.auto_levels(np.ascontiguousarray(arr))
-        self._appearance_button.set_slider_values(brightness=brightness, contrast=contrast)
+        self._appearance_button.set_slider_values(**self._appearance.auto_adjust(np.ascontiguousarray(arr)))
 
     def _refresh_appearance(self) -> None:
         if not self._loaded_image_overlay.enabled and not self._preview_hidden:
