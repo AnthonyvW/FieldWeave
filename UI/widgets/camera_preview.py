@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from common.app_context import get_app_context
 from common.logger import info, error, warning
+from UI.widgets.preview_overlay.appearance import AppearanceButton, ImageAppearance
 from UI.widgets.preview_overlay.channel import ChannelButton, ChannelOverlay
 from UI.widgets.preview_overlay.machine_vision import MachineVisionButton
 from UI.widgets.preview_overlay.click_to_move import ClickToMoveOverlay
@@ -703,6 +704,7 @@ class CameraPreview(QFrame):
         self._current_full_width: int = 0
         self._current_full_height: int = 0
         self._last_full_image: QImage | None = None
+        self._last_scaled_arr: np.ndarray | None = None
 
         self._preview_hidden: bool = False
         self._scroll_zooms_mode: bool = False
@@ -737,11 +739,14 @@ class CameraPreview(QFrame):
         self._red_mark_overlay = RedMarkDetectionOverlay()
         self._background_overlay = BackgroundDetectionOverlay()
         self._channel_overlay = ChannelOverlay()
+        self._appearance = ImageAppearance()
         self._click_to_move_overlay = ClickToMoveOverlay()
         self._focus_stack_preview_overlay = FocusStackPreviewOverlay()
         self._zoom_preview_overlay = ZoomPreviewOverlay()
         self._loaded_image_overlay = LoadedImageOverlay()
         self._zoom_preview_overlay.set_loaded_image_overlay(self._loaded_image_overlay)
+        self._zoom_preview_overlay.set_appearance(self._appearance)
+        self._loaded_image_overlay.set_appearance(self._appearance)
         self._measurement_overlay = MeasurementOverlay()
         self._measurement_overlay.set_zoom_handler(self._zoom_preview_overlay)
         self._measurement_overlay.set_loaded_image_overlay(self._loaded_image_overlay)
@@ -785,23 +790,30 @@ class CameraPreview(QFrame):
         self._channel_button.menu.raise_()
         self._channel_button.channel_changed.connect(self._on_channel_changed)
 
+        self._appearance_button = AppearanceButton(self)
+        self._appearance_button.move(10, 150)
+        self._appearance_button.raise_()
+        self._appearance_button.menu.raise_()
+        self._appearance_button.appearance_changed.connect(self._on_appearance_changed)
+        self._appearance_button.reset_requested.connect(self._on_appearance_reset)
+
         self._hide_preview_button = EyeToggleButton(self)
-        self._hide_preview_button.move(10, 150)
+        self._hide_preview_button.move(10, 185)
         self._hide_preview_button.raise_()
         self._hide_preview_button.clicked.connect(self._toggle_preview_visibility)
 
         self._zoom_in_button = ZoomStepButton(1, self)
-        self._zoom_in_button.move(10, 185)
+        self._zoom_in_button.move(10, 220)
         self._zoom_in_button.raise_()
         self._zoom_in_button.zoom_step.connect(self._on_zoom_step)
 
         self._zoom_out_button = ZoomStepButton(-1, self)
-        self._zoom_out_button.move(10, 220)
+        self._zoom_out_button.move(10, 255)
         self._zoom_out_button.raise_()
         self._zoom_out_button.zoom_step.connect(self._on_zoom_step)
 
         self._zoom_reset_button = ZoomResetButton(self)
-        self._zoom_reset_button.move(10, 255)
+        self._zoom_reset_button.move(10, 290)
         self._zoom_reset_button.raise_()
         self._zoom_reset_button.reset_zoom.connect(self._on_zoom_reset)
 
@@ -1101,6 +1113,21 @@ class CameraPreview(QFrame):
         self._refresh_loaded_image_analysis()
         self._video_label.update()
 
+    @Slot(str, int)
+    def _on_appearance_changed(self, name: str, value: int) -> None:
+        self._appearance.set_value(name, value)
+        self._refresh_appearance()
+
+    @Slot()
+    def _on_appearance_reset(self) -> None:
+        self._appearance.reset()
+        self._refresh_appearance()
+
+    def _refresh_appearance(self) -> None:
+        if not self._loaded_image_overlay.enabled and not self._preview_hidden:
+            self._present_scaled()
+        self._video_label.update()
+
     def _on_zoom_step(self, direction: int) -> None:
         self._zoom_preview_overlay.zoom(direction, self._video_label.rect())
         self._video_label.update()
@@ -1290,7 +1317,22 @@ class CameraPreview(QFrame):
             )
             del scaled_ptr
             self._video_label.notify_scaled(scaled_arr)
-            self._video_label.setPixmap(QPixmap.fromImage(scaled))
+            self._last_scaled_arr = scaled_arr
+            self._present_scaled()
+
+    def _present_scaled(self) -> None:
+        """
+        Show the last display-resolution frame, with image appearance
+        applied. Overlays already received the unadjusted array via
+        ``notify_scaled``, so adjustments only ever change what is drawn.
+        """
+        arr = self._last_scaled_arr
+        if arr is None:
+            return
+        if self._appearance.active:
+            arr = self._appearance.apply(arr)
+        h, w = arr.shape[:2]
+        self._video_label.setPixmap(QPixmap.fromImage(QImage(arr.data, w, h, w * 3, QImage.Format.Format_RGB888)))
 
     # ------------------------------------------------------------------
     # Camera manager state slots

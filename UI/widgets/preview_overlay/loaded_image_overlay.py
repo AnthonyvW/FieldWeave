@@ -4,6 +4,7 @@ import numpy as np
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 
+from UI.widgets.preview_overlay.appearance import ImageAppearance
 from UI.widgets.preview_overlay.large_image_source import LargeImageSource
 from UI.widgets.preview_overlay.overlay_base import Overlay
 
@@ -40,6 +41,11 @@ class LoadedImageOverlay(Overlay):
         # full SmoothTransformation scale doesn't run on every paint.
         self._scaled_cache: QPixmap | None = None
         self._scaled_cache_size: tuple[int, int] | None = None
+        self._scaled_cache_appearance: int = 0
+        self._appearance: ImageAppearance | None = None
+
+    def set_appearance(self, appearance: ImageAppearance | None) -> None:
+        self._appearance = appearance
 
     def set_source(self, source: LargeImageSource | None) -> None:
         if self._source is not None:
@@ -69,14 +75,23 @@ class LoadedImageOverlay(Overlay):
             return
 
         size = (rect.width(), rect.height())
-        if self._scaled_cache is None or self._scaled_cache_size != size:
-            self._scaled_cache = self._preview_pixmap().scaled(
+        appearance_version = self._appearance.version if self._appearance is not None else 0
+        if (
+            self._scaled_cache is None
+            or self._scaled_cache_size != size
+            or self._scaled_cache_appearance != appearance_version
+        ):
+            scaled_pixmap = self._preview_pixmap().scaled(
                 rect.width(),
                 rect.height(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
+            if self._appearance is not None and self._appearance.active:
+                scaled_pixmap = self._appearance.apply_pixmap(scaled_pixmap)
+            self._scaled_cache = scaled_pixmap
             self._scaled_cache_size = size
+            self._scaled_cache_appearance = appearance_version
 
         scaled = self._scaled_cache
         x = rect.x() + (rect.width() - scaled.width()) // 2

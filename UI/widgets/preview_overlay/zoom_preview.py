@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from UI.style import ZOOM_PREVIEW_VIEWPORT_COLOR
+from UI.widgets.preview_overlay.appearance import ImageAppearance
 from UI.widgets.preview_overlay.large_image_source import FrameSource
 from UI.widgets.preview_overlay.loaded_image_overlay import LoadedImageOverlay
 from UI.widgets.preview_overlay.overlay_base import Overlay
@@ -121,6 +122,7 @@ class ZoomPreviewOverlay(Overlay):
         super().__init__()
         self._live_frame: np.ndarray | None = None
         self._loaded_image_overlay: LoadedImageOverlay | None = None
+        self._appearance: ImageAppearance | None = None
         self._live_state = _PanZoomState(self._MIN_ZOOM)
         self._loaded_state = _PanZoomState(self._MIN_ZOOM)
         self._crop: tuple[int, int, int, int] | None = None
@@ -132,6 +134,7 @@ class ZoomPreviewOverlay(Overlay):
         self._draw_cache_crop: tuple[int, int, int, int] | None = None
         self._draw_cache_size: tuple[int, int] | None = None
         self._draw_cache_version: int | None = None
+        self._draw_cache_appearance: int | None = None
         self._draw_cache_pixmap: QPixmap | None = None
 
     @property
@@ -163,6 +166,9 @@ class ZoomPreviewOverlay(Overlay):
 
     def update_full(self, frame: np.ndarray) -> None:
         self._live_frame = frame
+
+    def set_appearance(self, appearance: ImageAppearance | None) -> None:
+        self._appearance = appearance
 
     def set_loaded_image_overlay(self, overlay: LoadedImageOverlay | None) -> None:
         """
@@ -579,10 +585,12 @@ class ZoomPreviewOverlay(Overlay):
 
         size = (rect.width(), rect.height())
         version = self._frame.version()
+        appearance_version = self._appearance.version if self._appearance is not None else 0
         if (
             self._crop != self._draw_cache_crop
             or size != self._draw_cache_size
             or version != self._draw_cache_version
+            or appearance_version != self._draw_cache_appearance
         ):
             self._rebuild_draw_cache(rect, version)
 
@@ -624,6 +632,8 @@ class ZoomPreviewOverlay(Overlay):
         step = min(step_x, step_y)
 
         crop_arr = np.ascontiguousarray(self._frame.region((x0, y0, x0 + crop_w, y0 + crop_h), step))
+        if self._appearance is not None and self._appearance.active:
+            crop_arr = self._appearance.apply(crop_arr)
         h, w = crop_arr.shape[:2]
 
         # QPixmap.fromImage copies the pixel data into its own storage
@@ -640,6 +650,7 @@ class ZoomPreviewOverlay(Overlay):
         self._draw_cache_crop = self._crop
         self._draw_cache_size = (rect.width(), rect.height())
         self._draw_cache_version = version
+        self._draw_cache_appearance = self._appearance.version if self._appearance is not None else 0
 
     def draw_foreground(self, painter: QPainter, rect: QRect) -> None:
         """
