@@ -21,6 +21,14 @@ from UI.widgets.measurements.units import MeasurementUnit
 # file's ppm (pixels per mm) is in those same pixels, so it only converts
 # straight to a DPI when the loaded image has the resolution the file was
 # made on.
+#
+# Those map pixels are not quite image pixels. The viewer's WebGL layer lays
+# its tiles out every 256 px, but each DeepZoom tile (254 px plus a 1 px
+# overlap each side) adds only 254 new image pixels, so the map runs 256/254
+# larger than the image at every zoom level. The ring measuring plugin takes
+# both the points and ppm from that map, so both are scaled by this ratio
+# (UMN-LATIS/elevator: Leaflet.TileLayer.GL.js, imageHandler_dendro.php).
+_TILE_RATIO = 254 / 256
 _MM_PER_INCH = 25.4
 _POWER_OF_TWO_SNAP = 0.01
 _BOUNDS_TOLERANCE = 0.001
@@ -236,7 +244,7 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
     ppm = doc.get("ppm")
     has_dpi = _is_number(ppm) and ppm > 0
     if has_dpi:
-        result.dpi = ppm * _MM_PER_INCH
+        result.dpi = ppm * _MM_PER_INCH * _TILE_RATIO
     else:
         result.warnings.append("Missing or invalid ppm: the image scale was not imported.")
 
@@ -265,8 +273,10 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
             f"The file has no ring widths to recover its scale from, so {scale:,.0f} px was assumed."
         )
 
+    pixels_per_unit = scale * _TILE_RATIO
+
     def to_fraction(lat: float, lng: float) -> Point2D:
-        return lng * scale / width, -lat * scale / height
+        return lng * pixels_per_unit / width, -lat * pixels_per_unit / height
 
     sample_attrs = _sample_attrs(doc, scale, ppm, has_dpi)
     for ring_index, (first, last, ring_year) in enumerate(chains):
@@ -393,7 +403,7 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
     ppm = ctx.dpi / _MM_PER_INCH if ctx.dpi else None
     recorded_ppm = attrs.get(f"{_ATTR_PREFIX}ppm")
     if ppm is None and _is_number(recorded_ppm) and recorded_ppm > 0:
-        ppm = float(recorded_ppm)
+        ppm = float(recorded_ppm) * _TILE_RATIO
         result.warnings.append("The image has no DPI set, so the ppm recorded in the original file was reused.")
     if ppm is None:
         result.warnings.append("Set the image's DPI first: Dendroelevator files record the scale as ppm.")
@@ -404,6 +414,7 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
     scale = float(recorded_scale) if _is_number(recorded_scale) and recorded_scale > 0 else float(
         _next_power_of_two(max(width, height))
     )
+    pixels_per_unit = scale * _TILE_RATIO
 
     # Neighbouring rings share the year point between them, so each file point
     # is collected once, from the first ring that holds it.
@@ -424,7 +435,7 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
                 "skip": point_attrs.get(f"{_ATTR_PREFIX}skip") is True,
                 "break": point_attrs.get(f"{_ATTR_PREFIX}break") is True,
                 "start": point_attrs.get(f"{_ATTR_PREFIX}start") is True or point_attrs.get(SEGMENT_BREAK) is True,
-                "latLng": {"lat": -y_px / scale, "lng": x_px / scale},
+                "latLng": {"lat": -y_px / pixels_per_unit, "lng": x_px / pixels_per_unit},
             }
             year = point_attrs.get(_YEAR)
             if isinstance(year, int) and not isinstance(year, bool):
@@ -466,8 +477,8 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
         "earlywood": _bool_attr(attrs, "earlywood", True),
         "index": int(attrs[f"{_ATTR_PREFIX}index"]) if _is_number(attrs.get(f"{_ATTR_PREFIX}index")) else 0,
         "points": points,
-        "annotations": _save_annotations(measurements, width, height, scale, result),
-        "ppm": ppm,
+        "annotations": _save_annotations(measurements, width, height, pixels_per_unit, result),
+        "ppm": ppm / _TILE_RATIO,
         "ptWidths": ptwidths,
         "ellipses": [],
         "currentView": dict(_DEFAULT_VIEW),

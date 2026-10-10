@@ -29,6 +29,7 @@ WIDTH, HEIGHT = 10000, 400
 SCALE = max(WIDTH, HEIGHT)
 PPM = 100.0
 DPI = PPM * 25.4
+RATIO = 254 / 256
 CTX = FormatContext((WIDTH, HEIGHT), DPI)
 
 # (x px, y px, extra fields) — laid out so every expected width is a round
@@ -46,8 +47,8 @@ _PIXELS = [
 ]
 
 
-def _lat_lng(x: float, y: float) -> dict:
-    return {"lat": -y / SCALE, "lng": x / SCALE}
+def _lat_lng(x: float, y: float, side: float = SCALE) -> dict:
+    return {"lat": -y / (side * RATIO), "lng": x / (side * RATIO)}
 
 
 def _dendro_doc() -> dict:
@@ -76,7 +77,7 @@ def _dendro_doc() -> dict:
                 "yearAdjustment": 0,
             }
         },
-        "ppm": PPM,
+        "ppm": PPM / RATIO,
         "ptWidths": {"tw": {"x": [2017, 2018, 2019], "y": [2.0, 2.0, 1.0], "name": "My Sample_tw"}},
         "ellipses": [],
         "currentView": {"brightness": "120", "invert": True},
@@ -175,6 +176,14 @@ def test_import_needs_the_image_size():
     assert result.warnings
 
 
+def test_map_pixels_run_a_tile_ratio_larger_than_image_pixels():
+    result = _import()
+
+    assert result.dpi == pytest.approx(DPI)
+    first_ring_end = result.entries[0][1][1]
+    assert first_ring_end[0] * WIDTH == pytest.approx(8900)
+
+
 def test_import_takes_its_scale_from_the_file_not_the_image_size():
     result = _import(ctx=FormatContext((12000, HEIGHT), DPI))
 
@@ -190,7 +199,7 @@ def test_import_snaps_a_scale_near_a_power_of_two_to_it():
     for item in [p["latLng"] for p in doc["points"]] + [doc["annotations"]["0"]["latLng"]]:
         item["lat"] *= SCALE / side
         item["lng"] *= SCALE / side
-    doc["ppm"] = PPM * 1.0004
+    doc["ppm"] = PPM / RATIO * 1.0004
 
     result = _import(doc, FormatContext((12000, HEIGHT), DPI))
 
@@ -201,7 +210,7 @@ def test_import_into_an_image_narrower_than_the_files_scale_keeps_pixel_position
     side = 131072
     doc = _dendro_doc()
     for point, (x, y, _) in zip(doc["points"], _PIXELS):
-        point["latLng"] = {"lat": -y / side, "lng": x / side}
+        point["latLng"] = _lat_lng(x, y, side)
     doc["annotations"] = {}
 
     result = _import(doc, FormatContext((119747, 5810), DPI))
@@ -256,7 +265,7 @@ def test_round_trip_reproduces_the_file():
 
     assert exported.warnings == []
     out = exported.document
-    assert out["ppm"] == pytest.approx(PPM)
+    assert out["ppm"] == pytest.approx(PPM / RATIO)
     assert out["ptWidths"]["tw"]["x"] == [2017, 2018, 2019]
     assert out["ptWidths"]["tw"]["y"] == pytest.approx([2.0, 2.0, 1.0])
     assert out["ptWidths"]["tw"]["name"] == "My Sample_tw"
@@ -328,7 +337,7 @@ def test_export_needs_a_dpi_unless_the_file_recorded_one():
 
     reused = dendroelevator_io.save(measurements, no_dpi)
 
-    assert reused.document["ppm"] == PPM
+    assert reused.document["ppm"] == pytest.approx(PPM / RATIO)
     assert any("reused" in w for w in reused.warnings)
 
     stripped = [
@@ -477,7 +486,7 @@ SAMPLE = os.environ.get("FIELDWEAVE_DENDRO_SAMPLE")
 @pytest.mark.skipif(not SAMPLE, reason="set FIELDWEAVE_DENDRO_SAMPLE to a real Dendroelevator export to run this")
 def test_real_dendroelevator_file_round_trips():
     original = json.loads(Path(SAMPLE).read_text(encoding="utf-8-sig"))
-    ctx = FormatContext((119747, 5810), original["ppm"] * 25.4)
+    ctx = FormatContext((119747, 5810), original["ppm"] * 25.4 * (254 / 256))
 
     result = dendroelevator_io.load(copy.deepcopy(original), ctx, DEFAULT_REGISTRY)
     assert result.warnings == []
