@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import NamedTuple
 
 AttrValue = str | int | float | bool | None
@@ -118,3 +119,34 @@ def data_from_dict(raw: object, point_count: int, where: str, warnings: list[str
                 _clean_attrs(entry, f"{where} point {i}", warnings) for i, entry in enumerate(raw_point_attrs)
             )
     return MeasurementData(attrs, point_attrs)
+
+
+_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+
+
+def _attr_text(value: AttrValue) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def render_point_label(template: str, index: int, data: MeasurementData) -> str:
+    """
+    *template* with each ``{key}`` replaced by that point's attribute of the
+    same name, and ``{index}`` by its 1-based position. A missing attribute
+    renders as nothing, so a point lacking the data simply gets no text
+    (the caller skips a label that comes out blank). Not ``str.format``:
+    attribute keys contain dots (``dendro.year``), which format would read
+    as attribute access.
+    """
+    attrs = data.point_attrs[index] if index < len(data.point_attrs) else {}
+
+    def substitute(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        return str(index + 1) if key == "index" else _attr_text(attrs.get(key))
+
+    return _PLACEHOLDER.sub(substitute, template).strip()

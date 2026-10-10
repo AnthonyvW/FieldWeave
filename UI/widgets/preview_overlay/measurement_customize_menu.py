@@ -958,6 +958,14 @@ class MeasurementCustomizeMenu(QFrame):
         self._count_hide_numbers_check.toggled.connect(self._on_live_field_changed)
         layout.addWidget(self._count_hide_numbers_check)
 
+        self._point_label_edit = QLineEdit()
+        self._point_label_edit.setPlaceholderText("Point labels, e.g. {dendro.year}")
+        self._point_label_edit.setToolTip(
+            "Text drawn beside each point. {key} is replaced by that point's own data, {index} by its position."
+        )
+        self._point_label_edit.textChanged.connect(self._on_live_field_changed)
+        layout.addWidget(self._point_label_edit)
+
         # Caps are a line-only decoration (MeasurementOverlay never
         # passes start_cap/end_cap when drawing a circle) — open_for
         # hides this pair for any kind whose category isn't "line".
@@ -1185,6 +1193,8 @@ class MeasurementCustomizeMenu(QFrame):
         self._point_style_picker.setVisible(is_point)
         self._count_hide_numbers_check.setChecked(meta.count_hide_numbers)
         self._count_hide_numbers_check.setVisible(is_count)
+        self._point_label_edit.setText(meta.point_label_template)
+        self._point_label_edit.setVisible(entry is not None and entry.category in ("line", "point", "count"))
         self._start_cap_picker.set_value(meta.line_start_cap)
         self._start_cap_picker.setVisible(show_caps)
         self._end_cap_picker.set_value(meta.line_end_cap)
@@ -1325,6 +1335,7 @@ class MeasurementCustomizeMenu(QFrame):
             midpoint_style=self._midpoint_picker.value(),
             point_style=self._point_style_picker.value(),
             count_hide_numbers=self._count_hide_numbers_check.isChecked(),
+            point_label_template=self._point_label_edit.text(),
             show_area=self._area_check.isChecked(),
             area_unit=self._area_unit_combo.currentData(),
             fill_color=self._fill_color_picker.effective_color() if self._fill_enabled_check.isChecked() else "",

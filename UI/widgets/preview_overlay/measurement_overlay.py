@@ -33,6 +33,7 @@ from UI.widgets.measurements.measurement_data import (
     MeasurementData,
     break_indices,
     drop_point,
+    render_point_label,
     segment_runs,
 )
 from UI.widgets.measurements.measurement_kind import DEFAULT_REGISTRY
@@ -1997,6 +1998,8 @@ class MeasurementOverlay(Overlay):
             # on the image — no tag box at all, see _draw_count_numbers.
             self._draw_count_numbers(painter, rect, measurement, scale_x, scale_y)
             return
+        if meta.point_label_template:
+            self._draw_point_labels(painter, rect, measurement, scale_x, scale_y)
         # "Hide measurement" hides the tag only (feature 11 clarified);
         # the geometry is drawn regardless, by the caller.
         if meta.hidden:
@@ -2457,7 +2460,8 @@ class MeasurementOverlay(Overlay):
         next to it, in the same undistorted local frame _draw_label uses
         so the glyphs stay unsquished under a non-uniform zoom — real
         text, not a tag box (feature: numbered points without tags).
-        Skipped entirely when meta.count_hide_numbers is set. No hit-test
+        Skipped entirely when meta.count_hide_numbers is set, and replaced
+        by the point label template's text when one is set. No hit-test
         box is recorded — a click still opens the customize menu via the
         ordinary endpoint click (see MeasurementEndpointDragTool), since
         each point is a plain draggable measurement point.
@@ -2465,6 +2469,36 @@ class MeasurementOverlay(Overlay):
         meta = measurement.meta
         if meta.count_hide_numbers:
             return
+        if meta.point_label_template:
+            self._draw_point_labels(painter, rect, measurement, scale_x, scale_y)
+            return
+        self._draw_point_texts(
+            painter, rect, measurement, scale_x, scale_y, [str(i + 1) for i in range(len(measurement.points))]
+        )
+
+    def _draw_point_labels(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        measurement: Measurement,
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        """The point label template rendered for each point — a point whose text comes out blank gets none."""
+        template = measurement.meta.point_label_template
+        texts = [render_point_label(template, i, measurement.data) for i in range(len(measurement.points))]
+        self._draw_point_texts(painter, rect, measurement, scale_x, scale_y, texts)
+
+    def _draw_point_texts(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        measurement: Measurement,
+        scale_x: float,
+        scale_y: float,
+        texts: list[str],
+    ) -> None:
+        meta = measurement.meta
         base_size = meta.font_size if meta.font_size > 0 else OVERLAY_LABEL_FONT_SIZE
         font = QFont(painter.font())
         if meta.font_family:
@@ -2473,7 +2507,9 @@ class MeasurementOverlay(Overlay):
         font.setBold(True)
         text_color = self._resolve_color(meta.tag_text_color, OVERLAY_LINE_COLOR)
         offset = OVERLAY_POINT_RADIUS + 4.0
-        for i, point in enumerate(measurement.points):
+        for point, text in zip(measurement.points, texts):
+            if not text:
+                continue
             anchor = self._to_point(rect, point)
             painter.save()
             painter.translate(anchor)
@@ -2481,7 +2517,7 @@ class MeasurementOverlay(Overlay):
                 painter.scale(1.0 / scale_x, 1.0 / scale_y)
             painter.setFont(font)
             painter.setPen(QPen(text_color))
-            painter.drawText(QRectF(offset, -offset - 14.0, 40.0, 16.0), Qt.AlignmentFlag.AlignLeft, str(i + 1))
+            painter.drawText(QRectF(offset, -offset - 14.0, 40.0, 16.0), Qt.AlignmentFlag.AlignLeft, text)
             painter.restore()
 
     def _draw_label(

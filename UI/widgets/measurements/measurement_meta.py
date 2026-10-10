@@ -128,6 +128,11 @@ class MeasurementMeta(NamedTuple):
     # A specific point is instead removed via hover+Delete — see
     # MeasurementOverlay.delete_hovered_count_point.
     count_hide_numbers: bool = False
+    # Text drawn beside each point, with ``{key}`` filled from that point's
+    # own MeasurementData attributes and ``{index}`` its 1-based position
+    # (see measurement_data.render_point_label). Empty draws nothing, except
+    # a "count" group, which then falls back to its plain numbers.
+    point_label_template: str = ""
 
 
 DEFAULT_META = MeasurementMeta()
