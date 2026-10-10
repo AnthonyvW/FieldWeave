@@ -148,10 +148,61 @@ def test_import_needs_the_image_size():
     assert result.warnings
 
 
-def test_import_warns_when_the_image_does_not_match_the_ring_widths():
-    result = _import(ctx=FormatContext((20000, HEIGHT), DPI))
+def test_import_takes_its_scale_from_the_file_not_the_image_size():
+    result = _import(ctx=FormatContext((12000, HEIGHT), DPI))
 
-    assert any("may not be the image" in w for w in result.warnings)
+    kind, points, meta, data = result.entries[0]
+    assert data.attrs["dendro.scale"] == pytest.approx(SCALE)
+    assert points[1] == pytest.approx((8900 / 12000, 100 / HEIGHT))
+    assert result.warnings == []
+
+
+def test_import_snaps_a_scale_near_a_power_of_two_to_it():
+    doc = _dendro_doc()
+    side = 8192
+    for point in doc["points"]:
+        point["latLng"] = {"lat": point["latLng"]["lat"] * SCALE / side, "lng": point["latLng"]["lng"] * SCALE / side}
+    doc["annotations"]["0"]["latLng"] = {
+        "lat": doc["annotations"]["0"]["latLng"]["lat"] * SCALE / side,
+        "lng": doc["annotations"]["0"]["latLng"]["lng"] * SCALE / side,
+    }
+    doc["ppm"] = PPM * 1.0004
+
+    result = _import(doc, FormatContext((12000, HEIGHT), DPI))
+
+    assert result.entries[0][3].attrs["dendro.scale"] == 8192
+
+
+def test_import_into_an_image_narrower_than_the_files_scale_keeps_pixel_positions():
+    # A file whose unit scale is 2**17 loaded onto a narrower, unpadded image.
+    side = 131072
+    doc = _dendro_doc()
+    for point, (x, y, _) in zip(doc["points"], _PIXELS):
+        point["latLng"] = {"lat": -y / side, "lng": x / side}
+    scaled = {"x": [2017, 2018, 2019], "y": [2.0, 2.0, 1.0], "name": "My Sample_tw"}
+    doc["ptWidths"] = {"tw": scaled}
+    doc["annotations"] = {}
+
+    result = _import(doc, FormatContext((119747, 5810), DPI))
+
+    assert result.entries[0][3].attrs["dendro.scale"] == side
+    assert result.entries[0][1][1] == pytest.approx((8900 / 119747, 100 / 5810))
+
+
+def test_import_without_ring_widths_assumes_the_next_power_of_two():
+    doc = _dendro_doc()
+    del doc["ptWidths"]
+
+    result = _import(doc, FormatContext((12000, HEIGHT), DPI))
+
+    assert result.entries[0][3].attrs["dendro.scale"] == 16384
+    assert any("assumed" in w for w in result.warnings)
+
+
+def test_import_warns_when_points_fall_outside_the_image():
+    result = _import(ctx=FormatContext((5000, HEIGHT), DPI))
+
+    assert any("outside the loaded" in w for w in result.warnings)
 
 
 def test_import_skips_points_without_coordinates_and_keeps_the_rest_aligned():
@@ -385,11 +436,11 @@ SAMPLE = os.environ.get("FIELDWEAVE_DENDRO_SAMPLE")
 @pytest.mark.skipif(not SAMPLE, reason="set FIELDWEAVE_DENDRO_SAMPLE to a real Dendroelevator export to run this")
 def test_real_dendroelevator_file_round_trips():
     original = json.loads(Path(SAMPLE).read_text(encoding="utf-8-sig"))
-    side = 131072
-    ctx = FormatContext((side, 4096), original["ppm"] * 25.4)
+    ctx = FormatContext((119747, 5810), original["ppm"] * 25.4)
 
     result = dendroelevator_io.load(copy.deepcopy(original), ctx, DEFAULT_REGISTRY)
     assert result.warnings == []
+    assert result.entries[0][3].attrs["dendro.scale"] == 131072
     out = dendroelevator_io.save(_as_measurements(result), ctx).document
 
     assert len(out["points"]) == len(original["points"])

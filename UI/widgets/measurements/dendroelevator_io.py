@@ -12,13 +12,18 @@ from UI.widgets.measurements.measurement_kind import MeasurementKindRegistry, Po
 from UI.widgets.measurements.measurement_meta import DEFAULT_META
 from UI.widgets.measurements.units import MeasurementUnit
 
-# Dendroelevator describes points in a Leaflet "simple" map where the
-# image's longest side is 1.0 and y runs upward, so a pixel (x, y) sits at
-# lng = x / longest, lat = -y / longest. Its ppm (pixels per mm) is measured
-# in that same longest-side space, which is why it only converts straight
-# to a DPI when the image is the same resolution the file was made on.
+# Dendroelevator describes points in a Leaflet "simple" map with y running
+# upward, so a pixel (x, y) from the image's top-left corner sits at
+# lng = x / S, lat = -y / S for the file's own unit scale S. S is not the
+# loaded image's size: in the one file studied it is exactly 2**17 while the
+# image is narrower, so S is recovered from the file itself (see _fit_scale)
+# and the image only supplies the fractions the points are placed at. The
+# file's ppm (pixels per mm) is in those same pixels, so it only converts
+# straight to a DPI when the loaded image has the resolution the file was
+# made on.
 _MM_PER_INCH = 25.4
-_SCALE_TOLERANCE = 0.01
+_POWER_OF_TWO_SNAP = 0.01
+_BOUNDS_TOLERANCE = 0.001
 _WIDTH_DECIMALS = 5
 
 LINE_KIND = "Arbitrary Line"
@@ -118,10 +123,25 @@ def _point_attrs(raw: dict, index: int) -> dict:
     return attrs
 
 
-def _fitted_scale_warning(
-    doc: dict, xy_units: list[tuple[float, float]], years: list[int | None], breaks: frozenset[int], scale: int
-) -> str | None:
-    """Compare the longest-side length implied by the file's own ring widths against the loaded image's, since a mismatch means the wrong image (or a different resolution)."""
+def _next_power_of_two(value: int) -> int:
+    return 1 << max(0, math.ceil(math.log2(max(1, value))))
+
+
+def _snap_to_power_of_two(value: float) -> float:
+    nearest = 2.0 ** round(math.log2(value))
+    return nearest if abs(value - nearest) / nearest <= _POWER_OF_TWO_SNAP else value
+
+
+def _fit_scale(
+    doc: dict, xy_units: list[tuple[float, float]], years: list[int | None], breaks: frozenset[int]
+) -> float | None:
+    """
+    The file's unit scale in pixels, recovered from its own numbers: each
+    ring's width in mm times ppm is its length in pixels, and the same
+    length measured in the file's lat/lng units gives pixels per unit.
+    Snapped to a power of two when within 1% of one, since the file's rounding
+    would otherwise leave it a few parts per million off.
+    """
     widths = _tw_series(doc)
     ppm = doc.get("ppm")
     if widths is None or not _is_number(ppm) or ppm <= 0:
@@ -131,15 +151,7 @@ def _fitted_scale_warning(
         for year, length in _ring_lengths(xy_units, years, breaks).items()
         if year in widths and length > 0
     ]
-    if not implied:
-        return None
-    fitted = median(implied)
-    if abs(fitted - scale) / scale <= _SCALE_TOLERANCE:
-        return None
-    return (
-        f"The ring widths in this file imply an image {fitted:,.0f} px on its longest side, but the loaded image is "
-        f"{scale:,} px — this may not be the image it was measured on."
-    )
+    return _snap_to_power_of_two(median(implied)) if implied else None
 
 
 def _tw_series(doc: dict) -> dict[int, float] | None:
@@ -182,18 +194,13 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
         return result
 
     width, height = ctx.image_dims
-    scale = max(width, height)
     ppm = doc.get("ppm")
     if _is_number(ppm) and ppm > 0:
         result.dpi = ppm * _MM_PER_INCH
     else:
         result.warnings.append("Missing or invalid ppm: the image scale was not imported.")
 
-    def to_fraction(lat: float, lng: float) -> Point2D:
-        return lng * scale / width, -lat * scale / height
-
-    points: list[Point2D] = []
-    xy_units: list[tuple[float, float]] = []
+    lat_lngs: list[tuple[float, float]] = []
     point_attrs: list[dict] = []
     years: list[int | None] = []
     for i, raw in enumerate(doc["points"]):
@@ -201,16 +208,33 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
         if lat_lng is None:
             result.warnings.append(f"Point {i}: missing or malformed latLng, skipped.")
             continue
-        attrs = _point_attrs(raw, len(points))
-        points.append(to_fraction(*lat_lng))
-        xy_units.append((lat_lng[1], -lat_lng[0]))
+        attrs = _point_attrs(raw, len(lat_lngs))
+        lat_lngs.append(lat_lng)
         point_attrs.append(attrs)
         year = attrs.get(f"{_ATTR_PREFIX}year")
         years.append(year if isinstance(year, int) else None)
 
+    xy_units = [(lng, -lat) for lat, lng in lat_lngs]
+    breaks = break_indices(MeasurementData({}, tuple(point_attrs)), len(lat_lngs))
+    scale = _fit_scale(doc, xy_units, years, breaks)
+    if scale is None:
+        scale = float(_next_power_of_two(max(width, height)))
+        result.warnings.append(
+            f"The file has no ring widths to recover its scale from, so {scale:,.0f} px was assumed."
+        )
+
+    def to_fraction(lat: float, lng: float) -> Point2D:
+        return lng * scale / width, -lat * scale / height
+
+    points = [to_fraction(lat, lng) for lat, lng in lat_lngs]
+
     if points:
         name = _sample_name(doc)
-        attrs = {f"{_ATTR_PREFIX}name": name, f"{_ATTR_PREFIX}extras": json.dumps(_extras(doc))}
+        attrs = {
+            f"{_ATTR_PREFIX}name": name,
+            f"{_ATTR_PREFIX}scale": scale,
+            f"{_ATTR_PREFIX}extras": json.dumps(_extras(doc)),
+        }
         for source, key in (
             ("year", "series_year"), ("forwardDirection", "forward_direction"), ("subAnnual", "sub_annual"),
             ("earlywood", "earlywood"), ("index", "index"),
@@ -223,15 +247,22 @@ def load(doc: dict, ctx: FormatContext, registry: MeasurementKindRegistry) -> De
             title=name, unit=MeasurementUnit.MM, point_label_template=f"{{{_ATTR_PREFIX}year}}"
         )
         result.entries.append((LINE_KIND, tuple(points), meta, MeasurementData(attrs, tuple(point_attrs))))
-
-        breaks = break_indices(MeasurementData({}, tuple(point_attrs)), len(points))
-        mismatch = _fitted_scale_warning(doc, xy_units, years, breaks, scale)
-        if mismatch is not None:
-            result.warnings.append(mismatch)
     else:
         result.warnings.append("The file has no usable points.")
 
     _load_annotations(doc, to_fraction, result)
+
+    outside = sum(
+        1
+        for _, entry_points, _, _ in result.entries
+        for fx, fy in entry_points
+        if not (-_BOUNDS_TOLERANCE <= fx <= 1 + _BOUNDS_TOLERANCE and -_BOUNDS_TOLERANCE <= fy <= 1 + _BOUNDS_TOLERANCE)
+    )
+    if outside:
+        result.warnings.append(
+            f"{outside} point(s) fall outside the loaded {width:,} x {height:,} px image — it may not be the image "
+            "these were measured on, or may be cropped differently (for example without an attached calibration strip)."
+        )
     return result
 
 
@@ -329,7 +360,10 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
         return result
 
     width, height = ctx.image_dims
-    scale = max(width, height)
+    recorded_scale = attrs.get(f"{_ATTR_PREFIX}scale")
+    scale = float(recorded_scale) if _is_number(recorded_scale) and recorded_scale > 0 else float(
+        _next_power_of_two(max(width, height))
+    )
     breaks = break_indices(ring.data, len(ring.points))
 
     points = []
@@ -393,7 +427,7 @@ def save(measurements: list[MeasurementLike], ctx: FormatContext) -> ExportResul
 
 
 def _save_annotations(
-    measurements: list[MeasurementLike], width: int, height: int, scale: int, result: ExportResult
+    measurements: list[MeasurementLike], width: int, height: int, scale: float, result: ExportResult
 ) -> dict:
     annotations: dict = {}
     skipped = 0
