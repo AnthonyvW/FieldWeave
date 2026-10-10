@@ -5,7 +5,9 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
+    QHBoxLayout,
     QGridLayout,
     QLabel,
     QPushButton,
@@ -51,12 +53,13 @@ class ImageAppearance:
         self.sharpness = 0
         self.emboss = 0
         self.edge_detect = 0
+        self.invert = 0
         self.version = 0
         self._tone_lut: np.ndarray | None = None
 
     @property
     def active(self) -> bool:
-        return any(getattr(self, name) != 0 for name, *_ in self.FIELDS)
+        return self.invert != 0 or any(getattr(self, name) != 0 for name, *_ in self.FIELDS)
 
     def set_value(self, name: str, value: int) -> None:
         if getattr(self, name) == value:
@@ -68,6 +71,7 @@ class ImageAppearance:
     def reset(self) -> None:
         for name, *_ in self.FIELDS:
             setattr(self, name, 0)
+        self.invert = 0
         self._tone_lut = None
         self.version += 1
 
@@ -100,7 +104,31 @@ class ImageAppearance:
             edges = cv2.convertScaleAbs(cv2.addWeighted(grad_x, 0.5, grad_y, 0.5, 0), alpha=self._EDGE_GAIN)
             out = self._blend(out, cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB), self.edge_detect)
 
+        if self.invert:
+            out = cv2.bitwise_not(out)
+
         return np.ascontiguousarray(out)
+
+    @staticmethod
+    def auto_levels(arr: np.ndarray) -> tuple[int, int]:
+        """
+        Brightness and contrast slider values that stretch the 1st-99th
+        luma percentiles of *arr* to the full range.
+
+        Inverts the mapping in ``_tone_table``, so applying the returned
+        values reproduces the stretch. Percentiles rather than min/max keep
+        a few hot or dead pixels from defeating it.
+        """
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        low, high = np.percentile(gray[::2, ::2], (1, 99))
+        spread = max(float(high - low), 16.0)
+        gain = 255.0 / spread
+        offset = (128.0 - (low + high) / 2.0) * gain
+        contrast = (gain - 1.0) * 50.0 if gain > 1.0 else (gain - 1.0) * 100.0
+        return (
+            int(round(max(-100.0, min(100.0, offset / 2.55)))),
+            int(round(max(-100.0, min(100.0, contrast)))),
+        )
 
     def apply_pixmap(self, pixmap: QPixmap) -> QPixmap:
         image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
@@ -146,6 +174,7 @@ class AppearanceButton(QPushButton):
 
     appearance_changed = Signal(str, int)
     reset_requested = Signal()
+    auto_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("◐", parent)
@@ -156,6 +185,7 @@ class AppearanceButton(QPushButton):
         self.clicked.connect(self._on_clicked)
 
         self._sliders: dict[str, QSlider] = {}
+        self._invert_check: QCheckBox | None = None
         self._value_labels: dict[str, QLabel] = {}
         self.menu = self._build_menu(parent)
 
@@ -204,11 +234,25 @@ class AppearanceButton(QPushButton):
 
         layout.addLayout(grid)
 
+        self._invert_check = QCheckBox("Invert", menu)
+        self._invert_check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._invert_check.toggled.connect(lambda on: self.appearance_changed.emit("invert", int(on)))
+        layout.addWidget(self._invert_check)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
+        auto = QPushButton("Auto", menu)
+        auto.setObjectName("AppearanceAutoButton")
+        auto.setToolTip("Set brightness and contrast to stretch the current image to the full range.")
+        auto.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        auto.clicked.connect(self.auto_requested)
         reset = QPushButton("Reset", menu)
         reset.setObjectName("AppearanceResetButton")
         reset.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         reset.clicked.connect(self._on_reset_clicked)
-        layout.addWidget(reset)
+        buttons.addWidget(auto)
+        buttons.addWidget(reset)
+        layout.addLayout(buttons)
 
         menu.adjustSize()
         return menu
@@ -225,6 +269,10 @@ class AppearanceButton(QPushButton):
         self._value_labels[name].setText(str(value))
         self.appearance_changed.emit(name, value)
 
+    def set_slider_values(self, **values: int) -> None:
+        for name, value in values.items():
+            self._sliders[name].setValue(value)
+
     def _on_reset_clicked(self) -> None:
         info("Preview: Image appearance reset")
         for slider in self._sliders.values():
@@ -233,4 +281,7 @@ class AppearanceButton(QPushButton):
             slider.blockSignals(False)
         for label in self._value_labels.values():
             label.setText("0")
+        self._invert_check.blockSignals(True)
+        self._invert_check.setChecked(False)
+        self._invert_check.blockSignals(False)
         self.reset_requested.emit()

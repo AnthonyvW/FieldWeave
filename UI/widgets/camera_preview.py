@@ -796,6 +796,7 @@ class CameraPreview(QFrame):
         self._appearance_button.menu.raise_()
         self._appearance_button.appearance_changed.connect(self._on_appearance_changed)
         self._appearance_button.reset_requested.connect(self._on_appearance_reset)
+        self._appearance_button.auto_requested.connect(self._on_appearance_auto)
 
         self._hide_preview_button = EyeToggleButton(self)
         self._hide_preview_button.move(10, 185)
@@ -1122,6 +1123,17 @@ class CameraPreview(QFrame):
     def _on_appearance_reset(self) -> None:
         self._appearance.reset()
         self._refresh_appearance()
+
+    @Slot()
+    def _on_appearance_auto(self) -> None:
+        arr = self._last_scaled_arr
+        if self._loaded_image_overlay.enabled:
+            source = self._loaded_image_overlay.source
+            arr = None if source is None else source.preview
+        if arr is None:
+            return
+        brightness, contrast = self._appearance.auto_levels(np.ascontiguousarray(arr))
+        self._appearance_button.set_slider_values(brightness=brightness, contrast=contrast)
 
     def _refresh_appearance(self) -> None:
         if not self._loaded_image_overlay.enabled and not self._preview_hidden:
