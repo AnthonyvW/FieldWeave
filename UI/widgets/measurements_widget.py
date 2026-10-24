@@ -507,7 +507,7 @@ class MeasurementsWidget(QWidget):
 
         hint = QLabel("Click two points on the preview, enter the real distance between them, then Finish Calibration.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #000000; font-size: 13px;")
+        hint.setObjectName("CalibrationHint")
         tile_row.addWidget(hint, 1)
         layout.addLayout(tile_row)
 

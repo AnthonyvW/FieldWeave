@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QPalette, QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 RIGHT_SIDEBAR_WIDTH = 380
 OUTER_MARGIN = 10
 CAL_LEFT_WIDTH = 260
 
 ZOOM_PREVIEW_VIEWPORT_COLOR = QColor(255, 210, 0)
+
+
+def set_style_property(widget: QWidget, name: str, value: str | bool | None) -> None:
+    widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
 
 def apply_style(app: QApplication) -> None:
     palette = app.palette()
@@ -38,6 +45,9 @@ def apply_style(app: QApplication) -> None:
     header_bar_finished = "#2e9b51" # Green
 
     corner_status_line_color = "#ffffff"
+
+    field_modified_color = "#FFA500" # Orange — setting differs from the camera's value
+    field_controlled_color = "#aaaaaa" # Grey — setting is driven by another control
 
     load_image_button_color = "#f28c28" # Orange — matches header_bar_active / CalStartCapture
     load_image_button_border = "#c97020"
@@ -378,7 +388,7 @@ def apply_style(app: QApplication) -> None:
         QFrame#MachineVisionMenu QCheckBox:disabled {{
             color: #a0a3a6;
         }}
-        QFrame#MachineVisionMenu QCheckBox::indicator:disabled {{
+        QCheckBox::indicator:disabled {{
             border: 1px solid #c8cacc;
             background-color: #e8eaec;
         }}
@@ -467,6 +477,10 @@ def apply_style(app: QApplication) -> None:
             padding: 2px 4px;
             border: 1px solid rgb(180, 180, 180);
             border-radius: 0px;
+        }}
+        QDoubleSpinBox:disabled, QSpinBox:disabled {{
+            color: {field_controlled_color};
+            background-color: #f0f0f0;
         }}
 
         /* Line edits */
@@ -826,6 +840,202 @@ def apply_style(app: QApplication) -> None:
         }}
         QToolButton#AdvancedSettingsToggle:hover {{
             color: #000000;
+        }}
+
+        /* Log tab */
+        QPlainTextEdit#LogDisplay {{
+            background-color: #ffffff;
+            color: #000000;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 10pt;
+            border: 1px solid #cccccc;
+        }}
+
+        /* Settings dialog */
+        QStackedWidget#SettingsPages {{
+            background: white;
+        }}
+        QWidget#CameraSettingsContent, QWidget#NavigationSettingsContent,
+        QWidget#AutomationSettingsContent, QWidget#MachineVisionSettingsContent {{
+            background: white;
+        }}
+        QLabel#SettingsPageTitle {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #5f6368;
+        }}
+        QLabel#SettingsHint {{
+            color: #5f6368;
+            font-size: 11px;
+        }}
+        QLabel#SettingsSubheading {{
+            font-weight: bold;
+            margin-top: 4px;
+        }}
+        QLabel#CameraSettingsMessage {{
+            padding: 20px;
+        }}
+        QLabel#CameraSettingsMessage[kind="info"] {{
+            color: gray;
+        }}
+        QLabel#CameraSettingsMessage[kind="warning"] {{
+            color: orange;
+        }}
+        QLabel#CameraSettingsMessage[kind="error"] {{
+            color: red;
+        }}
+
+        /* Settings fields — modified/controlled highlighting */
+        QLabel[fieldState="modified"], QCheckBox[fieldState="modified"], QComboBox[fieldState="modified"] {{
+            color: {field_modified_color};
+        }}
+        QSlider[fieldState="modified"]::handle:horizontal {{
+            background: {field_modified_color};
+            border: 1px solid {field_modified_color};
+            width: 18px;
+            margin: -2px 0;
+            border-radius: 3px;
+        }}
+        QLabel[fieldState="controlled"] {{
+            color: {field_controlled_color};
+        }}
+
+        /* Muted helper text */
+        QLabel#CaptureMutedLabel {{
+            color: #888;
+            font-size: 11px;
+        }}
+        QLabel#AutofocusStatusLabel {{
+            font-size: 11px;
+            color: #555;
+        }}
+        QLabel#CalibrationHint {{
+            color: #000000;
+            font-size: 13px;
+        }}
+        QLabel#AutomationModeLabel {{
+            font-size: 13px;
+        }}
+        QWidget#AutomationDivider {{
+            background: rgb(210, 210, 210);
+        }}
+
+        /* Motion / camera unavailable overlays */
+        QWidget#UnavailableOverlay {{
+            background: rgba(0, 0, 0, 0);
+        }}
+        QWidget#UnavailableOverlay[blocking="true"] {{
+            background: rgba(0, 0, 0, 100);
+        }}
+        QLabel#UnavailableOverlayLabel {{
+            color: white;
+            font-size: 18px;
+            font-style: italic;
+            background: transparent;
+        }}
+
+        QLabel#RequirementsBanner {{
+            color: #b3261e;
+            background: #fdecea;
+            border: 1px solid #f5c2c0;
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 12px;
+        }}
+
+        /* Histogram RGB legend toggles */
+        QPushButton#HistogramChannelButton {{
+            font-weight: bold;
+            font-size: 11px;
+            border: none;
+            border-radius: 3px;
+            color: #fff;
+        }}
+        QPushButton#HistogramChannelButton:!checked {{
+            color: #666;
+        }}
+        QPushButton#HistogramChannelButton[channel="R"] {{ background: #c03030; }}
+        QPushButton#HistogramChannelButton[channel="G"] {{ background: #228b22; }}
+        QPushButton#HistogramChannelButton[channel="B"] {{ background: #2060c0; }}
+        QPushButton#HistogramChannelButton[channel="R"]:!checked {{ background: #e8b0b0; }}
+        QPushButton#HistogramChannelButton[channel="G"]:!checked {{ background: #a8d8a8; }}
+        QPushButton#HistogramChannelButton[channel="B"]:!checked {{ background: #a0b8e8; }}
+
+        /* Toasts */
+        QFrame#Toast {{
+            border-radius: 0px;
+            padding: 0px;
+        }}
+        QFrame#Toast[toastType="info"]    {{ background-color: #E3F2FD; border: 1px solid #1976D2; }}
+        QFrame#Toast[toastType="success"] {{ background-color: #E8F5E9; border: 1px solid #388E3C; }}
+        QFrame#Toast[toastType="warning"] {{ background-color: #FFF3E0; border: 1px solid #F57C00; }}
+        QFrame#Toast[toastType="error"]   {{ background-color: #FFEBEE; border: 1px solid #D32F2F; }}
+        QWidget#ToastContent, QLabel#ToastTitle, QLabel#ToastMessage {{
+            background: transparent;
+            border: none;
+        }}
+        QLabel#ToastTitle {{
+            font-weight: bold;
+        }}
+        QPushButton#ToastCloseButton {{
+            background: transparent;
+            border: none;
+            font-size: 18px;
+            font-weight: bold;
+            padding: 0px;
+            margin: 0px;
+        }}
+        QProgressBar#ToastProgress {{
+            background-color: rgba(0, 0, 0, 0.1);
+            border: none;
+            border-radius: 0px;
+            margin: 0px;
+        }}
+        QProgressBar#ToastProgress::chunk {{
+            border-radius: 0px;
+        }}
+        QProgressBar#ToastProgress[toastType="info"]::chunk    {{ background-color: #1976D2; }}
+        QProgressBar#ToastProgress[toastType="success"]::chunk {{ background-color: #388E3C; }}
+        QProgressBar#ToastProgress[toastType="warning"]::chunk {{ background-color: #F57C00; }}
+        QProgressBar#ToastProgress[toastType="error"]::chunk   {{ background-color: #D32F2F; }}
+
+        /* Navigation widget */
+        NavigationWidget {{
+            background: white;
+        }}
+        QPushButton#DiamondButton, QPushButton#DiamondButton:hover,
+        QPushButton#DiamondButton:pressed, QPushButton#DiamondButton:disabled {{
+            border: none;
+            background: transparent;
+        }}
+        QLabel#NavigationPositionLabel {{
+            font-size: 13px;
+            padding: 2px;
+        }}
+        QPushButton#StepSizeButton {{
+            padding: 0px;
+        }}
+        QPushButton#StepSizeButton:checked {{
+            background-color: rgb(140, 143, 146);
+            color: white;
+            border: 1px solid rgb(100, 103, 106);
+        }}
+        QPushButton#ZStepButton {{
+            background-color: rgb(208, 211, 214);
+            border: 2px solid rgb(120, 120, 120);
+            border-radius: 4px;
+            font-size: 14px;
+        }}
+        QPushButton#ZStepButton:hover {{
+            background-color: rgb(187, 190, 193);
+        }}
+        QPushButton#ZStepButton:pressed {{
+            background-color: rgb(177, 180, 182);
+        }}
+        QPushButton#ZStepButton:disabled {{
+            background-color: rgb(235, 236, 237);
+            border-color: rgb(190, 190, 190);
+            color: rgb(170, 170, 170);
         }}
 
         """

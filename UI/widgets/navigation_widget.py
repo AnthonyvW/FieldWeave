@@ -14,6 +14,7 @@ from PySide6.QtGui import QPainter, QColor, QPen
 from PySide6.QtCore import Qt, QRectF, QTimer, QEvent
 
 from common.app_context import get_app_context
+from UI.style import set_style_property
 from common.logger import warning
 from motion.motion_controller_manager import MotionState
 from motion.motion_config import AXES, MotionSystemSettings
@@ -65,7 +66,7 @@ class DiamondButton(QPushButton):
     ):
         super().__init__("", parent)
         self.setFixedSize(size, size)
-        self.setStyleSheet("border: none; background: transparent;")
+        self.setObjectName("DiamondButton")
         self.setMouseTracking(True)
 
         # Enable mouse tracking on parent to handle pass-through
@@ -368,13 +369,6 @@ class NavigationWidget(QWidget):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(15)
 
-        # Set white background
-        self.setStyleSheet("""
-            NavigationWidget {
-                background: white;
-            }
-        """)
-
         # Step size controls
         step_size_controls = self._create_step_size_controls()
         main_layout.addWidget(step_size_controls)
@@ -399,20 +393,13 @@ class NavigationWidget(QWidget):
             return  # Not yet placed in a hierarchy — try again on next showEvent
 
         self._overlay = QWidget(overlay_parent)
-        self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+        self._overlay.setObjectName("UnavailableOverlay")
         self._overlay.show()
 
         self._overlay_label = QLabel(
             "Connecting to Motion System...", self._overlay)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._overlay_label.setStyleSheet("""
-            QLabel {
-                color: white;
-                font-size: 18px;
-                font-style: italic;
-                background: transparent;
-            }
-        """)
+        self._overlay_label.setObjectName("UnavailableOverlayLabel")
 
         # Apply whatever state we already decided on
         self._set_motion_available(self._motion_available)
@@ -515,14 +502,14 @@ class NavigationWidget(QWidget):
             # Let mouse events fall through to the buttons beneath
             self._overlay.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+            set_style_property(self._overlay, "blocking", False)
             self._overlay_label.hide()
             self._overlay.lower()
         else:
             # Overlay sits on top and absorbs all input — buttons stay visually unchanged
             self._overlay.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 100);")
+            set_style_property(self._overlay, "blocking", True)
             self._overlay_label.show()
             self._overlay.raise_()
 
@@ -554,12 +541,7 @@ class NavigationWidget(QWidget):
         # Position display
         self.position_label = QLabel()
         self.position_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.position_label.setStyleSheet("""
-            QLabel {
-                font-size: 13px;
-                padding: 2px;
-            }
-        """)
+        self.position_label.setObjectName("NavigationPositionLabel")
         self._update_position_display()
         group_layout.addWidget(self.position_label)
 
@@ -576,16 +558,7 @@ class NavigationWidget(QWidget):
             btn = QPushButton(_format_mm(size_nm))
             btn.setFixedHeight(30)
             btn.setCheckable(True)
-            btn.setStyleSheet("""
-                QPushButton {
-                    padding: 0px;
-                }
-                QPushButton:checked {
-                    background-color: rgb(140, 143, 146);
-                    color: white;
-                    border: 1px solid rgb(100, 103, 106);
-                }
-            """)
+            btn.setObjectName("StepSizeButton")
             btn.clicked.connect(lambda checked, s=size_nm: self._set_step_size_nm(s))
             self._step_buttons_layout.addWidget(btn)
             self.step_buttons.append((btn, size_nm))
@@ -823,50 +796,14 @@ class NavigationWidget(QWidget):
         # Increase button - smaller with border
         self.z_up_btn = QPushButton("▲")
         self.z_up_btn.setFixedSize(55, 55)  # Smaller square
-        self.z_up_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgb(208, 211, 214);
-                border: 2px solid rgb(120, 120, 120);
-                border-radius: 4px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: rgb(187, 190, 193);
-            }
-            QPushButton:pressed {
-                background-color: rgb(177, 180, 182);
-            }
-            QPushButton:disabled {
-                background-color: rgb(235, 236, 237);
-                border-color: rgb(190, 190, 190);
-                color: rgb(170, 170, 170);
-            }
-        """)
+        self.z_up_btn.setObjectName("ZStepButton")
         self.z_up_btn.clicked.connect(self._z_increase)
         layout.addWidget(self.z_up_btn, 0, Qt.AlignmentFlag.AlignCenter)
 
         # Decrease button - smaller with border
         self.z_down_btn = QPushButton("▼")
         self.z_down_btn.setFixedSize(55, 55)  # Smaller square
-        self.z_down_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgb(208, 211, 214);
-                border: 2px solid rgb(120, 120, 120);
-                border-radius: 4px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: rgb(187, 190, 193);
-            }
-            QPushButton:pressed {
-                background-color: rgb(177, 180, 182);
-            }
-            QPushButton:disabled {
-                background-color: rgb(235, 236, 237);
-                border-color: rgb(190, 190, 190);
-                color: rgb(170, 170, 170);
-            }
-        """)
+        self.z_down_btn.setObjectName("ZStepButton")
         self.z_down_btn.clicked.connect(self._z_decrease)
         layout.addWidget(self.z_down_btn, 0, Qt.AlignmentFlag.AlignCenter)
 

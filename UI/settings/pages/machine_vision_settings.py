@@ -53,7 +53,6 @@ from machine_vision.machine_vision_config import (
 from motion.models import Position
 from UI.settings.pages.shared import NM_PER_MM, NoScrollDoubleSpinBox, NoScrollSpinBox, LabelTrackerMixin
 
-_GREY = "#aaaaaa"
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +382,6 @@ class _InspectCalibrationModePanel(LabelTrackerMixin, QWidget):
         def _toggle_downsample(state: Qt.CheckState) -> None:
             enabled = state != Qt.CheckState.Checked
             ds_spin.setEnabled(enabled)
-            ds_spin.setStyleSheet("" if enabled else f"color: {_GREY}; background-color: #f0f0f0;")
 
         ds_none.checkStateChanged.connect(_toggle_downsample)
         _toggle_downsample(Qt.CheckState.Unchecked)
@@ -478,7 +476,7 @@ class _RedMarkPanel(LabelTrackerMixin, QWidget):
         form.addRow(self._register_label("min_area_fraction", QLabel("Min area fraction:")), container)
 
         hsv_label = QLabel("HSV Colour Range")
-        hsv_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
+        hsv_label.setObjectName("SettingsSubheading")
         form.addRow(hsv_label)
 
         hue_low_spin = NoScrollSpinBox()
@@ -521,7 +519,7 @@ class _RedMarkPanel(LabelTrackerMixin, QWidget):
         self._w["val_min"] = val_spin
 
         smooth_label = QLabel("Centroid Smoothing")
-        smooth_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
+        smooth_label.setObjectName("SettingsSubheading")
         form.addRow(smooth_label)
 
         container, _spin, _slider = _make_float_row(
@@ -551,7 +549,7 @@ class _RedMarkPanel(LabelTrackerMixin, QWidget):
         form.addRow(self._register_label("jump_threshold_px", QLabel("Jump threshold (px):")), container)
 
         cluster_label = QLabel("Side Cluster")
-        cluster_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
+        cluster_label.setObjectName("SettingsSubheading")
         form.addRow(cluster_label)
 
         container, _spin, _slider = _make_float_row(
@@ -678,13 +676,12 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
 
         content = QWidget()
         content.setObjectName("MachineVisionSettingsContent")
-        content.setStyleSheet("QWidget#MachineVisionSettingsContent { background: white; }")
         cl = QVBoxLayout(content)
         cl.setContentsMargins(10, 10, 10, 10)
         cl.setSpacing(10)
 
         title = QLabel("Machine Vision")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #5f6368;")
+        title.setObjectName("SettingsPageTitle")
         cl.addWidget(title)
 
         focus_group = self._build_focus_group()
@@ -1262,7 +1259,6 @@ class MachineVisionSettingsWidget(LabelTrackerMixin, QWidget):
             is_none = mode_settings.downsample is None
             w["downsample_none"].setChecked(is_none)
             w["downsample"].setEnabled(not is_none)
-            w["downsample"].setStyleSheet("" if not is_none else f"color: {_GREY}; background-color: #f0f0f0;")
             w["downsample"].setValue(mode_settings.downsample if mode_settings.downsample is not None else 1)
             w["tick_min_length"].setValue(mode_settings.tick_min_length)
 

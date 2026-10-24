@@ -77,7 +77,7 @@ class SettingsDialog(QDialog):
 
         # Pages container - flush with right edge and white background
         self.pages = QStackedWidget()
-        self.pages.setStyleSheet("QStackedWidget { background: white; }")
+        self.pages.setObjectName("SettingsPages")
 
         content_layout.addWidget(self.sidebar)
         content_layout.addWidget(self.pages)

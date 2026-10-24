@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, Slot, QTimer
 from PySide6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush
 from common.logger import info, error, warning, debug
 from common.app_context import get_app_context
+from UI.style import set_style_property
 from common.setting_types import FileFormat
 from common.unique_path import unique_path
 from motion.routines.autofocus.autofocus_routine import Autofocus
@@ -295,19 +296,12 @@ class CameraControlsWidget(QWidget):
             return
 
         self._overlay = QWidget(overlay_parent)
-        self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+        self._overlay.setObjectName("UnavailableOverlay")
         self._overlay.show()
 
         self._overlay_label = QLabel("No Camera Connected", self._overlay)
         self._overlay_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._overlay_label.setStyleSheet("""
-            QLabel {
-                color: white;
-                font-size: 18px;
-                font-style: italic;
-                background: transparent;
-            }
-        """)
+        self._overlay_label.setObjectName("UnavailableOverlayLabel")
 
         self._set_camera_available(self._camera_available)
 
@@ -357,13 +351,13 @@ class CameraControlsWidget(QWidget):
         if available:
             self._overlay.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 0);")
+            set_style_property(self._overlay, "blocking", False)
             self._overlay_label.hide()
             self._overlay.lower()
         else:
             self._overlay.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-            self._overlay.setStyleSheet("background: rgba(0, 0, 0, 100);")
+            set_style_property(self._overlay, "blocking", True)
             self._overlay_label.show()
             self._overlay.raise_()
 
@@ -399,20 +393,13 @@ class CameraControlsWidget(QWidget):
         legend_layout.setContentsMargins(0, 0, 0, 0)
         legend_layout.setSpacing(4)
         self._channel_buttons: list[QPushButton] = []
-        for i, (text, fg, bg_on, bg_off) in enumerate((
-            ("R", "#fff", "#c03030", "#e8b0b0"),
-            ("G", "#fff", "#228b22", "#a8d8a8"),
-            ("B", "#fff", "#2060c0", "#a0b8e8"),
-        )):
+        for i, text in enumerate(("R", "G", "B")):
             btn = QPushButton(text)
             btn.setCheckable(True)
             btn.setChecked(True)
             btn.setFixedSize(24, 20)
-            btn.setStyleSheet(
-                f"QPushButton {{ background: {bg_on}; color: {fg}; font-weight: bold; "
-                f"font-size: 11px; border: none; border-radius: 3px; }}"
-                f"QPushButton:!checked {{ background: {bg_off}; color: #666; }}"
-            )
+            btn.setObjectName("HistogramChannelButton")
+            btn.setProperty("channel", text)
             channel_index = i
             btn.toggled.connect(
                 lambda checked, ch=channel_index: self._histogram_canvas.set_channel_visible(ch, checked)
@@ -433,7 +420,7 @@ class CameraControlsWidget(QWidget):
         """
         # Still overlay label
         self._still_label = QLabel("Still overlay shown after capture")
-        self._still_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._still_label.setObjectName("CaptureMutedLabel")
         self._still_label.hide()
         layout.addWidget(self._still_label)
 
@@ -553,7 +540,7 @@ class CameraControlsWidget(QWidget):
         layout.addLayout(control_layout)
 
         self._af_status_label = QLabel("")
-        self._af_status_label.setStyleSheet("font-size: 11px; color: #555;")
+        self._af_status_label.setObjectName("AutofocusStatusLabel")
         self._af_status_label.setWordWrap(True)
         layout.addWidget(self._af_status_label)
 

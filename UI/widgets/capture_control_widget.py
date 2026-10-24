@@ -434,7 +434,7 @@ class CaptureControlWidget(QWidget):
 
         self._loaded_image_label = QLabel("No image loaded")
         self._loaded_image_label.setWordWrap(True)
-        self._loaded_image_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._loaded_image_label.setObjectName("CaptureMutedLabel")
         self._loaded_image_label.setVisible(False)
         layout.addWidget(self._loaded_image_label)
 

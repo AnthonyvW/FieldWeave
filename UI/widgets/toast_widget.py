@@ -34,13 +34,6 @@ class ToastType(Enum):
 
 
 class Toast(QFrame):
-    COLORS = {
-        ToastType.INFO:    ("#E3F2FD", "#1976D2", "#1976D2"),
-        ToastType.SUCCESS: ("#E8F5E9", "#388E3C", "#388E3C"),
-        ToastType.WARNING: ("#FFF3E0", "#F57C00", "#F57C00"),
-        ToastType.ERROR:   ("#FFEBEE", "#D32F2F", "#D32F2F"),
-    }
-
     TITLES = {
         ToastType.INFO:    "Information",
         ToastType.SUCCESS: "Success",
@@ -76,23 +69,15 @@ class Toast(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setFrameShadow(QFrame.Shadow.Raised)
 
-        bg_color, border_color, progress_color = self.COLORS[self.toast_type]
-
-        self.setStyleSheet(f"""
-            Toast {{
-                background-color: {bg_color};
-                border: 1px solid {border_color};
-                border-radius: 0px;
-                padding: 0px;
-            }}
-        """)
+        self.setObjectName("Toast")
+        self.setProperty("toastType", self.toast_type.value)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         content_widget = QWidget()
-        content_widget.setStyleSheet("background: transparent; border: none;")
+        content_widget.setObjectName("ToastContent")
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(12, 10, 12, 10)
         content_layout.setSpacing(6)
@@ -101,21 +86,12 @@ class Toast(QFrame):
         header_layout.setSpacing(6)
 
         self.title_label = QLabel(self.title)
-        self.title_label.setStyleSheet("background: transparent; border: none; font-weight: bold;")
+        self.title_label.setObjectName("ToastTitle")
         self.title_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         header_layout.addWidget(self.title_label, 1)
 
         self.close_button = QPushButton("×")
-        self.close_button.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-                font-size: 18px;
-                font-weight: bold;
-                padding: 0px;
-                margin: 0px;
-            }
-        """)
+        self.close_button.setObjectName("ToastCloseButton")
         self.close_button.setFixedSize(18, 18)
         self.close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_button.clicked.connect(self.dismiss)
@@ -124,7 +100,7 @@ class Toast(QFrame):
         content_layout.addLayout(header_layout)
 
         self.message_label = QLabel(self.message)
-        self.message_label.setStyleSheet("background: transparent; border: none;")
+        self.message_label.setObjectName("ToastMessage")
         self.message_label.setWordWrap(True)
         self.message_label.setFont(QFont("Segoe UI", 9))
         self.message_label.setMaximumWidth(326)
@@ -137,18 +113,8 @@ class Toast(QFrame):
         self.progress_bar.setValue(100)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(6)
-        self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{
-                background-color: rgba(0, 0, 0, 0.1);
-                border: none;
-                border-radius: 0px;
-                margin: 0px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {progress_color};
-                border-radius: 0px;
-            }}
-        """)
+        self.progress_bar.setObjectName("ToastProgress")
+        self.progress_bar.setProperty("toastType", self.toast_type.value)
         layout.addWidget(self.progress_bar)
 
         self.setFixedWidth(350)

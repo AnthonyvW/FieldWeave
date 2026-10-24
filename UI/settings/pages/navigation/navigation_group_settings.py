@@ -47,7 +47,7 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
             "Four step-size buttons shown in the navigation widget.\n"
             "Values are in millimetres."
         )
-        presets_label.setStyleSheet("color: #5f6368; font-size: 11px;")
+        presets_label.setObjectName("SettingsHint")
         presets_form.addRow(presets_label)
 
         for i in range(1, 5):
@@ -73,7 +73,7 @@ class NavigationGroupSettingsWidget(SettingsGroupBase):
             "Z position to move to automatically after every home sequence.\n"
             "Set to 0 to stay at the homed position."
         )
-        desc.setStyleSheet("color: #5f6368; font-size: 11px;")
+        desc.setObjectName("SettingsHint")
         starting_height_vbox.addWidget(desc)
 
         height_form = QFormLayout()

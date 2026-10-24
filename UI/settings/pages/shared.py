@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QSpinBox, QWidget
 
-ORANGE = "#FFA500"
+from UI.style import set_style_property
+
 NM_PER_MM = 1_000_000
 
 
@@ -38,11 +39,11 @@ class LabelTrackerMixin:
     def mark_label(self, key: str, orange: bool) -> None:
         lbl = self._labels.get(key)
         if lbl:
-            lbl.setStyleSheet(f"color: {ORANGE};" if orange else "")
+            set_style_property(lbl, "fieldState", "modified" if orange else None)
 
     def clear_orange(self) -> None:
         for lbl in self._labels.values():
-            lbl.setStyleSheet("")
+            set_style_property(lbl, "fieldState", None)
 
 
 class SettingsGroupBase(LabelTrackerMixin, QGroupBox):

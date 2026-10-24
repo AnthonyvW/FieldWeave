@@ -58,7 +58,7 @@ class AxesSettingsWidget(SettingsGroupBase):
             "Disabled axes are never moved and their navigation controls are greyed out.\n"
             "Automations and calibrations that need a disabled or unhomed axis are unavailable."
         )
-        desc.setStyleSheet("color: #5f6368; font-size: 11px;")
+        desc.setObjectName("SettingsHint")
         vbox.addWidget(desc)
 
         grid = QGridLayout()
@@ -92,10 +92,6 @@ class AxesSettingsWidget(SettingsGroupBase):
 
         grid.setColumnStretch(4, 1)
         vbox.addLayout(grid)
-        # Matches the machine vision menu so Home boxes of disabled axes read as inactive.
-        self.setStyleSheet(
-            "QCheckBox::indicator:disabled { border: 1px solid #c8cacc; background-color: #e8eaec; }"
-        )
 
         startup = QCheckBox("Home on startup")
         startup.setToolTip(

@@ -80,15 +80,7 @@ class LogsTab(QWidget):
         self._log_display.setMaximumBlockCount(MAX_LOG_LINES)
         self._log_display.setUndoRedoEnabled(False)
         self._log_display.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        self._log_display.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #ffffff;
-                color: #000000;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 10pt;
-                border: 1px solid #cccccc;
-            }
-        """)
+        self._log_display.setObjectName("LogDisplay")
 
         self._clear_btn = QPushButton("Clear Display")
         self._clear_btn.clicked.connect(self._clear_display)

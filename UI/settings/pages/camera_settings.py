@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
 
 from common.app_context import get_app_context
+from UI.style import set_style_property
 from common.logger import info, error, warning, debug
 from common.setting_types import SettingMetadata
 
@@ -77,14 +78,13 @@ class CameraSettingsWidget(QWidget):
         # Content widget inside scroll area with white background
         content = QWidget()
         content.setObjectName("CameraSettingsContent")
-        content.setStyleSheet("QWidget#CameraSettingsContent { background: white; }")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(10, 10, 10, 10)
         content_layout.setSpacing(10)
         
         # Camera title with larger font
         camera_title = QLabel("Camera")
-        camera_title.setStyleSheet("font-size: 24px; font-weight: bold; color: #5f6368;")
+        camera_title.setObjectName("SettingsPageTitle")
         content_layout.addWidget(camera_title)
         
         # Camera selection group
@@ -347,21 +347,24 @@ class CameraSettingsWidget(QWidget):
         """Show message when no camera is available"""
         label = QLabel("No camera selected. Please select a camera from the dropdown above.")
         label.setWordWrap(True)
-        label.setStyleSheet("color: gray; padding: 20px;")
+        label.setObjectName("CameraSettingsMessage")
+        label.setProperty("kind", "info")
         self.settings_layout.addWidget(label)
     
     def _show_camera_not_open_message(self) -> None:
         """Show message when camera is not open"""
         label = QLabel("Camera is not open. Please open the camera first.")
         label.setWordWrap(True)
-        label.setStyleSheet("color: orange; padding: 20px;")
+        label.setObjectName("CameraSettingsMessage")
+        label.setProperty("kind", "warning")
         self.settings_layout.addWidget(label)
     
     def _show_error_message(self, error_msg: str) -> None:
         """Show error message"""
         label = QLabel(f"Error loading settings: {error_msg}")
         label.setWordWrap(True)
-        label.setStyleSheet("color: red; padding: 20px;")
+        label.setObjectName("CameraSettingsMessage")
+        label.setProperty("kind", "error")
         self.settings_layout.addWidget(label)
     
     def _group_settings(self, metadata_list: list[SettingMetadata]) -> dict[str, list[SettingMetadata]]:
@@ -829,7 +832,7 @@ class CameraSettingsWidget(QWidget):
         if controlled:
             # Visually dim the label
             if label:
-                label.setStyleSheet("QLabel { color: #aaaaaa; }")
+                set_style_property(label, "fieldState", "controlled")
             # Disable all interactive child widgets so the user cannot edit
             if control:
                 for child in control.findChildren(QWidget):
@@ -838,7 +841,7 @@ class CameraSettingsWidget(QWidget):
         else:
             # Restore normal appearance and re-enable
             if label:
-                label.setStyleSheet("")
+                set_style_property(label, "fieldState", None)
             if control:
                 control.setEnabled(True)
                 for child in control.findChildren(QWidget):
@@ -1023,31 +1026,19 @@ class CameraSettingsWidget(QWidget):
         if orange:
             # Color the label text
             if label:
-                label.setStyleSheet("QLabel { color: #FFA500; }")
-            
-            # For different widget types, apply orange
-            if isinstance(control, QCheckBox):
-                control.setStyleSheet("QCheckBox { color: #FFA500; }")
-            elif isinstance(control, QComboBox):
-                control.setStyleSheet("QComboBox { color: #FFA500; }")
-            elif isinstance(control, QWidget):
+                set_style_property(label, "fieldState", "modified")
+
+            if isinstance(control, (QCheckBox, QComboBox)):
+                set_style_property(control, "fieldState", "modified")
+            else:
                 for child in control.findChildren(QSlider):
-                    child.setStyleSheet("""
-                        QSlider::handle:horizontal {
-                            background: #FFA500;
-                            border: 1px solid #FFA500;
-                            width: 18px;
-                            margin: -2px 0;
-                            border-radius: 3px;
-                        }
-                    """)
+                    set_style_property(child, "fieldState", "modified")
         else:
-            # Clear styling
             if label:
-                label.setStyleSheet("")
-            control.setStyleSheet("")
+                set_style_property(label, "fieldState", None)
+            set_style_property(control, "fieldState", None)
             for child in control.findChildren(QWidget):
-                child.setStyleSheet("")
+                set_style_property(child, "fieldState", None)
     
     def _clear_all_modifications(self) -> None:
         """Clear all modification markers and update saved values"""

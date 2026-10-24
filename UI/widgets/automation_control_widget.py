@@ -126,7 +126,7 @@ class AutomationWidget(QWidget):
         control_layout.setSpacing(8)
 
         mode_label = QLabel("Mode:")
-        mode_label.setStyleSheet("font-size: 13px;")
+        mode_label.setObjectName("AutomationModeLabel")
         control_layout.addWidget(mode_label)
 
         self._mode_combo = _ArrowComboBox()
@@ -159,7 +159,7 @@ class AutomationWidget(QWidget):
         # Divider line
         divider = QWidget()
         divider.setFixedHeight(1)
-        divider.setStyleSheet("background: rgb(210, 210, 210);")
+        divider.setObjectName("AutomationDivider")
         outer_layout.addWidget(divider)
 
         self._requirements_banner = RequirementsBanner()

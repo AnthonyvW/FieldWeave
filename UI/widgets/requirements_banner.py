@@ -23,10 +23,7 @@ class RequirementsBanner(QLabel):
         self._requirements = requirements
         self._available = True
         self.setWordWrap(True)
-        self.setStyleSheet(
-            "QLabel { color: #b3261e; background: #fdecea; border: 1px solid #f5c2c0;"
-            " border-radius: 4px; padding: 6px 8px; font-size: 12px; }"
-        )
+        self.setObjectName("RequirementsBanner")
         self.hide()
 
         self._timer = QTimer(self)

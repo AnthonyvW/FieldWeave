@@ -76,13 +76,12 @@ class AutomationSettingsWidget(QWidget):
 
         content = QWidget()
         content.setObjectName("AutomationSettingsContent")
-        content.setStyleSheet("QWidget#AutomationSettingsContent { background: white; }")
         cl = QVBoxLayout(content)
         cl.setContentsMargins(10, 10, 10, 10)
         cl.setSpacing(10)
 
         title = QLabel("Automation")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #5f6368;")
+        title.setObjectName("SettingsPageTitle")
         cl.addWidget(title)
 
         self._general = GeneralSettingsWidget()
