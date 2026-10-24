@@ -9,3 +9,5 @@ focusweave==2.0.0
 tifffile==2026.2.20
 pyvips[binary]==3.2.0
 imagecodecs==2026.3.6
+truststore==0.10.4
+certifi==2026.1.4
