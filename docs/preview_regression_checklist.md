@@ -67,6 +67,17 @@ that drive preview interaction mode, before considering that change done.
 - [ ] Re-entering a wizard after finishing it once (via the launch list)
       resets its step to 1 and re-applies step-1 overlay state.
 
+## Image appearance
+- [ ] The left-hand appearance button opens a flyout of sliders (brightness,
+      contrast, saturation, sharpness, emboss, edge detect); dragging any
+      slider updates the live feed immediately without stutter.
+- [ ] Adjustments apply while zoomed in and to a loaded image, and persist
+      across zoom/pan.
+- [ ] Overlays (focus heatmap, red-mark, scale detection, grid, crosshair,
+      measurements) and exported images are unaffected by the sliders.
+- [ ] Double-clicking a slider, or Reset, returns it to neutral and the feed
+      to exactly the unadjusted image.
+
 ## Cross-cutting
 - [ ] Switching tabs while zoomed in a measurement/loaded-image context
       does not leave zoom/pan state corrupted when returning.
