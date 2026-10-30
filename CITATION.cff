@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use FieldWeave in your research, please cite it using the metadata below."
+title: "FieldWeave"
+version: 1.4.2
+type: software
+abstract: >-
+  FieldWeave is an open-source, low cost gigapixel imaging system. It automates sample capture, focus stacking, and DPI calibration.
+authors:
+  - family-names: "van Weel"
+    given-names: "Anthony"
+    orcid: "https://orcid.org/0009-0006-2369-3753"
+    alias: AnthonyvW
+repository-code: "https://github.com/AnthonyvW/FieldWeave"
+url: "https://www.fieldweave.com"
+license: GPL-3.0-only
+keywords:
+  - gigapixel imaging
+  - focus stacking
+  - microscopy
+  - 3D printer
+  - dendrochronology
