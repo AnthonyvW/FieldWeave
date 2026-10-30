@@ -1,2 +1,2 @@
 @echo off
-call "%~dp0update.bat"
+call "%~dp0windows_update.bat"
