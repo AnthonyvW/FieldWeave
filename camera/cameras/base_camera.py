@@ -10,12 +10,28 @@ from typing import Callable, Any
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
+import math
 import numpy as np
 from PIL import Image
 
-from common.logger import info, debug, error, exception
+from common.logger import info, debug, warning, error, exception
 from camera.settings.camera_settings import CameraSettings, CameraSettingsManager
 from camera.cameras import exif_metadata
+
+
+def _drop_unwritable(metadata: dict[str, Any], label: str) -> dict[str, Any]:
+    """Remove None and NaN/inf values, which the EXIF tag writers can't encode
+    and which would otherwise fail the whole image save (e.g. DPI before
+    machine vision calibration has run).
+    """
+    usable = {
+        k: v for k, v in metadata.items()
+        if v is not None and not (isinstance(v, float) and not math.isfinite(v))
+    }
+    dropped = sorted(metadata.keys() - usable.keys())
+    if dropped:
+        warning(f"Omitting unavailable {label} metadata from saved image: {', '.join(dropped)}")
+    return usable
 
 
 @dataclass
@@ -390,7 +406,7 @@ class BaseCamera(ABC):
             filepath = Path(filepath)
             
             # Get camera metadata
-            camera_metadata = self._settings.get_camera_metadata()
+            camera_metadata = _drop_unwritable(self._settings.get_camera_metadata(), "camera")
             
             # Combine with additional metadata
             full_metadata = {
@@ -399,7 +415,7 @@ class BaseCamera(ABC):
             }
             
             if additional_metadata:
-                full_metadata["additional"] = additional_metadata
+                full_metadata["additional"] = _drop_unwritable(additional_metadata, "additional")
             
             # Convert to PIL Image
             if image_data.dtype != np.uint8:
