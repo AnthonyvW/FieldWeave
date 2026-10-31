@@ -7,7 +7,7 @@ from typing import Any
 from common.generic_config import ConfigManager
 from common.logger import info
 
-FIELDWEAVE_VERSION = "1.4.1"
+FIELDWEAVE_VERSION = "1.4.2"
 
 
 @dataclass
