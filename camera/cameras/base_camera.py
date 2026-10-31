@@ -438,7 +438,12 @@ class BaseCamera(ABC):
             return True
             
         except Exception as e:
-            exception(f"Failed to save image to {filepath}")
+            exception(
+                f"Failed to save image to {filepath}: {type(e).__name__}: {e} "
+                f"(shape={getattr(image_data, 'shape', None)}, "
+                f"dtype={getattr(image_data, 'dtype', None)}, "
+                f"parent_exists={Path(filepath).parent.exists()})"
+            )
             return False
         finally:
             # Explicitly close and delete PIL image to free memory
