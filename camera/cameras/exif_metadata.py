@@ -158,6 +158,11 @@ def _apply_resolution_tags(ifd: Any, additional_meta: dict[str, Any]) -> set[str
         return set()
 
     dpi = additional_meta["DPI"]
+    # DPI is None until the machine vision calibration has run (e.g. first run
+    # of a fresh install); IFDRational(None) would raise.
+    if dpi is None:
+        return {"DPI"}
+
     # A plain (num, denom) tuple here gets read by Pillow's TIFF/JPEG writer as
     # two separate rationals instead of one, so it must be an IFDRational.
     ifd[_BASE_EXIF_TAGS["XResolution"]] = IFDRational(dpi)
@@ -320,8 +325,8 @@ def save_png_with_metadata(
     additional_meta = metadata.get("additional", {})
     save_kwargs: dict[str, Any] = {}
 
-    if "DPI" in additional_meta:
-        dpi = additional_meta["DPI"]
+    dpi = additional_meta.get("DPI")
+    if dpi is not None:
         save_kwargs["dpi"] = (dpi, dpi)
 
     for key, value in additional_meta.items():
