@@ -61,6 +61,13 @@ _PRIVATE_CAMERA_TAGS: dict[str, int] = {
 }
 
 
+def _json_default(value: Any) -> Any:
+    # numpy scalars (e.g. positions read back from hardware) aren't JSON serializable.
+    if hasattr(value, "item"):
+        return value.item()
+    return str(value)
+
+
 def _encode_exif_user_comment(text: str) -> bytes:
     return _EXIF_USER_COMMENT_UNICODE_PREFIX + text.encode("utf-16-le")
 
@@ -146,7 +153,7 @@ def _apply_private_camera_tags(ifd: Any, camera_meta: dict[str, Any]) -> set[str
 
     for name, tag_id in _PRIVATE_CAMERA_TAGS.items():
         if name in camera_meta:
-            ifd[tag_id] = json.dumps(camera_meta[name])
+            ifd[tag_id] = json.dumps(camera_meta[name], default=_json_default)
             consumed.add(name)
 
     return consumed
@@ -197,7 +204,7 @@ def _leftover_metadata_json(
     if remaining_additional:
         leftover["additional"] = remaining_additional
 
-    return json.dumps(leftover, indent=2) if leftover else None
+    return json.dumps(leftover, indent=2, default=_json_default) if leftover else None
 
 
 def save_tiff_with_metadata(
@@ -315,7 +322,7 @@ def save_png_with_metadata(
 
     camera_meta = metadata.get("camera", {})
     for key, value in camera_meta.items():
-        pnginfo.add_text(f"Camera.{key}", json.dumps(value) if isinstance(value, (dict, list)) else str(value))
+        pnginfo.add_text(f"Camera.{key}", json.dumps(value, default=_json_default) if isinstance(value, (dict, list)) else str(value))
 
     additional_meta = metadata.get("additional", {})
     save_kwargs: dict[str, Any] = {}
@@ -327,7 +334,7 @@ def save_png_with_metadata(
     for key, value in additional_meta.items():
         if key == "DPI":
             continue
-        pnginfo.add_text(f"Additional.{key}", json.dumps(value) if isinstance(value, (dict, list)) else str(value))
+        pnginfo.add_text(f"Additional.{key}", json.dumps(value, default=_json_default) if isinstance(value, (dict, list)) else str(value))
 
     pil_image.save(filepath, format='PNG', pnginfo=pnginfo, **save_kwargs)
     debug(f"PNG metadata saved to {filepath}")
